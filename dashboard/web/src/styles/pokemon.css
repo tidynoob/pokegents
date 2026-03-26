@@ -1,0 +1,209 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0a0a0f;
+  color: #e4e4e7;
+}
+
+/* ─── Sprite Animation System ─────────────────────────────────── */
+/* Each animation is a one-shot that plays once then the JS reverts to sprite-idle */
+
+/* Default idle: gentle hover */
+@keyframes sprite-idle-kf {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+.sprite-idle {
+  animation: sprite-idle-kf 1.5s ease-in-out infinite;
+}
+
+/* Slow idle: half height, double duration — for done/idle agents */
+@keyframes sprite-idle-slow-kf {
+  0%, 100% { transform: translateY(1px); }
+  50% { transform: translateY(-1px); }
+}
+.sprite-idle-slow {
+  animation: sprite-idle-slow-kf 3s ease-in-out infinite;
+}
+
+/* Hop: quick bounce up */
+@keyframes sprite-hop-kf {
+  0% { transform: translateY(0); }
+  30% { transform: translateY(-8px); }
+  50% { transform: translateY(-8px) scaleY(1.05); }
+  70% { transform: translateY(0); }
+  85% { transform: translateY(-2px); }
+  100% { transform: translateY(0); }
+}
+.sprite-hop {
+  animation: sprite-hop-kf 0.6s ease-out;
+}
+
+/* Jump: bigger hop with squash & stretch */
+@keyframes sprite-jump-kf {
+  0% { transform: translateY(0) scaleX(1) scaleY(1); }
+  15% { transform: translateY(1px) scaleX(1.1) scaleY(0.9); }
+  40% { transform: translateY(-14px) scaleX(0.9) scaleY(1.1); }
+  70% { transform: translateY(0) scaleX(1) scaleY(1); }
+  85% { transform: translateY(-3px); }
+  100% { transform: translateY(0); }
+}
+.sprite-jump {
+  animation: sprite-jump-kf 0.5s ease-out;
+}
+
+/* Bump right: quick lunge to the right */
+@keyframes sprite-bump-right-kf {
+  0% { transform: translateX(0); }
+  30% { transform: translateX(5px) rotate(3deg); }
+  60% { transform: translateX(-1px); }
+  100% { transform: translateX(0) rotate(0deg); }
+}
+.sprite-bump-right {
+  animation: sprite-bump-right-kf 0.5s ease-out;
+}
+
+/* Bump left: quick lunge to the left */
+@keyframes sprite-bump-left-kf {
+  0% { transform: translateX(0); }
+  30% { transform: translateX(-5px) rotate(-3deg); }
+  60% { transform: translateX(1px); }
+  100% { transform: translateX(0) rotate(0deg); }
+}
+.sprite-bump-left {
+  animation: sprite-bump-left-kf 0.5s ease-out;
+}
+
+/* Shake: rapid side-to-side */
+@keyframes sprite-shake-kf {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-3px); }
+  30% { transform: translateX(3px); }
+  45% { transform: translateX(-3px); }
+  60% { transform: translateX(3px); }
+  75% { transform: translateX(-2px); }
+  90% { transform: translateX(1px); }
+}
+.sprite-shake {
+  animation: sprite-shake-kf 0.6s ease-out;
+}
+
+/* Wiggle: gentle rock */
+@keyframes sprite-wiggle-kf {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-4deg); }
+  40% { transform: rotate(4deg); }
+  60% { transform: rotate(-3deg); }
+  80% { transform: rotate(2deg); }
+}
+.sprite-wiggle {
+  animation: sprite-wiggle-kf 0.8s ease-in-out;
+}
+
+/* Nod: subtle dip forward */
+@keyframes sprite-nod-kf {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(2px) rotate(3deg); }
+  60% { transform: translateY(1px) rotate(1deg); }
+}
+.sprite-nod {
+  animation: sprite-nod-kf 0.7s ease-in-out;
+}
+
+/* Blink: quick scale pulse (simulates a blink) */
+@keyframes sprite-blink-kf {
+  0%, 100% { transform: scaleY(1); }
+  40% { transform: scaleY(0.85); }
+  50% { transform: scaleY(0.85); }
+  60% { transform: scaleY(1); }
+}
+.sprite-blink {
+  animation: sprite-blink-kf 0.4s ease-in-out;
+}
+
+/* Lean forward: tilt like looking at something */
+@keyframes sprite-lean-forward-kf {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  20% { transform: translateY(2px) rotate(5deg) translateX(2px); }
+  50% { transform: translateY(2px) rotate(5deg) translateX(2px); }
+  80% { transform: translateY(0) rotate(0deg); }
+}
+.sprite-lean-forward {
+  animation: sprite-lean-forward-kf 0.9s ease-in-out;
+}
+
+/* Doze: slow droop like nodding off */
+@keyframes sprite-doze-kf {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(2px) rotate(2deg); }
+  50% { transform: translateY(3px) rotate(3deg); }
+  70% { transform: translateY(2px) rotate(2deg); }
+}
+.sprite-doze {
+  animation: sprite-doze-kf 1.2s ease-in-out;
+}
+
+/* Sway: very gentle side-to-side like breathing while asleep */
+@keyframes sprite-sway-kf {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(2px); }
+}
+.sprite-sway {
+  animation: sprite-sway-kf 1.5s ease-in-out;
+}
+
+/* Celebrating: gentle continuous bounce (while card is flashing) */
+@keyframes sprite-celebrate-kf {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.sprite-hop-loop {
+  animation: sprite-celebrate-kf 1.2s ease-in-out infinite;
+}
+
+/* Legacy aliases — kept for any stray references */
+.animate-bounce-sprite { }
+.animate-bounce-sprite-done { }
+
+/* Done card pulse — flashes brighter for 1 minute */
+@keyframes card-done-pulse {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+.card-done-flash {
+  animation: card-done-pulse 1.5s ease-in-out infinite;
+  animation-fill-mode: forwards;
+}
+
+/* Reading letter — bounce in and out */
+@keyframes bounce-read {
+  0% { transform: scale(0) rotate(-20deg); opacity: 0; }
+  30% { transform: scale(1.3) rotate(5deg); opacity: 1; }
+  50% { transform: scale(1) rotate(0deg); opacity: 1; }
+  80% { transform: scale(1.1) rotate(-5deg); opacity: 1; }
+  100% { transform: scale(0) rotate(10deg); opacity: 0; }
+}
+.animate-bounce-read {
+  animation: bounce-read 1s ease-in-out forwards;
+}
+
+/* Floating bubble — gentle bob */
+@keyframes bubble-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+.animate-bubble-float {
+  animation: bubble-float 1.2s ease-in-out infinite;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }

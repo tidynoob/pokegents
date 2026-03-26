@@ -1,0 +1,9 @@
+{
+  "title": "My Project",
+  "emoji": "📦",
+  "color": [100, 180, 255],
+  "iterm2_profile": "",
+  "cwd": "~/Projects/my-project",
+  "add_dirs": [],
+  "system_prompt": "You are working on my-project. Focus on code quality and testing."
+}

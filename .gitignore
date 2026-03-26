@@ -1,0 +1,16 @@
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Build artifacts
+dashboard/ccd-dashboard
+dashboard/web/node_modules/
+dashboard/web/dist/
+mcp/node_modules/
+*.db
+
+# Never commit user data (lives in ~/.ccsession/)
+
+dashboard/dashboard

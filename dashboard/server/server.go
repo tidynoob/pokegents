@@ -1,0 +1,820 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Server is the main dashboard HTTP server.
+type Server struct {
+	state    *StateManager
+	eventBus *EventBus
+	notifier *Notifier
+	watcher  *Watcher
+	search   *SearchIndex
+	messages *MessageStore
+	nudger   *Nudger
+	terminal TerminalIntegration
+	mux      *http.ServeMux
+	port     int
+	webDir   string
+}
+
+// Config holds server configuration.
+type Config struct {
+	Port             int
+	CCDData          string
+	ClaudeProjectDir string
+	SearchDBPath     string
+	WebDir           string
+}
+
+// DefaultConfig returns config with sensible defaults, reading port from ~/.ccsession/config.json.
+func DefaultConfig() Config {
+	home, _ := os.UserHomeDir()
+	ccdData := filepath.Join(home, ".ccsession")
+
+	// Read port from config file
+	port := 7834
+	if data, err := os.ReadFile(filepath.Join(ccdData, "config.json")); err == nil {
+		var cfg struct {
+			Port int `json:"port"`
+		}
+		if json.Unmarshal(data, &cfg) == nil && cfg.Port > 0 {
+			port = cfg.Port
+		}
+	}
+
+	return Config{
+		Port:             port,
+		CCDData:          ccdData,
+		ClaudeProjectDir: filepath.Join(home, ".claude", "projects"),
+		SearchDBPath:     filepath.Join(ccdData, "search.db"),
+		WebDir:           "", // set at runtime
+	}
+}
+
+func NewServer(cfg Config) (*Server, error) {
+	state := NewStateManager(cfg.CCDData, cfg.ClaudeProjectDir)
+	eventBus := NewEventBus()
+	notifier := NewNotifier(cfg.WebDir, cfg.CCDData)
+
+	search, err := NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)
+	if err != nil {
+		log.Printf("search index unavailable: %v", err)
+	}
+
+	terminal := NewTerminal()
+
+	s := &Server{
+		state:    state,
+		eventBus: eventBus,
+		notifier: notifier,
+		watcher:  NewWatcher(state, eventBus, notifier),
+		search:   search,
+		messages: NewMessageStore(cfg.CCDData),
+		nudger:   NewNudger(state, terminal),
+		terminal: terminal,
+		mux:      http.NewServeMux(),
+		port:     cfg.Port,
+		webDir:   cfg.WebDir,
+	}
+
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) routes() {
+	// API routes
+	s.mux.HandleFunc("GET /api/sessions", s.handleGetSessions)
+	s.mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/resume", s.handleResumeSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/focus", s.handleFocusSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/rename", s.handleRenameSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/sprite", s.handleSetSprite)
+	s.mux.HandleFunc("POST /api/sessions/{id}/prompt", s.handleSendPrompt)
+	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
+	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
+	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
+	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
+	s.mux.HandleFunc("GET /api/events", s.eventBus.ServeSSE)
+	s.mux.HandleFunc("POST /api/events", s.handlePostEvent)
+	s.mux.HandleFunc("GET /api/search", s.handleSearch)
+	s.mux.HandleFunc("GET /api/search/recent", s.handleSearchRecent)
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.mux.HandleFunc("POST /api/messages", s.handleSendMessage)
+	s.mux.HandleFunc("GET /api/messages", s.handleGetMessages)
+	s.mux.HandleFunc("GET /api/messages/connections", s.handleGetConnections)
+	s.mux.HandleFunc("GET /api/messages/pending/{id}", s.handleGetPending)
+	s.mux.HandleFunc("POST /api/messages/deliver/{id}", s.handleDeliverPending)
+	s.mux.HandleFunc("POST /api/messages/consume/{id}", s.handleConsumePending)
+	s.mux.HandleFunc("GET /api/activity", s.handleGetActivity)
+
+	// Serve frontend static files
+	if s.webDir != "" {
+		fs := http.FileServer(http.Dir(s.webDir))
+		s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			path := filepath.Join(s.webDir, r.URL.Path)
+			isAsset := strings.HasPrefix(r.URL.Path, "/assets/")
+			servingIndex := false
+
+			// SPA fallback: serve index.html for unknown paths
+			if _, err := os.Stat(path); os.IsNotExist(err) && r.URL.Path != "/" {
+				servingIndex = true
+			}
+			if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+				servingIndex = true
+			}
+
+			if servingIndex {
+				// Never cache index.html — ensures new JS/CSS hashes are picked up
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+				http.ServeFile(w, r, filepath.Join(s.webDir, "index.html"))
+				return
+			}
+			if isAsset {
+				// Short cache for dev — allows quick iteration without hard refresh
+				w.Header().Set("Cache-Control", "public, max-age=10")
+			}
+			fs.ServeHTTP(w, r)
+		})
+	}
+}
+
+// Start initializes state, starts watcher and search, and listens on the port.
+func (s *Server) Start() error {
+	// Load initial state
+	if err := s.state.LoadAll(); err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+	log.Printf("loaded %d profiles, %d agents", len(s.state.GetProfiles()), len(s.state.GetAgents()))
+
+	// Start file watcher
+	if err := s.watcher.Start(); err != nil {
+		log.Printf("watcher failed to start: %v", err)
+	}
+
+	// Start search indexer
+	if s.search != nil {
+		s.search.StartBackgroundIndexer(5 * time.Minute)
+	}
+
+	// Start transcript poller for live trace updates
+	s.startTracePoller()
+
+	addr := fmt.Sprintf(":%d", s.port)
+	log.Printf("dashboard server listening on http://localhost%s", addr)
+	return http.ListenAndServe(addr, s.corsMiddleware(s.mux))
+}
+
+// startTracePoller polls transcript files every 2 seconds for busy agents
+// to get live thinking/output traces (hooks only fire on tool events, not mid-generation).
+func (s *Server) startTracePoller() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// Clean up stale running files and reconcile mismatched session IDs
+			if s.state.CleanStale() || s.state.ReconcileRunningFiles() {
+				s.eventBus.Publish("state_update", s.state.GetAgents())
+			}
+
+			agents := s.state.GetAgents()
+			changed := false
+			for _, a := range agents {
+				transcriptPath := s.state.FindTranscriptPath(a.SessionID)
+				if transcriptPath == "" {
+					continue
+				}
+				// Backfill missing user prompt
+				if a.UserPrompt == "" {
+					prompt := extractLastUserPrompt(transcriptPath)
+					if prompt != "" {
+						s.state.UpdateUserPrompt(a.SessionID, prompt)
+						changed = true
+					}
+				}
+				// Backfill missing last summary (e.g. after cold start / session resume)
+				if a.LastSummary == "" && a.LastTrace == "" {
+					summary := extractLastAssistantMessage(transcriptPath)
+					if summary != "" {
+						s.state.UpdateSummary(a.SessionID, summary)
+						changed = true
+					}
+				}
+				// Update context usage — detect compaction (tokens decrease)
+				ctx := extractContextUsage(transcriptPath)
+				if ctx.Tokens > 0 && ctx.Tokens != a.ContextTokens {
+					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && (a.State == "done" || a.State == "idle") {
+						// Context shrunk on a done agent — compaction detected
+						s.state.UpdateSummary(a.SessionID, "Compacted")
+					}
+					s.state.UpdateContext(a.SessionID, ctx.Tokens, ctx.Window)
+					changed = true
+				}
+				// Update trace and activity feed for busy agents
+				if a.State == "busy" && len(a.RecentActions) > 0 {
+					trace := extractTraceFromTranscript(transcriptPath)
+					if trace != "" && trace != a.LastTrace {
+						s.state.UpdateTrace(a.SessionID, trace)
+						changed = true
+					}
+					feed := extractActivityFeed(transcriptPath)
+					if len(feed) > 0 {
+						s.state.UpdateActivityFeed(a.SessionID, feed)
+						changed = true
+					}
+				}
+			}
+			if changed {
+				s.eventBus.Publish("state_update", s.state.GetAgents())
+			}
+		}
+	}()
+}
+
+// Stop shuts down all background workers.
+func (s *Server) Stop() {
+	s.watcher.Stop()
+	if s.search != nil {
+		s.search.Close()
+	}
+}
+
+// --- middleware ---
+
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// --- handlers ---
+
+func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
+	agents := s.state.GetAgents()
+	writeJSON(w, agents)
+}
+
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	agent := s.state.GetAgent(id)
+	if agent == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, agent)
+}
+
+func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
+	profiles := s.state.GetProfiles()
+	writeJSON(w, profiles)
+}
+
+func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB max
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var evt HookEvent
+	if err := json.Unmarshal(body, &evt); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	agent := s.state.UpdateFromEvent(evt)
+
+	// Broadcast full state to SSE clients (single source of truth)
+	agents := s.state.GetAgents()
+	s.eventBus.Publish("state_update", agents)
+
+	// Maybe send macOS notification
+	s.notifier.MaybeNotify(evt, agent)
+
+	// When an agent transitions to done/idle, nudge if pending messages exist
+	if agent != nil && (agent.State == "done" || agent.State == "idle") {
+		if pending := s.messages.GetPending(evt.SessionID); len(pending) > 0 {
+			s.nudger.Queue(evt.SessionID)
+		}
+	}
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if s.search == nil {
+		http.Error(w, "search unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		http.Error(w, "missing q parameter", http.StatusBadRequest)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	results, total, err := s.search.Search(q, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.enrichDisplayNames(results)
+	writeJSON(w, SearchResponse{Results: results, Total: total})
+}
+
+func (s *Server) handleSearchRecent(w http.ResponseWriter, r *http.Request) {
+	if s.search == nil {
+		http.Error(w, "search unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	results, err := s.search.RecentSessions(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.enrichDisplayNames(results)
+	writeJSON(w, results)
+}
+
+// enrichDisplayNames overrides custom_title with the display name from
+// running files. This ensures the resume/search UI shows dashboard names
+// ("Dash (Refactor)") rather than the original Claude --name values
+// ("Personal (clone)").
+func (s *Server) enrichDisplayNames(results []SearchResult) {
+	agents := s.state.GetAgents()
+	names := make(map[string]string, len(agents))
+	for _, a := range agents {
+		if a.DisplayName != "" {
+			names[a.SessionID] = a.DisplayName
+		}
+	}
+	for i := range results {
+		if name, ok := names[results[i].SessionID]; ok {
+			results[i].CustomTitle = name
+		}
+	}
+}
+
+func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+
+	// Find profile for this session
+	agent := s.state.GetAgent(sessionID)
+	profileName := ""
+	if agent != nil {
+		profileName = agent.ProfileName
+	}
+
+	if profileName == "" {
+		// Try to find from search index
+		if s.search != nil {
+			profileName = s.search.GetProfileName(sessionID)
+		}
+	}
+
+	if profileName == "" {
+		http.Error(w, "cannot determine profile for session", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.terminal.ResumeSession(profileName, sessionID); err != nil {
+		http.Error(w, fmt.Sprintf("failed to open iTerm2: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleFocusSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	if agent.TTY == "" {
+		http.Error(w, "no TTY for this agent", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.terminal.FocusSession(agent.ITermSessionID, agent.TTY); err != nil {
+		http.Error(w, fmt.Sprintf("failed to focus: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, "missing name", http.StatusBadRequest)
+		return
+	}
+
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	// Update the running file
+	s.state.RenameAgent(sessionID, body.Name)
+
+	// Update iTerm2 tab title — fire and forget
+	if agent.ITermSessionID != "" || agent.TTY != "" {
+		go s.terminal.SetTabName(agent.ITermSessionID, agent.TTY, body.Name)
+	}
+
+	// Persist name to the JSONL transcript so it shows correctly in the
+	// "Previous sessions" resume page even after the session ends
+	go s.persistCustomTitle(sessionID, body.Name)
+
+	// Broadcast updated state
+	agents := s.state.GetAgents()
+	s.eventBus.Publish("state_update", agents)
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// persistCustomTitle appends a custom-title entry to the session's JSONL
+// transcript and updates the search index.
+func (s *Server) persistCustomTitle(sessionID, name string) {
+	path := s.state.FindTranscriptPath(sessionID)
+	if path == "" {
+		return
+	}
+	entry := map[string]string{"type": "custom-title", "customTitle": name}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	f.Write(append(data, '\n'))
+	f.Close()
+
+	// Update search index
+	if s.search != nil {
+		s.search.UpdateCustomTitle(sessionID, name)
+	}
+}
+
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From    string `json:"from"`
+		To      string `json:"to"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Content == "" {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve names
+	fromName := body.From
+	toName := body.To
+	if a := s.state.GetAgent(body.From); a != nil {
+		fromName = a.DisplayName
+		if fromName == "" {
+			fromName = a.ProfileName
+		}
+	}
+	if a := s.state.GetAgent(body.To); a != nil {
+		toName = a.DisplayName
+		if toName == "" {
+			toName = a.ProfileName
+		}
+	}
+
+	msg, err := s.messages.Send(body.From, fromName, body.To, toName, body.Content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast the new message + connection update
+	s.eventBus.Publish("new_message", msg)
+	s.eventBus.Publish("connections_update", s.messages.GetConnections())
+
+	// Queue a nudge for the recipient — the nudger handles timing, debouncing,
+	// and state checks so we never interrupt busy agents or erase user text
+	s.nudger.Queue(body.To)
+
+	writeJSON(w, msg)
+}
+
+func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	// Collect activity from all project logs
+	activityDir := filepath.Join(s.state.ccdData, "activity")
+	entries, err := os.ReadDir(activityDir)
+	if err != nil {
+		writeJSON(w, []any{})
+		return
+	}
+
+	type ActivityEntry struct {
+		Timestamp string `json:"timestamp"`
+		SessionID string `json:"session_id"`
+		AgentName string `json:"agent_name"`
+		Files     string `json:"files"`
+		Summary   string `json:"summary"`
+		Raw       string `json:"raw"`
+	}
+
+	var all []ActivityEntry
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(activityDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if line == "" {
+				continue
+			}
+			// Parse: [TIMESTAMP] [SESSION_ID] [AGENT_NAME] FILES — SUMMARY
+			entry := ActivityEntry{Raw: line}
+			rest := line
+			if strings.HasPrefix(rest, "[") {
+				if idx := strings.Index(rest, "] "); idx > 0 {
+					entry.Timestamp = rest[1:idx]
+					rest = rest[idx+2:]
+				}
+			}
+			if strings.HasPrefix(rest, "[") {
+				if idx := strings.Index(rest, "] "); idx > 0 {
+					entry.SessionID = rest[1:idx]
+					rest = rest[idx+2:]
+				}
+			}
+			if strings.HasPrefix(rest, "[") {
+				if idx := strings.Index(rest, "] "); idx > 0 {
+					entry.AgentName = rest[1:idx]
+					rest = rest[idx+2:]
+				}
+			}
+			if dashIdx := strings.Index(rest, " — "); dashIdx >= 0 {
+				entry.Files = strings.TrimSpace(rest[:dashIdx])
+				entry.Summary = rest[dashIdx+len(" — "):]
+			} else {
+				entry.Files = strings.TrimSpace(rest)
+			}
+			// Skip entries with no actual file paths
+			if entry.Files == "" || strings.HasPrefix(entry.Files, "—") {
+				continue
+			}
+			all = append(all, entry)
+		}
+	}
+
+	// Return last N entries
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	writeJSON(w, all)
+}
+
+func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.messages.GetHistory())
+}
+
+func (s *Server) handleGetConnections(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.messages.GetConnections())
+}
+
+func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	messages := s.messages.GetPending(sessionID)
+	writeJSON(w, messages)
+}
+
+func (s *Server) handleDeliverPending(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	messages := s.messages.DeliverPending(sessionID)
+	writeJSON(w, messages)
+}
+
+func (s *Server) handleConsumePending(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	messages := s.messages.ConsumePending(sessionID)
+	writeJSON(w, messages)
+}
+
+// resolveSessionID maps a CCD session ID (or prefix) to the Claude session ID.
+// Messages are stored under Claude session IDs, but agents may only know their CCD session ID.
+func (s *Server) resolveSessionID(id string) string {
+	// First check if it directly matches a known agent's session_id
+	agents := s.state.GetAgents()
+	for _, a := range agents {
+		if a.SessionID == id || strings.HasPrefix(a.SessionID, id) {
+			return a.SessionID
+		}
+	}
+	// Try matching against ccd_session_id
+	for _, a := range agents {
+		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID &&
+			(a.CCDSessionID == id || strings.HasPrefix(a.CCDSessionID, id)) {
+			return a.SessionID
+		}
+	}
+	// Last resort: scan running files for ccd_session_id field
+	// (covers cases where the in-memory state lost the mapping)
+	runningDir := filepath.Join(s.state.ccdData, "running")
+	entries, err := os.ReadDir(runningDir)
+	if err == nil {
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(runningDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var rf struct {
+				SessionID    string `json:"session_id"`
+				CCDSessionID string `json:"ccd_session_id"`
+			}
+			if json.Unmarshal(data, &rf) == nil && rf.CCDSessionID != "" {
+				if rf.CCDSessionID == id || strings.HasPrefix(rf.CCDSessionID, id) {
+					return rf.SessionID
+				}
+			}
+		}
+	}
+	// Final fallback: check if a mailbox directory starts with the prefix
+	msgDir := filepath.Join(s.state.ccdData, "messages")
+	msgEntries, err := os.ReadDir(msgDir)
+	if err == nil {
+		for _, e := range msgEntries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), id) {
+				return e.Name()
+			}
+		}
+	}
+	return id
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{
+		"status": "ok",
+		"agents": len(s.state.GetAgents()),
+	})
+}
+
+func (s *Server) handleSendPrompt(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var body struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Prompt == "" {
+		http.Error(w, "missing prompt", http.StatusBadRequest)
+		return
+	}
+
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil || agent.TTY == "" {
+		http.Error(w, "agent not found or no TTY", http.StatusBadRequest)
+		return
+	}
+
+	go s.terminal.WriteText(agent.ITermSessionID, agent.TTY, body.Prompt)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleCheckMessages(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil || agent.TTY == "" {
+		http.Error(w, "agent not found or no TTY", http.StatusBadRequest)
+		return
+	}
+
+	go s.terminal.WriteText(agent.ITermSessionID, agent.TTY, "check messages")
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil || agent.TTY == "" {
+		http.Error(w, "agent not found or no TTY", http.StatusBadRequest)
+		return
+	}
+
+	// Send /exit to gracefully shut down the Claude session, then close the tab
+	itermSID := agent.ITermSessionID
+	tty := agent.TTY
+	go func() {
+		s.terminal.WriteText(itermSID, tty, "/exit")
+		// Wait for Claude to exit, then close the iTerm tab
+		time.Sleep(2 * time.Second)
+		s.terminal.CloseSession(itermSID, tty)
+	}()
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	profileName := agent.ProfileName
+	if profileName == "" {
+		http.Error(w, "cannot determine profile", http.StatusBadRequest)
+		return
+	}
+
+	// Open a new iTerm2 tab and launch a forked clone via ccd
+	if err := s.terminal.CloneSession(profileName, sessionID[:8]); err != nil {
+		http.Error(w, fmt.Sprintf("failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) spriteOverridesPath() string {
+	return filepath.Join(s.state.ccdData, "sprite-overrides.json")
+}
+
+func (s *Server) loadSpriteOverrides() map[string]string {
+	data, err := os.ReadFile(s.spriteOverridesPath())
+	if err != nil {
+		return map[string]string{}
+	}
+	var m map[string]string
+	if json.Unmarshal(data, &m) != nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var body struct {
+		Sprite string `json:"sprite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Sprite == "" {
+		http.Error(w, "missing sprite", http.StatusBadRequest)
+		return
+	}
+
+	overrides := s.loadSpriteOverrides()
+	overrides[sessionID] = body.Sprite
+	data, _ := json.Marshal(overrides)
+	os.WriteFile(s.spriteOverridesPath(), data, 0644)
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleGetSpriteOverrides(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.loadSpriteOverrides())
+}
+
+func writeJSON(w http.ResponseWriter, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}

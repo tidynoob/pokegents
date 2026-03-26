@@ -1,0 +1,7 @@
+{
+  "port": 7834,
+  "default_profile": "personal",
+  "skip_permissions": false,
+  "iterm2_restore_profile": "Default",
+  "dashboard_open_browser": true
+}
