@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"pokegents/dashboard/server/services"
 	"pokegents/dashboard/server/store"
 )
 
@@ -21,10 +22,13 @@ type Server struct {
 	eventBus *EventBus
 	notifier *Notifier
 	watcher  *Watcher
-	search   *SearchIndex
-	messages *MessageStore
-	nudger   *Nudger
+	search   *SearchIndex        // legacy — kept for Phase 4 removal
+	messages *MessageStore       // legacy — kept for Phase 4 removal
+	nudger   *Nudger             // legacy — kept for Phase 4 removal
+	msgSvc   *services.MessagingService
+	searchSvc *services.SearchService
 	terminal TerminalIntegration
+	fileStore *store.Store
 	mux      *http.ServeMux
 	port     int
 	webDir   string
@@ -69,26 +73,46 @@ func NewServer(cfg Config) (*Server, error) {
 	state := NewStateManagerWithStore(fileStore, cfg.DataDir, cfg.ClaudeProjectDir)
 	eventBus := NewEventBus()
 	notifier := NewNotifier(cfg.WebDir, cfg.DataDir)
+	terminal := NewTerminal()
 
+	// Legacy search index (still used directly by some handlers)
 	search, err := NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)
 	if err != nil {
 		log.Printf("search index unavailable: %v", err)
 	}
 
-	terminal := NewTerminal()
+	// New services
+	msgSvc := services.NewMessagingService(
+		fileStore.Messages,
+		terminal.WriteText,
+		func(id string) *services.AgentInfo {
+			a := state.GetAgent(id)
+			if a == nil {
+				return nil
+			}
+			return &services.AgentInfo{
+				State: a.State, IsAlive: a.IsAlive,
+				LastUpdated: a.LastUpdated, TTY: a.TTY,
+				ITermSessionID: a.ITermSessionID,
+			}
+		},
+	)
 
 	s := &Server{
-		state:    state,
-		eventBus: eventBus,
-		notifier: notifier,
-		watcher:  NewWatcher(state, eventBus, notifier),
-		search:   search,
-		messages: NewMessageStore(cfg.DataDir),
-		nudger:   NewNudger(state, terminal),
-		terminal: terminal,
-		mux:      http.NewServeMux(),
-		port:     cfg.Port,
-		webDir:   cfg.WebDir,
+		state:     state,
+		eventBus:  eventBus,
+		notifier:  notifier,
+		watcher:   NewWatcher(state, eventBus, notifier),
+		search:    search,
+		messages:  NewMessageStore(cfg.DataDir),
+		nudger:    NewNudger(state, terminal),
+		msgSvc:    msgSvc,
+		searchSvc: nil, // TODO: wire SearchService in Phase 4
+		terminal:  terminal,
+		fileStore: fileStore,
+		mux:       http.NewServeMux(),
+		port:      cfg.Port,
+		webDir:    cfg.WebDir,
 	}
 
 	s.routes()
