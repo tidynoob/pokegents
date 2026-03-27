@@ -98,6 +98,7 @@ interface AgentCardProps {
   isReading?: boolean
   hideSprite?: boolean
   mutedCtx?: boolean
+  onCollapse?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
 }
 
@@ -112,7 +113,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, mutedCtx, cardRef }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, mutedCtx, onCollapse, cardRef }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'max' || mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -197,6 +198,19 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             className="card-done-flash absolute inset-0 rounded-xl pointer-events-none group-hover:hidden"
             style={{ background: `rgba(${r}, ${g}, ${b}, 0.08)` }}
           />
+        )}
+
+        {/* Minimize button — red circle in top-right corner, visible only when hovering that corner */}
+        {onCollapse && (
+          <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
+            <button
+              onClick={(e) => { e.stopPropagation(); onCollapse() }}
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-red-500/70 hover:bg-red-400 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white/90 leading-none"
+              title="Collapse"
+            >
+              −
+            </button>
+          </div>
         )}
 
         {/* Header: icon + name + status */}
@@ -293,6 +307,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           onClose={() => setMenuOpen(false)}
           onRename={() => { setMenuOpen(false); setEditValue(title); setEditing(true) }}
           onChangeSprite={() => { setMenuOpen(false); setShowSpritePicker(true) }}
+          onCollapse={onCollapse}
         />,
         document.body
       )}
@@ -368,13 +383,14 @@ function ActivityBox({ agent, isBusy, isDone, isError, effectiveIdle, outputText
   )
 }
 
-function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite }: {
+function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse }: {
   x: number
   y: number
   agent: AgentState
   onClose: () => void
   onRename: () => void
   onChangeSprite: () => void
+  onCollapse?: () => void
 }) {
   useEffect(() => {
     const keyHandler = (e: KeyboardEvent) => {
@@ -398,6 +414,7 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite }: {
     { label: 'Rename', icon: '✏️', action: onRename },
     { label: 'Change pokemon', icon: '🔄', action: onChangeSprite },
     { label: 'Spawn clone', icon: '🧬', action: () => { spawnClone(agent.session_id); onClose() } },
+    ...(onCollapse ? [{ label: 'Collapse', icon: '📌', action: () => { onCollapse(); onClose() } }] : []),
   ]
 
   return (

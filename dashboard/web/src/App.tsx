@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridLayout } from './hooks/useLayout'
-import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, ActivityEntry } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, launchProfile, ActivityEntry, ProfileInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard } from './components/AgentCard'
 import { SessionBrowser } from './components/SessionBrowser'
@@ -18,20 +18,39 @@ export default function App() {
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [bottomTab, setBottomTab] = useState<'messages' | 'activity'>('messages')
+  const [bottomOpen, setBottomOpen] = useState(false)
   const [mutedCtx, setMutedCtx] = useState(true)
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
+  const collapsedInitialized = useRef(false)
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([])
+  const [showLauncher, setShowLauncher] = useState(false)
+  const launcherRef = useRef<HTMLDivElement>(null)
+
+  // Restore from localStorage AFTER first agents load (so we know which IDs are valid)
+  useEffect(() => {
+    if (collapsedInitialized.current || agents.length === 0) return
+    collapsedInitialized.current = true
+    try {
+      const saved: string[] = JSON.parse(localStorage.getItem('ccd-collapsed') || '[]')
+      const validIds = new Set(agents.map(a => a.session_id))
+      const restored = saved.filter(id => validIds.has(id))
+      if (restored.length > 0) {
+        setCollapsedIds(new Set(restored))
+      }
+    } catch { /* ignore */ }
+  }, [agents])
+
+  // Persist collapsed state (skip the initial empty set)
+  useEffect(() => {
+    if (!collapsedInitialized.current) return
+    localStorage.setItem('ccd-collapsed', JSON.stringify([...collapsedIds]))
+  }, [collapsedIds])
   const msgLogRef = useRef<HTMLDivElement>(null)
   const actLogRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, spriteOverrides)
-  const { profileCount, agentsPerProfile } = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const a of agents) {
-      counts[a.profile_name || 'other'] = (counts[a.profile_name || 'other'] || 0) + 1
-    }
-    return { profileCount: Object.keys(counts).length, agentsPerProfile: Object.values(counts) }
-  }, [agents])
-  const { cols, mode } = useGridLayout(agents.length, profileCount, agentsPerProfile)
-  const showHeader = mode === 'max' || mode === 'standard' || mode === 'standard-short'
+  // Layout computed after visibleAgents (below)
+  // showHeader computed after layout (below)
 
   useEffect(() => {
     fetchSessions().then(setAgents).catch(() => {})
@@ -39,6 +58,7 @@ export default function App() {
     fetchSpriteOverrides().then(setSpriteOverrides).catch(() => {})
     fetchMessageHistory().then(setMessages).catch(() => {})
     fetchActivity().then(setActivity).catch(() => {})
+    fetchProfiles().then(p => setProfiles(p.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
     // Poll messages + activity every 5s
     const interval = setInterval(() => {
       fetchMessageHistory().then(msgs => {
@@ -75,10 +95,24 @@ export default function App() {
     [agents]
   )
 
+  // Split into collapsed (shown as bubbles) and visible (shown as cards)
+  const collapsedAgents = useMemo(() => sorted.filter(a => collapsedIds.has(a.session_id)), [sorted, collapsedIds])
+  const visibleAgents = useMemo(() => sorted.filter(a => !collapsedIds.has(a.session_id)), [sorted, collapsedIds])
+
+  const { profileCount, agentsPerProfile } = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const a of visibleAgents) {
+      counts[a.profile_name || 'other'] = (counts[a.profile_name || 'other'] || 0) + 1
+    }
+    return { profileCount: Object.keys(counts).length, agentsPerProfile: Object.values(counts) }
+  }, [visibleAgents])
+  const { cols, mode } = useGridLayout(visibleAgents.length, profileCount, agentsPerProfile)
+  const showHeader = mode === 'max' || mode === 'standard' || mode === 'standard-short'
+
   // Group by profile for non-compact mode
   const grouped = useMemo(() => {
     const groups: Record<string, AgentState[]> = {}
-    for (const a of sorted) {
+    for (const a of visibleAgents) {
       const key = a.profile_name || 'other'
       if (!groups[key]) groups[key] = []
       groups[key].push(a)
@@ -132,6 +166,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [showBrowser])
 
+  // Close launcher dropdown on click outside
+  useEffect(() => {
+    if (!showLauncher) return
+    const handler = (e: MouseEvent) => {
+      if (launcherRef.current && !launcherRef.current.contains(e.target as Node)) {
+        setShowLauncher(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showLauncher])
+
   return (
     <div className="h-screen flex flex-col p-3 overflow-hidden">
       {/* Header — hidden in compact mode */}
@@ -143,6 +189,28 @@ export default function App() {
               {agents.length} active
               <span className={`ml-1.5 ${connected ? 'text-accent-green' : 'text-accent-red'}`}>●</span>
             </span>
+            <div className="relative" ref={launcherRef}>
+              <button
+                onClick={() => setShowLauncher(v => !v)}
+                className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-1 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
+              >
+                + New
+              </button>
+              {showLauncher && (
+                <div className="absolute top-full left-0 mt-1 bg-surface-1 border border-zinc-800 rounded-lg shadow-xl z-50 py-1 min-w-[160px]">
+                  {profiles.map(p => (
+                    <button
+                      key={p.name}
+                      onClick={() => { launchProfile(p.name); setShowLauncher(false) }}
+                      className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-surface-2 hover:text-zinc-100 transition-colors flex items-center gap-2"
+                    >
+                      <span>{p.emoji}</span>
+                      <span>{p.title}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -168,6 +236,30 @@ export default function App() {
               Previous sessions <kbd className="ml-1 text-zinc-600">/</kbd>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Collapsed agent bubbles */}
+      {collapsedAgents.length > 0 && (
+        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+          {collapsedAgents.map(agent => {
+            const sprite = spriteOverrides[agent.session_id] || POKEMON_SPRITES[hashString(agent.session_id) % POKEMON_SPRITES.length]
+            const statusColor = agent.state === 'busy' ? 'border-amber-500/50' : agent.state === 'done' ? 'border-emerald-500/50' : agent.state === 'error' ? 'border-orange-500/50' : agent.state === 'needs_input' ? 'border-red-500/50' : 'border-zinc-700'
+            return (
+              <button
+                key={agent.session_id}
+                onClick={() => setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })}
+                className={`relative flex items-center gap-1.5 bg-zinc-900 hover:bg-zinc-800 rounded-full pl-1 pr-2.5 py-1 border ${statusColor} transition-colors group`}
+                title={`${agent.display_name} — ${agent.state}\nClick to expand`}
+              >
+                <div className="w-5 h-5 flex items-center justify-center overflow-visible">
+                  <img src={`/sprites/${sprite}.png`} alt="" style={{ imageRendering: 'pixelated', transform: 'scale(0.8)' }} />
+                </div>
+                <span className="text-[9px] text-zinc-400 group-hover:text-zinc-200 max-w-[80px] truncate">{agent.display_name}</span>
+                {agent.state === 'busy' && <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse-soft" />}
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -204,6 +296,7 @@ export default function App() {
                     isReading={readingAgents.has(agent.session_id)}
                     hideSprite={hiddenSprites.has(agent.session_id)}
                     mutedCtx={mutedCtx}
+                    onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
                     cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
                   />
                 ))}
@@ -219,7 +312,7 @@ export default function App() {
             gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           }}
         >
-          {sorted.map((agent) => (
+          {visibleAgents.map((agent) => (
             <AgentCard
               key={agent.session_id}
               agent={agent}
@@ -230,6 +323,7 @@ export default function App() {
               isReading={readingAgents.has(agent.session_id)}
               hideSprite={hiddenSprites.has(agent.session_id)}
               mutedCtx={mutedCtx}
+              onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
               cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
             />
           ))}
@@ -242,7 +336,7 @@ export default function App() {
             gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           }}
         >
-          {sorted.map((agent) => (
+          {visibleAgents.map((agent) => (
             <AgentCard
               key={agent.session_id}
               agent={agent}
@@ -253,6 +347,7 @@ export default function App() {
               isReading={readingAgents.has(agent.session_id)}
               hideSprite={hiddenSprites.has(agent.session_id)}
               mutedCtx={mutedCtx}
+              onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
               cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
             />
           ))}
@@ -264,20 +359,26 @@ export default function App() {
         <div className="shrink-0 mt-2 border-t border-zinc-800 pt-2">
           <div className="flex items-center gap-3 mb-1 px-0.5">
             <button
-              onClick={() => setBottomTab('messages')}
+              onClick={() => setBottomOpen(o => !o)}
+              className="text-[9px] text-zinc-600 hover:text-zinc-400 mr-1"
+            >
+              {bottomOpen ? '▼' : '▶'}
+            </button>
+            <button
+              onClick={() => { setBottomTab('messages'); setBottomOpen(true) }}
               className={`text-[9px] uppercase tracking-wider ${bottomTab === 'messages' ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`}
             >
               Messages{messages.length > 0 ? ` (${messages.length})` : ''}
             </button>
             <button
-              onClick={() => setBottomTab('activity')}
+              onClick={() => { setBottomTab('activity'); setBottomOpen(true) }}
               className={`text-[9px] uppercase tracking-wider ${bottomTab === 'activity' ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`}
             >
               Activity{activity.length > 0 ? ` (${activity.length})` : ''}
             </button>
           </div>
 
-          {bottomTab === 'messages' ? (
+          {bottomOpen && (bottomTab === 'messages' ? (
             <div ref={msgLogRef} className="max-h-28 overflow-y-auto overflow-x-hidden space-y-1">
               {messages.length === 0 ? (
                 <div className="text-[10px] text-zinc-700 font-mono">No messages yet</div>
@@ -331,7 +432,7 @@ export default function App() {
                 )
               })}
             </div>
-          )}
+          ))}
         </div>
       )}
 

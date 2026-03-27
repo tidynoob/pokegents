@@ -41,6 +41,7 @@ export interface SearchResult {
   timestamp: string
   cwd: string
   git_branch: string
+  sprite_override?: string
 }
 
 export interface SearchResponse {

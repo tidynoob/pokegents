@@ -103,9 +103,10 @@ case "$EVENT" in
       DETAIL="processing prompt"
       CLEAR_OUTPUT=true
     fi
-    # Reset message budget for this agent's turn
-    BUDGET_FILE="$CCD_DATA/messages/${SESSION_ID}/_msg_budget"
-    mkdir -p "$CCD_DATA/messages/${SESSION_ID}" 2>/dev/null
+    # Reset message budget for this agent's turn (use CCD_SESSION_ID for clone safety)
+    BUDGET_LOOKUP="${CCD_SESSION_ID:-$SESSION_ID}"
+    BUDGET_FILE="$CCD_DATA/messages/${BUDGET_LOOKUP}/_msg_budget"
+    mkdir -p "$CCD_DATA/messages/${BUDGET_LOOKUP}" 2>/dev/null
     echo "0" > "$BUDGET_FILE" 2>/dev/null
     ;;
   "PreToolUse")
@@ -452,9 +453,10 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
   fi
 
   # Part 2: Pending messages — deliver (marks delivered + returns content)
-  # Messages stay on disk so check_messages can find them as fallback.
+  # Use CCD_SESSION_ID (unique per agent, even for clones) not SESSION_ID (shared by clones)
   DASHBOARD_URL="${CCD_DASHBOARD_URL:-http://localhost:7834}"
-  DELIVERED=$(curl -s -m 1 -X POST "$DASHBOARD_URL/api/messages/deliver/$SESSION_ID" 2>/dev/null || echo "[]")
+  MSG_LOOKUP_ID="${CCD_SESSION_ID:-$SESSION_ID}"
+  DELIVERED=$(curl -s -m 1 -X POST "$DASHBOARD_URL/api/messages/deliver/$MSG_LOOKUP_ID" 2>/dev/null || echo "[]")
   MSG_COUNT=$(echo "$DELIVERED" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
   if [ "$MSG_COUNT" -gt 0 ]; then
     MSG_CONTENT=$(echo "$DELIVERED" | python3 -c "

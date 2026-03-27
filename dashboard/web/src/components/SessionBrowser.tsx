@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { SearchResult } from '../types'
 import { search, fetchRecentSessions, resumeSession } from '../api'
+import { POKEMON_SPRITES } from './sprites'
+import { hashString } from './CreatureIcon'
 
 interface SessionBrowserProps {
   onClose: () => void
@@ -88,35 +90,44 @@ export function SessionBrowser({ onClose, activeSessionIds }: SessionBrowserProp
 
         {/* Results */}
         <div className="flex flex-col gap-1.5">
-          {results.map((r) => (
-            <div
-              key={r.session_id}
-              className="flex items-center justify-between gap-3 bg-surface-1 hover:bg-surface-2 border border-zinc-800/50 rounded-lg px-4 py-3 transition-colors"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-sm text-zinc-200 truncate">
-                    {r.custom_title || r.session_id.slice(0, 8)}
-                  </span>
-                  {r.profile_name && (
-                    <span className="text-xs text-zinc-600">{r.profile_name}</span>
+          {results.map((r) => {
+            const sprite = r.sprite_override || POKEMON_SPRITES[hashString(r.session_id) % POKEMON_SPRITES.length]
+            return (
+              <div
+                key={r.session_id}
+                className="flex items-center justify-between gap-3 bg-surface-1 hover:bg-surface-2 border border-zinc-800/50 rounded-lg px-4 py-3 transition-colors"
+              >
+                <img
+                  src={`/sprites/${sprite}.png`}
+                  alt=""
+                  className="w-8 h-8 shrink-0"
+                  style={{ imageRendering: 'pixelated' }}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-sm text-zinc-200 truncate">
+                      {r.custom_title || r.session_id.slice(0, 8)}
+                    </span>
+                    {r.profile_name && (
+                      <span className="text-xs text-zinc-600">{r.profile_name}</span>
+                    )}
+                  </div>
+                  {r.snippet && (
+                    <div
+                      className="text-xs text-zinc-500 truncate [&_mark]:bg-accent-yellow/20 [&_mark]:text-accent-yellow [&_mark]:rounded-sm [&_mark]:px-0.5"
+                      dangerouslySetInnerHTML={{ __html: r.snippet }}
+                    />
                   )}
                 </div>
-                {r.snippet && (
-                  <div
-                    className="text-xs text-zinc-500 truncate [&_mark]:bg-accent-yellow/20 [&_mark]:text-accent-yellow [&_mark]:rounded-sm [&_mark]:px-0.5"
-                    dangerouslySetInnerHTML={{ __html: r.snippet }}
-                  />
-                )}
+                <button
+                  onClick={() => handleResume(r.session_id)}
+                  className="shrink-0 text-xs text-accent-blue hover:text-blue-300 px-2.5 py-1.5 rounded border border-zinc-800 hover:border-accent-blue/30 transition-colors"
+                >
+                  Resume
+                </button>
               </div>
-              <button
-                onClick={() => handleResume(r.session_id)}
-                className="shrink-0 text-xs text-accent-blue hover:text-blue-300 px-2.5 py-1.5 rounded border border-zinc-800 hover:border-accent-blue/30 transition-colors"
-              >
-                Resume
-              </button>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>

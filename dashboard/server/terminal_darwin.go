@@ -58,6 +58,26 @@ end tell`, safeProfile, safeSID)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
+func (t *ITerm2Terminal) LaunchProfile(profile, itermProfile string) error {
+	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
+	createTab := `create tab with default profile`
+	if itermProfile != "" {
+		safeITermProf := strings.ReplaceAll(itermProfile, `"`, `\"`)
+		createTab = fmt.Sprintf(`create tab with profile "%s"`, safeITermProf)
+	}
+	script := fmt.Sprintf(`
+tell application "iTerm2"
+	tell current window
+		%s
+		delay 1
+		tell current session
+			write text "ccd %s"
+		end tell
+	end tell
+end tell`, createTab, safeProfile)
+	return exec.Command("osascript", "-e", script).Run()
+}
+
 func (t *ITerm2Terminal) ResumeSession(profile, sessionID string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)

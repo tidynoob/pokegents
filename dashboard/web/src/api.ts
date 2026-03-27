@@ -107,3 +107,20 @@ export async function fetchMessageHistory(): Promise<AgentMessage[]> {
   if (!res.ok) return []
   return res.json()
 }
+
+export interface ProfileInfo {
+  name: string
+  title: string
+  emoji: string
+  color: [number, number, number]
+}
+
+export async function fetchProfiles(): Promise<ProfileInfo[]> {
+  const res = await fetch(`${BASE}/profiles`)
+  if (!res.ok) return []
+  return res.json()
+}
+
+export async function launchProfile(name: string): Promise<void> {
+  await fetch(`${BASE}/profiles/${name}/launch`, { method: 'POST' })
+}

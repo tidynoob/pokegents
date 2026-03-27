@@ -19,5 +19,6 @@ func (t *StubTerminal) FocusSession(itermSessionID, tty string) error      { ret
 func (t *StubTerminal) WriteText(itermSessionID, tty, text string) error   { return errUnavailable }
 func (t *StubTerminal) SetTabName(itermSessionID, tty, name string) error  { return errUnavailable }
 func (t *StubTerminal) CloseSession(itermSessionID, tty string) error      { return errUnavailable }
-func (t *StubTerminal) CloneSession(profile, sessionIDPrefix string) error { return errUnavailable }
-func (t *StubTerminal) ResumeSession(profile, sessionID string) error      { return errUnavailable }
+func (t *StubTerminal) CloneSession(profile, sessionIDPrefix string) error  { return errUnavailable }
+func (t *StubTerminal) ResumeSession(profile, sessionID string) error       { return errUnavailable }
+func (t *StubTerminal) LaunchProfile(profile, itermProfile string) error    { return errUnavailable }

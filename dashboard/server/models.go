@@ -8,6 +8,7 @@ type Profile struct {
 	Color        [3]int `json:"color"`
 	CWD          string `json:"cwd"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
+	ITermProfile string `json:"iterm2_profile,omitempty"`
 }
 
 // RunningSession is the data stored in ~/.ccsession/running/*.json.
@@ -87,15 +88,16 @@ type HookEvent struct {
 
 // SearchResult is returned by the search API.
 type SearchResult struct {
-	SessionID   string `json:"session_id"`
-	ProjectDir  string `json:"project_dir"`
-	CustomTitle string `json:"custom_title"`
-	ProfileName string `json:"profile_name"`
-	Snippet     string `json:"snippet"`
-	MessageType string `json:"message_type"`
-	Timestamp   string `json:"timestamp"`
-	CWD         string `json:"cwd"`
-	GitBranch   string `json:"git_branch"`
+	SessionID      string `json:"session_id"`
+	ProjectDir     string `json:"project_dir"`
+	CustomTitle    string `json:"custom_title"`
+	ProfileName    string `json:"profile_name"`
+	Snippet        string `json:"snippet"`
+	MessageType    string `json:"message_type"`
+	Timestamp      string `json:"timestamp"`
+	CWD            string `json:"cwd"`
+	GitBranch      string `json:"git_branch"`
+	SpriteOverride string `json:"sprite_override,omitempty"`
 }
 
 // SearchResponse wraps search results with total count.

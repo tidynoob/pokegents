@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ type StateManager struct {
 	contexts      map[string]ContextUsage   // keyed by session_id, survives rebuilds
 	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
+	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
 
 	ccdData          string // ~/.ccsession
 	claudeProjectDir string // ~/.claude/projects
@@ -38,6 +40,7 @@ func NewStateManager(ccdData, claudeProjectDir string) *StateManager {
 		contexts:          make(map[string]ContextUsage),
 		activityFeeds:     make(map[string][]ActivityItem),
 		nameOverrides:    make(map[string]string),
+		sessionIDMap:     make(map[string]string),
 		ccdData:          ccdData,
 		claudeProjectDir: claudeProjectDir,
 	}
@@ -58,7 +61,9 @@ func (sm *StateManager) LoadAll() error {
 		return err
 	}
 	sm.loadNameOverrides()
+	sm.loadSessionIDMap()
 	sm.rebuildAgents()
+	sm.reconcileNameOverrides()
 
 	// Load initial context usage for all agents
 	for sid := range sm.agents {
@@ -103,13 +108,20 @@ func (sm *StateManager) GetAgents() []AgentState {
 	return result
 }
 
-// GetAgent returns a single agent by session ID.
+// GetAgent returns a single agent by session ID or CCD session ID.
 func (sm *StateManager) GetAgent(sessionID string) *AgentState {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	if a, ok := sm.agents[sessionID]; ok {
 		cp := *a
 		return &cp
+	}
+	// Also check by CCD session ID
+	for _, a := range sm.agents {
+		if a.CCDSessionID != "" && a.CCDSessionID == sessionID {
+			cp := *a
+			return &cp
+		}
 	}
 	return nil
 }
@@ -150,8 +162,14 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 	// JSONL custom-title is written by server.go persistCustomTitle() which
 	// also updates the search index. Don't duplicate the write here.
 
-	// Keep name overrides for backward compat (other code may still read it)
+	// Store name override under session ID
 	sm.nameOverrides[sessionID] = newName
+
+	// For clones: also store under CCDSessionID if different, so the
+	// override survives even if the search index uses a different ID
+	if rs, ok := sm.running[sessionID]; ok && rs.CCDSessionID != "" && rs.CCDSessionID != sessionID {
+		sm.nameOverrides[rs.CCDSessionID] = newName
+	}
 	sm.saveNameOverrides()
 }
 
@@ -439,6 +457,38 @@ func (sm *StateManager) findTranscriptPathLocked(sessionID string) string {
 }
 
 // GetProfiles returns all loaded profiles.
+// GetNameOverrides returns a copy of the name overrides map.
+func (sm *StateManager) GetNameOverrides() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	m := make(map[string]string, len(sm.nameOverrides))
+	for k, v := range sm.nameOverrides {
+		m[k] = v
+	}
+	return m
+}
+
+// GetSessionIDMap returns a copy of the CCD→Claude session ID map.
+func (sm *StateManager) GetSessionIDMap() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	m := make(map[string]string, len(sm.sessionIDMap))
+	for k, v := range sm.sessionIDMap {
+		m[k] = v
+	}
+	return m
+}
+
+// GetProfile returns a single profile by name.
+func (sm *StateManager) GetProfile(name string) *Profile {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if p, ok := sm.profiles[name]; ok {
+		return &p
+	}
+	return nil
+}
+
 func (sm *StateManager) GetProfiles() []Profile {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -725,9 +775,68 @@ func (sm *StateManager) saveNameOverrides() {
 	os.WriteFile(path, data, 0644)
 }
 
+func (sm *StateManager) loadSessionIDMap() {
+	path := filepath.Join(sm.ccdData, "session-id-map.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m map[string]string
+	if json.Unmarshal(data, &m) == nil {
+		sm.sessionIDMap = m
+	}
+}
+
+func (sm *StateManager) saveSessionIDMap() {
+	path := filepath.Join(sm.ccdData, "session-id-map.json")
+	data, err := json.Marshal(sm.sessionIDMap)
+	if err != nil {
+		return
+	}
+	os.WriteFile(path, data, 0644)
+}
+
+// reconcileNameOverrides uses the session ID map to fix name-override entries
+// keyed by CCD session IDs (which have no JSONL transcript). Maps them to
+// the Claude conversation session ID so the search index can find them.
+func (sm *StateManager) reconcileNameOverrides() {
+	changed := false
+	for ccdSID, name := range sm.nameOverrides {
+		if sm.findTranscriptPathLocked(ccdSID) != "" {
+			continue // has transcript, all good
+		}
+		// Check if session ID map has a mapping for this CCD UUID
+		if claudeSID, ok := sm.sessionIDMap[ccdSID]; ok {
+			if sm.findTranscriptPathLocked(claudeSID) != "" {
+				sm.nameOverrides[claudeSID] = name
+				delete(sm.nameOverrides, ccdSID)
+				changed = true
+				log.Printf("state: reconciled name override %s → %s (%s)", ccdSID[:8], claudeSID[:8], name)
+			}
+		}
+	}
+	if changed {
+		sm.saveNameOverrides()
+	}
+}
+
 func (sm *StateManager) rebuildAgents() {
 	now := time.Now()
 	agents := make(map[string]*AgentState)
+
+	// Build session ID map from running files (CCD UUID → Claude session ID)
+	mapChanged := false
+	for sid, rs := range sm.running {
+		if rs.CCDSessionID != "" && rs.CCDSessionID != sid {
+			if sm.sessionIDMap[rs.CCDSessionID] != sid {
+				sm.sessionIDMap[rs.CCDSessionID] = sid
+				mapChanged = true
+			}
+		}
+	}
+	if mapChanged {
+		sm.saveSessionIDMap()
+	}
 
 	// Start with running sessions as the base
 	for sid, rs := range sm.running {
@@ -754,6 +863,10 @@ func (sm *StateManager) rebuildAgents() {
 		// Apply persistent name override (survives session restarts)
 		if override, ok := sm.nameOverrides[sid]; ok {
 			a.DisplayName = override
+		} else if rs.CCDSessionID != "" {
+			if override, ok := sm.nameOverrides[rs.CCDSessionID]; ok {
+				a.DisplayName = override
+			}
 		}
 
 		// Check PID liveness

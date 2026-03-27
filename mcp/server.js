@@ -92,7 +92,7 @@ server.tool(
     const agents = await apiCall("/api/sessions");
     const lines = agents.map(
       (a) =>
-        `${a.display_name || a.profile_name} [${a.session_id.slice(0, 8)}] — ${a.state}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
+        `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
     );
     return {
       content: [
@@ -136,7 +136,7 @@ server.tool(
 
     const agents = await apiCall("/api/sessions");
     const fromAgent = resolveAgent(agents, fromHint);
-    const fromId = fromAgent ? fromAgent.session_id : (from || ccdSid);
+    const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || ccdSid);
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
@@ -166,7 +166,7 @@ server.tool(
       method: "POST",
       body: JSON.stringify({
         from: fromId,
-        to: toAgent.session_id,
+        to: toAgent.ccd_session_id || toAgent.session_id,
         content,
       }),
     });
@@ -204,7 +204,7 @@ server.tool(
 
     const agents = await apiCall("/api/sessions");
     const me = resolveAgent(agents, idHint);
-    const sessionId = me ? me.session_id : (my_session_id || ccdSid);
+    const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || ccdSid);
 
     const messages = await apiCall(`/api/messages/consume/${sessionId}`, { method: "POST" });
 

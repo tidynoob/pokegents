@@ -106,6 +106,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
 	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
+	s.mux.HandleFunc("POST /api/profiles/{name}/launch", s.handleLaunchProfile)
 	s.mux.HandleFunc("GET /api/events", s.eventBus.ServeSSE)
 	s.mux.HandleFunc("POST /api/events", s.handlePostEvent)
 	s.mux.HandleFunc("GET /api/search", s.handleSearch)
@@ -287,6 +288,20 @@ func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, profiles)
 }
 
+func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	profile := s.state.GetProfile(name)
+	if profile == nil {
+		http.Error(w, "unknown profile", http.StatusNotFound)
+		return
+	}
+	if err := s.terminal.LaunchProfile(name, profile.ITermProfile); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB max
 	if err != nil {
@@ -311,7 +326,7 @@ func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 
 	// When an agent transitions to done/idle, nudge if pending messages exist
 	if agent != nil && (agent.State == "done" || agent.State == "idle") {
-		if pending := s.messages.GetPending(evt.SessionID); len(pending) > 0 {
+		if pending := s.messages.GetPending(s.resolveToCCDSessionID(evt.SessionID)); len(pending) > 0 {
 			s.nudger.Queue(evt.SessionID)
 		}
 	}
@@ -362,20 +377,45 @@ func (s *Server) handleSearchRecent(w http.ResponseWriter, r *http.Request) {
 }
 
 // enrichDisplayNames overrides custom_title with the display name from
-// running files. This ensures the resume/search UI shows dashboard names
-// ("Dash (Refactor)") rather than the original Claude --name values
-// ("Personal (clone)").
+// running files or name-overrides.json. Also populates sprite overrides.
 func (s *Server) enrichDisplayNames(results []SearchResult) {
+	// Active agent names (highest priority)
 	agents := s.state.GetAgents()
-	names := make(map[string]string, len(agents))
+	activeNames := make(map[string]string, len(agents))
 	for _, a := range agents {
 		if a.DisplayName != "" {
-			names[a.SessionID] = a.DisplayName
+			activeNames[a.SessionID] = a.DisplayName
 		}
 	}
+
+	// Persistent name overrides (for sessions that are no longer active)
+	nameOverrides := s.state.GetNameOverrides()
+
+	// Reverse lookup: Claude session ID → name from name-overrides keyed by CCD UUID.
+	// The session ID map stores CCD UUID → Claude session ID. We invert it to check
+	// if any name override was stored under the CCD UUID for this Claude session.
+	sessionIDMap := s.state.GetSessionIDMap()
+	reverseMap := make(map[string]string, len(sessionIDMap))
+	for ccdSID, claudeSID := range sessionIDMap {
+		if name, ok := nameOverrides[ccdSID]; ok {
+			reverseMap[claudeSID] = name
+		}
+	}
+
+	// Sprite overrides
+	spriteOverrides := s.loadSpriteOverrides()
+
 	for i := range results {
-		if name, ok := names[results[i].SessionID]; ok {
+		sid := results[i].SessionID
+		if name, ok := activeNames[sid]; ok {
 			results[i].CustomTitle = name
+		} else if name, ok := nameOverrides[sid]; ok {
+			results[i].CustomTitle = name
+		} else if name, ok := reverseMap[sid]; ok {
+			results[i].CustomTitle = name
+		}
+		if sprite, ok := spriteOverrides[sid]; ok {
+			results[i].SpriteOverride = sprite
 		}
 	}
 }
@@ -470,6 +510,20 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 // transcript and updates the search index.
 func (s *Server) persistCustomTitle(sessionID, name string) {
 	path := s.state.FindTranscriptPath(sessionID)
+	transcriptSID := sessionID
+
+	// For clones, the session ID might be the CCD UUID while the JSONL
+	// uses the Claude conversation ID. Try looking up the agent's CCDSessionID.
+	if path == "" {
+		agent := s.state.GetAgent(sessionID)
+		if agent != nil && agent.CCDSessionID != "" && agent.CCDSessionID != sessionID {
+			path = s.state.FindTranscriptPath(agent.CCDSessionID)
+			if path != "" {
+				transcriptSID = agent.CCDSessionID
+			}
+		}
+	}
+
 	if path == "" {
 		return
 	}
@@ -485,9 +539,9 @@ func (s *Server) persistCustomTitle(sessionID, name string) {
 	f.Write(append(data, '\n'))
 	f.Close()
 
-	// Update search index
+	// Update search index with the transcript's session ID
 	if s.search != nil {
-		s.search.UpdateCustomTitle(sessionID, name)
+		s.search.UpdateCustomTitle(transcriptSID, name)
 	}
 }
 
@@ -502,23 +556,33 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve names
+	// Resolve to CCD session IDs for mailbox routing (unique even for clones)
+	fromCCD := s.resolveToCCDSessionID(body.From)
+	toCCD := s.resolveToCCDSessionID(body.To)
+
+	// Resolve display names (try both original and resolved IDs)
 	fromName := body.From
 	toName := body.To
-	if a := s.state.GetAgent(body.From); a != nil {
-		fromName = a.DisplayName
-		if fromName == "" {
-			fromName = a.ProfileName
+	for _, id := range []string{body.From, fromCCD} {
+		if a := s.state.GetAgent(id); a != nil {
+			fromName = a.DisplayName
+			if fromName == "" {
+				fromName = a.ProfileName
+			}
+			break
 		}
 	}
-	if a := s.state.GetAgent(body.To); a != nil {
-		toName = a.DisplayName
-		if toName == "" {
-			toName = a.ProfileName
+	for _, id := range []string{body.To, toCCD} {
+		if a := s.state.GetAgent(id); a != nil {
+			toName = a.DisplayName
+			if toName == "" {
+				toName = a.ProfileName
+			}
+			break
 		}
 	}
 
-	msg, err := s.messages.Send(body.From, fromName, body.To, toName, body.Content)
+	msg, err := s.messages.Send(fromCCD, fromName, toCCD, toName, body.Content)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -530,7 +594,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Queue a nudge for the recipient — the nudger handles timing, debouncing,
 	// and state checks so we never interrupt busy agents or erase user text
-	s.nudger.Queue(body.To)
+	s.nudger.Queue(toCCD)
 
 	writeJSON(w, msg)
 }
@@ -624,20 +688,20 @@ func (s *Server) handleGetConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
-	sessionID := s.resolveSessionID(r.PathValue("id"))
-	messages := s.messages.GetPending(sessionID)
+	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
+	messages := s.messages.GetPending(ccdSID)
 	writeJSON(w, messages)
 }
 
 func (s *Server) handleDeliverPending(w http.ResponseWriter, r *http.Request) {
-	sessionID := s.resolveSessionID(r.PathValue("id"))
-	messages := s.messages.DeliverPending(sessionID)
+	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
+	messages := s.messages.DeliverPending(ccdSID)
 	writeJSON(w, messages)
 }
 
 func (s *Server) handleConsumePending(w http.ResponseWriter, r *http.Request) {
-	sessionID := s.resolveSessionID(r.PathValue("id"))
-	messages := s.messages.ConsumePending(sessionID)
+	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
+	messages := s.messages.ConsumePending(ccdSID)
 	writeJSON(w, messages)
 }
 
@@ -690,6 +754,29 @@ func (s *Server) resolveSessionID(id string) string {
 			if e.IsDir() && strings.HasPrefix(e.Name(), id) {
 				return e.Name()
 			}
+		}
+	}
+	return id
+}
+
+// resolveToCCDSessionID maps any session ID (Claude or CCD, full or prefix) to
+// the agent's CCD session ID. Used for message mailbox routing since CCD session
+// IDs are unique per agent (even clones), unlike Claude session IDs which are shared.
+func (s *Server) resolveToCCDSessionID(id string) string {
+	agents := s.state.GetAgents()
+	// Check by ccd_session_id first (direct match)
+	for _, a := range agents {
+		if a.CCDSessionID != "" && (a.CCDSessionID == id || strings.HasPrefix(a.CCDSessionID, id)) {
+			return a.CCDSessionID
+		}
+	}
+	// Check by session_id → return ccd_session_id
+	for _, a := range agents {
+		if a.SessionID == id || strings.HasPrefix(a.SessionID, id) {
+			if a.CCDSessionID != "" {
+				return a.CCDSessionID
+			}
+			return a.SessionID // fallback: no ccd_session_id
 		}
 	}
 	return id

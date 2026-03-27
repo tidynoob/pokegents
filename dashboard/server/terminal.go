@@ -16,6 +16,8 @@ type TerminalIntegration interface {
 	CloneSession(profile, sessionIDPrefix string) error
 	// ResumeSession opens a new tab and resumes an existing ccd session.
 	ResumeSession(profile, sessionID string) error
+	// LaunchProfile opens a new tab and starts a fresh ccd session for the given profile.
+	LaunchProfile(profile, itermProfile string) error
 	// IsAvailable reports whether the terminal integration is functional
 	// on the current platform.
 	IsAvailable() bool
