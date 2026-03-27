@@ -22,9 +22,7 @@ type Server struct {
 	eventBus *EventBus
 	notifier *Notifier
 	watcher  *Watcher
-	search   *SearchIndex        // legacy — kept for Phase 4 removal
-	messages *MessageStore       // legacy — kept for Phase 4 removal
-	nudger   *Nudger             // legacy — kept for Phase 4 removal
+	search   *SearchIndex        // legacy — kept until SearchService replaces it
 	msgSvc   *services.MessagingService
 	searchSvc *services.SearchService
 	terminal TerminalIntegration
@@ -104,8 +102,6 @@ func NewServer(cfg Config) (*Server, error) {
 		notifier:  notifier,
 		watcher:   NewWatcher(state, eventBus, notifier),
 		search:    search,
-		messages:  NewMessageStore(cfg.DataDir),
-		nudger:    NewNudger(state, terminal),
 		msgSvc:    msgSvc,
 		searchSvc: nil, // TODO: wire SearchService in Phase 4
 		terminal:  terminal,
@@ -372,9 +368,7 @@ func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 
 	// When an agent transitions to done/idle, nudge if pending messages exist
 	if agent != nil && (agent.State == "done" || agent.State == "idle") {
-		if pending := s.messages.GetPending(s.resolveToCCDSessionID(evt.SessionID)); len(pending) > 0 {
-			s.nudger.Queue(evt.SessionID)
-		}
+		s.msgSvc.NudgeIfPending(s.resolveToCCDSessionID(evt.SessionID))
 	}
 
 	writeJSON(w, map[string]bool{"ok": true})
@@ -602,47 +596,43 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve to CCD session IDs for mailbox routing (unique even for clones)
 	fromCCD := s.resolveToCCDSessionID(body.From)
 	toCCD := s.resolveToCCDSessionID(body.To)
 
-	// Resolve display names (try both original and resolved IDs)
-	fromName := body.From
-	toName := body.To
-	for _, id := range []string{body.From, fromCCD} {
-		if a := s.state.GetAgent(id); a != nil {
-			fromName = a.DisplayName
-			if fromName == "" {
-				fromName = a.ProfileName
-			}
-			break
-		}
-	}
-	for _, id := range []string{body.To, toCCD} {
-		if a := s.state.GetAgent(id); a != nil {
-			toName = a.DisplayName
-			if toName == "" {
-				toName = a.ProfileName
-			}
-			break
-		}
-	}
+	// Resolve display names
+	fromName, toName := s.resolveDisplayName(body.From, fromCCD), s.resolveDisplayName(body.To, toCCD)
 
-	msg, err := s.messages.Send(fromCCD, fromName, toCCD, toName, body.Content)
+	msg, needsNudge, err := s.msgSvc.Send(fromCCD, fromName, toCCD, toName, body.Content)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Broadcast the new message + connection update
 	s.eventBus.Publish("new_message", msg)
-	s.eventBus.Publish("connections_update", s.messages.GetConnections())
-
-	// Queue a nudge for the recipient — the nudger handles timing, debouncing,
-	// and state checks so we never interrupt busy agents or erase user text
-	s.nudger.Queue(toCCD)
+	if conns, err := s.msgSvc.GetConnections(); err == nil {
+		s.eventBus.Publish("connections_update", conns)
+	}
+	if needsNudge {
+		s.msgSvc.QueueNudge(toCCD)
+	}
 
 	writeJSON(w, msg)
+}
+
+// resolveDisplayName returns the display name for a session ID, trying multiple IDs.
+func (s *Server) resolveDisplayName(ids ...string) string {
+	for _, id := range ids {
+		if a := s.state.GetAgent(id); a != nil {
+			if a.DisplayName != "" {
+				return a.DisplayName
+			}
+			return a.ProfileName
+		}
+	}
+	if len(ids) > 0 {
+		return ids[0]
+	}
+	return ""
 }
 
 func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
@@ -726,29 +716,31 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.messages.GetHistory())
+	msgs, _ := s.msgSvc.GetHistory()
+	writeJSON(w, msgs)
 }
 
 func (s *Server) handleGetConnections(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.messages.GetConnections())
+	conns, _ := s.msgSvc.GetConnections()
+	writeJSON(w, conns)
 }
 
 func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
-	messages := s.messages.GetPending(ccdSID)
-	writeJSON(w, messages)
+	msgs, _ := s.msgSvc.GetPending(ccdSID)
+	writeJSON(w, msgs)
 }
 
 func (s *Server) handleDeliverPending(w http.ResponseWriter, r *http.Request) {
 	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
-	messages := s.messages.DeliverPending(ccdSID)
-	writeJSON(w, messages)
+	msgs, _ := s.msgSvc.Deliver(ccdSID)
+	writeJSON(w, msgs)
 }
 
 func (s *Server) handleConsumePending(w http.ResponseWriter, r *http.Request) {
 	ccdSID := s.resolveToCCDSessionID(r.PathValue("id"))
-	messages := s.messages.ConsumePending(ccdSID)
-	writeJSON(w, messages)
+	msgs, _ := s.msgSvc.Consume(ccdSID)
+	writeJSON(w, msgs)
 }
 
 // resolveSessionID maps a CCD session ID (or prefix) to the Claude session ID.
