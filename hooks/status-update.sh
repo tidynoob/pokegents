@@ -71,24 +71,15 @@ extract_trace() {
   if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
     return
   fi
-  TRACE=$(tail -50 "$TRANSCRIPT" | python3 -c "
-import json, sys
-last_text = ''
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try: d = json.loads(line)
-    except: continue
-    if d.get('type') != 'assistant': continue
-    msg = d.get('message', {})
-    content = msg.get('content', [])
-    if not isinstance(content, list): continue
-    for block in content:
-        if isinstance(block, dict) and block.get('type') == 'text':
-            t = block.get('text', '')
-            if t: last_text = t
-if last_text: print(last_text[-200:])
-" 2>/dev/null || echo "")
+  # Extract last assistant text block from transcript tail (jq, no python3)
+  TRACE=$(tail -50 "$TRANSCRIPT" | while IFS= read -r line; do
+    echo "$line" | jq -r '
+      select(.type == "assistant") |
+      .message.content // [] | if type == "array" then . else [] end |
+      map(select(.type == "text") | .text // "") |
+      last // empty
+    ' 2>/dev/null
+  done | tail -1 | head -c 200 || echo "")
 }
 
 case "$EVENT" in
@@ -299,7 +290,8 @@ case "$EVENT" in
         fi
       fi
     fi
-    set -e
+    # NOTE: Do NOT re-enable set -e. The rest of the hook (status write,
+    # activity log, message delivery) must also be crash-resilient.
     ;;
   "SessionEnd")
     STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"
@@ -452,24 +444,43 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
     echo "$TOTAL_LINES" > "$LASTREAD_FILE" 2>/dev/null
   fi
 
-  # Part 2: Pending messages — deliver (marks delivered + returns content)
+  # Part 2: Pending messages — deliver via dashboard API (fast path) or file fallback
   # Use POKEGENTS_SESSION_ID (unique per agent, even for clones) not SESSION_ID (shared by clones)
   DASHBOARD_URL="${POKEGENTS_DASHBOARD_URL:-http://localhost:7834}"
   MSG_LOOKUP_ID="${POKEGENTS_SESSION_ID:-$SESSION_ID}"
-  DELIVERED=$(curl -s -m 1 -X POST "$DASHBOARD_URL/api/messages/deliver/$MSG_LOOKUP_ID" 2>/dev/null || echo "[]")
-  MSG_COUNT=$(echo "$DELIVERED" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
-  if [ "$MSG_COUNT" -gt 0 ]; then
-    MSG_CONTENT=$(echo "$DELIVERED" | python3 -c "
-import json, sys
-msgs = json.load(sys.stdin)
-parts = []
-for m in msgs:
-    parts.append(f'[Message from {m[\"from_name\"]}]: {m[\"content\"]}')
-print('\n---\n'.join(parts))
-" 2>/dev/null || echo "")
-    if [ -n "$MSG_CONTENT" ]; then
-      NOTIFY="${NOTIFY}${NOTIFY:+\n\n}$MSG_CONTENT"
+  MSG_CONTENT=""
+
+  # Fast path: try dashboard API (marks delivered + returns content)
+  DELIVERED=$(curl -s -m 2 -X POST "$DASHBOARD_URL/api/messages/deliver/$MSG_LOOKUP_ID" 2>/dev/null || echo "FAIL")
+  if [ "$DELIVERED" != "FAIL" ]; then
+    MSG_COUNT=$(echo "$DELIVERED" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
+    if [ "$MSG_COUNT" -gt 0 ]; then
+      # Format with jq (no python3 dependency)
+      MSG_CONTENT=$(echo "$DELIVERED" | jq -r '.[] | "[Message from \(.from_name)]: \(.content)"' 2>/dev/null | paste -sd '\n---\n' - || echo "")
     fi
+  else
+    # File fallback: read messages directly from mailbox (dashboard may be down)
+    MAILBOX="$POKEGENTS_DATA/messages/$MSG_LOOKUP_ID"
+    if [ -d "$MAILBOX" ]; then
+      for msgfile in "$MAILBOX"/*.json; do
+        [ -f "$msgfile" ] || continue
+        [ "$(basename "$msgfile")" = "_msg_budget" ] && continue
+        IS_DELIVERED=$(jq -r '.delivered // false' "$msgfile" 2>/dev/null || echo "false")
+        [ "$IS_DELIVERED" = "true" ] && continue
+        FROM_NAME=$(jq -r '.from_name // "unknown"' "$msgfile" 2>/dev/null || echo "unknown")
+        CONTENT=$(jq -r '.content // ""' "$msgfile" 2>/dev/null || echo "")
+        if [ -n "$CONTENT" ]; then
+          [ -n "$MSG_CONTENT" ] && MSG_CONTENT="${MSG_CONTENT}\n---\n"
+          MSG_CONTENT="${MSG_CONTENT}[Message from ${FROM_NAME}]: ${CONTENT}"
+          # Mark delivered
+          jq '.delivered = true' "$msgfile" > "${msgfile}.tmp" && mv "${msgfile}.tmp" "$msgfile" 2>/dev/null
+        fi
+      done
+    fi
+  fi
+
+  if [ -n "$MSG_CONTENT" ]; then
+    NOTIFY="${NOTIFY}${NOTIFY:+\n\n}$MSG_CONTENT"
   fi
 
   # Output combined systemMessage

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync } from "fs";
 import { join } from "path";
 
 // Support both new (POKEGENTS_*) and legacy (CCD_*) env vars during migration
@@ -15,7 +15,133 @@ function getPort() {
   } catch { return 7834; }
 }
 const DASHBOARD_URL = process.env.POKEGENTS_DASHBOARD_URL || process.env.CCD_DASHBOARD_URL || `http://localhost:${getPort()}`;
-const MESSAGE_BUDGET = parseInt(process.env.POKEGENTS_MESSAGE_BUDGET || process.env.CCD_MESSAGE_BUDGET || "5");
+const MESSAGE_BUDGET = parseInt(process.env.POKEGENTS_MESSAGE_BUDGET || process.env.CCD_MESSAGE_BUDGET || "15");
+const API_TIMEOUT = 2000; // 2s timeout before falling back to files
+
+// ── Dashboard API with timeout ──────────────────────────────────────────
+
+let lastApiSuccess = 0;
+const API_RETRY_INTERVAL = 30000; // 30s before retrying API after failure
+
+async function apiCall(path, options = {}) {
+  // If API failed recently, skip and go straight to fallback
+  if (lastApiSuccess < 0 && Date.now() + lastApiSuccess < API_RETRY_INTERVAL) {
+    throw new Error("API offline (backoff)");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+  try {
+    const res = await fetch(`${DASHBOARD_URL}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...options,
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    lastApiSuccess = Date.now();
+    return res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    lastApiSuccess = -Date.now(); // negative = last failure time
+    throw err;
+  }
+}
+
+// ── File-based fallback operations ──────────────────────────────────────
+
+function fileListAgents() {
+  const agents = [];
+  const runningDir = join(POKEGENTS_DATA, "running");
+  const statusDir = join(POKEGENTS_DATA, "status");
+  try {
+    for (const file of readdirSync(runningDir)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const rf = JSON.parse(readFileSync(join(runningDir, file), "utf8"));
+        // Read status file for state
+        let state = "unknown";
+        let detail = "";
+        let userPrompt = "";
+        const sid = rf.session_id || "";
+        try {
+          const sf = JSON.parse(readFileSync(join(statusDir, `${sid}.json`), "utf8"));
+          state = sf.state || "unknown";
+          detail = sf.detail || "";
+          userPrompt = sf.user_prompt || "";
+        } catch {}
+        agents.push({
+          profile_name: rf.profile || "",
+          session_id: sid,
+          ccd_session_id: rf.ccd_session_id || sid,
+          display_name: rf.display_name || rf.profile || "",
+          state,
+          detail,
+          user_prompt: userPrompt,
+          tty: rf.tty || "",
+        });
+      } catch {}
+    }
+  } catch {}
+  return agents;
+}
+
+function fileReadMessages(sessionId) {
+  const mailbox = join(POKEGENTS_DATA, "messages", sessionId);
+  const messages = [];
+  try {
+    for (const file of readdirSync(mailbox)) {
+      if (!file.endsWith(".json") || file.startsWith("_")) continue;
+      try {
+        const msg = JSON.parse(readFileSync(join(mailbox, file), "utf8"));
+        msg._file = file;
+        messages.push(msg);
+      } catch {}
+    }
+  } catch {}
+  messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || ""));
+  return messages;
+}
+
+function fileConsumeMessages(sessionId) {
+  const mailbox = join(POKEGENTS_DATA, "messages", sessionId);
+  const messages = fileReadMessages(sessionId);
+  for (const msg of messages) {
+    try { unlinkSync(join(mailbox, msg._file)); } catch {}
+    delete msg._file;
+  }
+  return messages;
+}
+
+function fileSendMessage(fromId, fromName, toId, toName, content) {
+  const mailbox = join(POKEGENTS_DATA, "messages", toId);
+  mkdirSync(mailbox, { recursive: true });
+  const id = String(Date.now() * 1000000 + Math.floor(Math.random() * 1000000));
+  const msg = {
+    id,
+    from: fromId,
+    from_name: fromName,
+    to: toId,
+    to_name: toName,
+    content,
+    timestamp: new Date().toISOString(),
+    delivered: false,
+  };
+  writeFileSync(join(mailbox, `${id}.json`), JSON.stringify(msg));
+  return msg;
+}
+
+function fileResolveAgent(agents, idPrefix) {
+  if (!idPrefix) return null;
+  return agents.find(
+    (a) =>
+      a.session_id === idPrefix ||
+      a.session_id.startsWith(idPrefix) ||
+      (a.ccd_session_id && a.ccd_session_id === idPrefix) ||
+      (a.ccd_session_id && a.ccd_session_id.startsWith(idPrefix))
+  ) || null;
+}
+
+// ── Budget tracking ─────────────────────────────────────────────────────
 
 function getBudgetFile(sessionId) {
   return join(POKEGENTS_DATA, "messages", sessionId, "_msg_budget");
@@ -24,9 +150,7 @@ function getBudgetFile(sessionId) {
 function getMessageCount(sessionId) {
   try {
     return parseInt(readFileSync(getBudgetFile(sessionId), "utf8").trim()) || 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 }
 
 function incrementMessageCount(sessionId) {
@@ -37,21 +161,13 @@ function incrementMessageCount(sessionId) {
   return count;
 }
 
-// Resolve an ID prefix against session_id, ccd_session_id, and fuzzy
-// matching via running files (handles forked sessions with stale env vars).
-function resolveAgent(agents, idPrefix) {
-  // Direct match on session_id or ccd_session_id
-  const direct = agents.find(
-    (a) =>
-      a.session_id === idPrefix ||
-      a.session_id.startsWith(idPrefix) ||
-      (a.ccd_session_id && a.ccd_session_id === idPrefix) ||
-      (a.ccd_session_id && a.ccd_session_id.startsWith(idPrefix))
-  );
-  if (direct) return direct;
+// ── Agent resolution (shared by API and file paths) ─────────────────────
 
-  // Fallback: match by claude_pid — the MCP server's parent is the
-  // Claude process, which is stored as claude_pid in running files.
+function resolveAgent(agents, idPrefix) {
+  const match = fileResolveAgent(agents, idPrefix);
+  if (match) return match;
+
+  // Fallback: match by claude_pid from running files
   try {
     const ppid = process.ppid;
     const runningDir = join(POKEGENTS_DATA, "running");
@@ -69,18 +185,17 @@ function resolveAgent(agents, idPrefix) {
   return null;
 }
 
-async function apiCall(path, options = {}) {
-  const res = await fetch(`${DASHBOARD_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status} ${await res.text()}`);
-  return res.json();
+// ── Helper: get my session ID ───────────────────────────────────────────
+
+function getMySessionId() {
+  return process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
 }
+
+// ── MCP Server ──────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "pokegents-messaging",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 // List active agents
@@ -89,7 +204,12 @@ server.tool(
   "List all active Claude Code agents and their status. Use this to find agent session IDs before sending messages.",
   {},
   async () => {
-    const agents = await apiCall("/api/sessions");
+    let agents;
+    try {
+      agents = await apiCall("/api/sessions");
+    } catch {
+      agents = fileListAgents();
+    }
     const lines = agents.map(
       (a) =>
         `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
@@ -115,72 +235,71 @@ server.tool(
     from: z
       .string()
       .optional()
-      .describe(
-        "Optional: your session ID (auto-detected from environment if omitted)."
-      ),
+      .describe("Optional: your session ID (auto-detected from environment if omitted)."),
     to: z
       .string()
-      .describe(
-        "Recipient agent session ID (8-char prefix). Use list_agents to find IDs."
-      ),
+      .describe("Recipient agent session ID (8-char prefix). Use list_agents to find IDs."),
     content: z
       .string()
-      .describe(
-        "Message content. Be specific: include file paths, line numbers, and actionable feedback."
-      ),
+      .describe("Message content. Be specific: include file paths, line numbers, and actionable feedback."),
   },
   async ({ from, to, content }) => {
-    // Auto-detect sender from environment (support both new and legacy env vars)
-    const sessionIdEnv = process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+    const sessionIdEnv = getMySessionId();
     const fromHint = from || sessionIdEnv.slice(0, 8);
 
-    const agents = await apiCall("/api/sessions");
+    // Get agents (API or file fallback)
+    let agents;
+    try {
+      agents = await apiCall("/api/sessions");
+    } catch {
+      agents = fileListAgents();
+    }
+
     const fromAgent = resolveAgent(agents, fromHint);
     const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
+    const fromName = fromAgent ? (fromAgent.display_name || fromAgent.profile_name) : fromId;
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `Message budget reached (${MESSAGE_BUDGET}/${MESSAGE_BUDGET}). Stop sending messages and summarize your findings to the user. Wait for further instructions.`,
-          },
-        ],
+        content: [{
+          type: "text",
+          text: `Message budget reached (${MESSAGE_BUDGET}/${MESSAGE_BUDGET}). Stop sending messages and summarize your findings to the user. Wait for further instructions.`,
+        }],
       };
     }
 
     const toAgent = resolveAgent(agents, to);
     if (!toAgent) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `No agent found matching "${to}". Use list_agents to see available agents.`,
-          },
-        ],
+        content: [{
+          type: "text",
+          text: `No agent found matching "${to}". Use list_agents to see available agents.`,
+        }],
       };
     }
 
-    const msg = await apiCall("/api/messages", {
-      method: "POST",
-      body: JSON.stringify({
-        from: fromId,
-        to: toAgent.ccd_session_id || toAgent.session_id,
-        content,
-      }),
-    });
+    const toId = toAgent.ccd_session_id || toAgent.session_id;
+    const toName = toAgent.display_name || toAgent.profile_name;
+
+    // Send via API, fall back to file
+    try {
+      await apiCall("/api/messages", {
+        method: "POST",
+        body: JSON.stringify({ from: fromId, to: toId, content }),
+      });
+    } catch {
+      fileSendMessage(fromId, fromName, toId, toName, content);
+    }
 
     const newCount = incrementMessageCount(fromId);
     const remaining = MESSAGE_BUDGET - newCount;
 
     return {
-      content: [
-        {
-          type: "text",
-          text: `Message sent to ${toAgent.display_name || toAgent.profile_name} (${(toAgent.ccd_session_id || toAgent.session_id).slice(0, 8)}).${remaining > 0 ? ` ${remaining} messages remaining in budget.` : " Budget reached — wait for user input before sending more."}\n\nReminder: YOUR session ID is "${from}" — use this when calling check_messages.`,
-        },
-      ],
+      content: [{
+        type: "text",
+        text: `Message sent to ${toName} (${toId.slice(0, 8)}).${remaining > 0 ? ` ${remaining} messages remaining in budget.` : " Budget reached — wait for user input before sending more."}`,
+      }],
     };
   }
 );
@@ -193,43 +312,45 @@ server.tool(
     my_session_id: z
       .string()
       .optional()
-      .describe(
-        "Optional: your session ID. Usually auto-detected from environment."
-      ),
+      .describe("Optional: your session ID. Usually auto-detected from environment."),
   },
   async ({ my_session_id }) => {
-    // Auto-detect session ID from environment (support both new and legacy env vars)
-    const sessionIdEnv = process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+    const sessionIdEnv = getMySessionId();
     const idHint = my_session_id || sessionIdEnv.slice(0, 8);
 
-    const agents = await apiCall("/api/sessions");
+    // Resolve session ID (API or file fallback)
+    let agents;
+    try {
+      agents = await apiCall("/api/sessions");
+    } catch {
+      agents = fileListAgents();
+    }
     const me = resolveAgent(agents, idHint);
     const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
 
-    const messages = await apiCall(`/api/messages/consume/${sessionId}`, { method: "POST" });
+    // Consume messages (API or file fallback)
+    let messages;
+    try {
+      messages = await apiCall(`/api/messages/consume/${sessionId}`, { method: "POST" });
+    } catch {
+      messages = fileConsumeMessages(sessionId);
+    }
 
     if (!messages || messages.length === 0) {
       return {
-        content: [
-          { type: "text", text: "No new messages in your inbox." },
-        ],
+        content: [{ type: "text", text: "No new messages in your inbox." }],
       };
     }
 
     const formatted = messages
-      .map(
-        (m) =>
-          `[From ${m.from_name} (${m.from.slice(0, 8)})]\n${m.content}`
-      )
+      .map((m) => `[From ${m.from_name} (${m.from.slice(0, 8)})]\n${m.content}`)
       .join("\n\n---\n\n");
 
     return {
-      content: [
-        {
-          type: "text",
-          text: `${messages.length} new message(s):\n\n${formatted}`,
-        },
-      ],
+      content: [{
+        type: "text",
+        text: `${messages.length} new message(s):\n\n${formatted}`,
+      }],
     };
   }
 );

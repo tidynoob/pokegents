@@ -187,6 +187,7 @@ HELP
   local g=$(jq -r '.color[1]' "$profile_file")
   local b=$(jq -r '.color[2]' "$profile_file")
   local cwd=$(jq -r '.cwd' "$profile_file")
+  cwd="${cwd/#\~/$HOME}"  # expand ~ to $HOME (jq returns literal ~)
   local system_prompt=$(jq -r '.system_prompt // empty' "$profile_file")
   local history_file="$HISTORY_DIR/${profile_name}.json"
 
@@ -353,8 +354,9 @@ if last_title: print(last_title)
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
       local dyn_profile="$dyn_profile_dir/pokegents-session-${session_id}.json"
       local profile_guid="CCD-SESSION-${session_id}"
-      # Inherit from the CCD profile (not General) so colors/styling are preserved
-      local parent_profile=$(jq -r '.iterm2_profile // "General"' "$profile_file")
+      # Inherit from the profile's iTerm2 profile, or "General" (iTerm2's built-in default)
+      local parent_profile=$(jq -r '.iterm2_profile // "" | if . == "" then "General" else . end' "$profile_file" 2>/dev/null)
+      [[ -z "$parent_profile" ]] && parent_profile="General"
       jq -n \
         --arg name "CCD Session: $display_name" \
         --arg guid "$profile_guid" \
@@ -511,6 +513,7 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   # Add extra directories from profile
   local add_dir
   while IFS= read -r add_dir; do
+    add_dir="${add_dir/#\~/$HOME}"  # expand ~ (jq returns literal ~)
     [[ -n "$add_dir" ]] && claude_args+=(--add-dir "$add_dir")
   done < <(jq -r '.add_dirs // [] | .[]' "$profile_file")
 
