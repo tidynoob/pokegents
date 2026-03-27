@@ -754,63 +754,27 @@ func (sm *StateManager) loadStatuses() error {
 }
 
 func (sm *StateManager) loadNameOverrides() {
-	path := filepath.Join(sm.dataDir, "name-overrides.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return // file doesn't exist yet, that's fine
-	}
-	var m map[string]string
-	if json.Unmarshal(data, &m) == nil {
-		sm.nameOverrides = m
-	}
+	sm.store.Metadata.LoadJSON("name-overrides.json", &sm.nameOverrides)
 }
 
 func (sm *StateManager) saveNameOverrides() {
-	path := filepath.Join(sm.dataDir, "name-overrides.json")
-	data, err := json.Marshal(sm.nameOverrides)
-	if err != nil {
-		return
-	}
-	os.WriteFile(path, data, 0644)
+	sm.store.Metadata.SaveJSON("name-overrides.json", sm.nameOverrides)
 }
 
 func (sm *StateManager) loadSessionIDMap() {
-	path := filepath.Join(sm.dataDir, "session-id-map.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var m map[string]string
-	if json.Unmarshal(data, &m) == nil {
-		sm.sessionIDMap = m
-	}
+	sm.store.Metadata.LoadJSON("session-id-map.json", &sm.sessionIDMap)
 }
 
 func (sm *StateManager) saveSessionIDMap() {
-	path := filepath.Join(sm.dataDir, "session-id-map.json")
-	data, err := json.Marshal(sm.sessionIDMap)
-	if err != nil {
-		return
-	}
-	os.WriteFile(path, data, 0644)
+	sm.store.Metadata.SaveJSON("session-id-map.json", sm.sessionIDMap)
 }
 
 func (sm *StateManager) loadAgentOrder() {
-	path := filepath.Join(sm.dataDir, "agent-order.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	json.Unmarshal(data, &sm.agentOrder)
+	sm.store.Metadata.LoadJSON("agent-order.json", &sm.agentOrder)
 }
 
 func (sm *StateManager) saveAgentOrder() {
-	path := filepath.Join(sm.dataDir, "agent-order.json")
-	data, err := json.Marshal(sm.agentOrder)
-	if err != nil {
-		return
-	}
-	os.WriteFile(path, data, 0644)
+	sm.store.Metadata.SaveJSON("agent-order.json", sm.agentOrder)
 }
 
 // GetAgentOrder returns the current agent display order.

@@ -24,6 +24,7 @@ func NewFileStore(dataDir string) *Store {
 			activityDir:  filepath.Join(dataDir, "activity"),
 			lastReadDir:  filepath.Join(dataDir, "activity-lastread"),
 		},
+		Metadata: &FileMetadataStore{dir: dataDir},
 	}
 }
 
@@ -622,4 +623,36 @@ func (s *FileActivityStore) rotate(path string) {
 	}
 	kept := strings.Join(lines[len(lines)-200:], "\n")
 	os.WriteFile(path, []byte(kept), 0644)
+}
+
+// ============================================================================
+// FileMetadataStore
+// ============================================================================
+
+// FileMetadataStore manages small JSON metadata files in the data directory.
+// Used for name-overrides.json, session-id-map.json, agent-order.json, etc.
+type FileMetadataStore struct {
+	mu  sync.Mutex
+	dir string
+}
+
+func (s *FileMetadataStore) LoadJSON(filename string, dest any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.dir, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil // file doesn't exist yet — not an error
+	}
+	return json.Unmarshal(data, dest)
+}
+
+func (s *FileMetadataStore) SaveJSON(filename string, data any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(s.dir, filename), bytes, 0644)
 }

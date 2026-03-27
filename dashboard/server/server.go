@@ -18,17 +18,17 @@ import (
 
 // Server is the main dashboard HTTP server.
 type Server struct {
-	state    *StateManager
-	eventBus *EventBus
-	notifier *Notifier
-	watcher  *Watcher
+	state     *StateManager
+	eventBus  *EventBus
+	notifier  *Notifier
+	storeWatcher *store.StoreWatcher
 	msgSvc    *services.MessagingService
 	searchSvc *services.SearchService
-	terminal TerminalIntegration
+	terminal  TerminalIntegration
 	fileStore *store.Store
-	mux      *http.ServeMux
-	port     int
-	webDir   string
+	mux       *http.ServeMux
+	port      int
+	webDir    string
 }
 
 // Config holds server configuration.
@@ -100,18 +100,20 @@ func NewServer(cfg Config) (*Server, error) {
 		log.Printf("search service unavailable: %v", searchErr)
 	}
 
+	sw := store.NewStoreWatcher(cfg.DataDir)
+
 	s := &Server{
-		state:     state,
-		eventBus:  eventBus,
-		notifier:  notifier,
-		watcher:   NewWatcher(state, eventBus, notifier),
-		msgSvc:    msgSvc,
-		searchSvc: searchSvc,
-		terminal:  terminal,
-		fileStore: fileStore,
-		mux:       http.NewServeMux(),
-		port:      cfg.Port,
-		webDir:    cfg.WebDir,
+		state:        state,
+		eventBus:     eventBus,
+		notifier:     notifier,
+		storeWatcher: sw,
+		msgSvc:       msgSvc,
+		searchSvc:    searchSvc,
+		terminal:     terminal,
+		fileStore:    fileStore,
+		mux:          http.NewServeMux(),
+		port:         cfg.Port,
+		webDir:       cfg.WebDir,
 	}
 
 	s.routes()
@@ -187,10 +189,11 @@ func (s *Server) Start() error {
 	}
 	log.Printf("loaded %d profiles, %d agents", len(s.state.GetProfiles()), len(s.state.GetAgents()))
 
-	// Start file watcher
-	if err := s.watcher.Start(); err != nil {
+	// Start file watcher — single broadcast point for all file changes
+	if err := s.storeWatcher.Start(); err != nil {
 		log.Printf("watcher failed to start: %v", err)
 	}
+	go s.watcherLoop()
 
 	// Start search indexer
 	if s.searchSvc != nil {
@@ -272,9 +275,28 @@ func (s *Server) startTracePoller() {
 	}()
 }
 
+// watcherLoop consumes FileEvents from the store watcher and broadcasts
+// state updates via SSE. This is the SINGLE broadcast point for file changes.
+func (s *Server) watcherLoop() {
+	ch, cleanup := s.storeWatcher.Subscribe()
+	defer cleanup()
+
+	for evt := range ch {
+		switch {
+		case evt.SessionID == "*":
+			// Running directory changed — full reload
+			s.state.ReloadRunning()
+		case strings.HasPrefix(evt.Path, "status") || strings.HasSuffix(evt.Path, ".json"):
+			// Status file changed
+			s.state.ReloadStatus(evt.Path)
+		}
+		s.eventBus.Publish("state_update", s.state.GetAgents())
+	}
+}
+
 // Stop shuts down all background workers.
 func (s *Server) Stop() {
-	s.watcher.Stop()
+	s.storeWatcher.Stop()
 	if s.searchSvc != nil {
 		s.searchSvc.Close()
 	}

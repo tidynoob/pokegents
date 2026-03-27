@@ -23,6 +23,15 @@ type Store struct {
 	Config    ConfigStore
 	Messages  MessageStore
 	Activity  ActivityStore
+	Metadata  MetadataStore
+}
+
+// MetadataStore manages small JSON metadata files (name overrides, session ID map, agent order).
+type MetadataStore interface {
+	// LoadJSON reads a JSON file into dest. Returns nil error if file doesn't exist.
+	LoadJSON(filename string, dest any) error
+	// SaveJSON writes data as JSON to a file.
+	SaveJSON(filename string, data any) error
 }
 
 // RunningStore manages active session registry files (~/.pokegents/running/*.json).
