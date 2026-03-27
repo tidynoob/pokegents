@@ -22,8 +22,7 @@ type Server struct {
 	eventBus *EventBus
 	notifier *Notifier
 	watcher  *Watcher
-	search   *SearchIndex        // legacy — kept until SearchService replaces it
-	msgSvc   *services.MessagingService
+	msgSvc    *services.MessagingService
 	searchSvc *services.SearchService
 	terminal TerminalIntegration
 	fileStore *store.Store
@@ -73,13 +72,7 @@ func NewServer(cfg Config) (*Server, error) {
 	notifier := NewNotifier(cfg.WebDir, cfg.DataDir)
 	terminal := NewTerminal()
 
-	// Legacy search index (still used directly by some handlers)
-	search, err := NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)
-	if err != nil {
-		log.Printf("search index unavailable: %v", err)
-	}
-
-	// New services
+	// Services
 	msgSvc := services.NewMessagingService(
 		fileStore.Messages,
 		terminal.WriteText,
@@ -112,7 +105,6 @@ func NewServer(cfg Config) (*Server, error) {
 		eventBus:  eventBus,
 		notifier:  notifier,
 		watcher:   NewWatcher(state, eventBus, notifier),
-		search:    search,
 		msgSvc:    msgSvc,
 		searchSvc: searchSvc,
 		terminal:  terminal,
@@ -201,8 +193,8 @@ func (s *Server) Start() error {
 	}
 
 	// Start search indexer
-	if s.search != nil {
-		s.search.StartBackgroundIndexer(5 * time.Minute)
+	if s.searchSvc != nil {
+		s.searchSvc.StartBackgroundIndexer(5 * time.Minute)
 	}
 
 	// Start transcript poller for live trace updates
@@ -283,8 +275,8 @@ func (s *Server) startTracePoller() {
 // Stop shuts down all background workers.
 func (s *Server) Stop() {
 	s.watcher.Stop()
-	if s.search != nil {
-		s.search.Close()
+	if s.searchSvc != nil {
+		s.searchSvc.Close()
 	}
 }
 
@@ -386,45 +378,60 @@ func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	if s.search == nil {
+	svc := s.searchSvc
+	if svc == nil {
 		http.Error(w, "search unavailable", http.StatusServiceUnavailable)
 		return
 	}
-
 	q := r.URL.Query().Get("q")
 	if q == "" {
 		http.Error(w, "missing q parameter", http.StatusBadRequest)
 		return
 	}
-
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	results, total, err := s.search.Search(q, limit, offset)
+	svcResults, total, err := svc.Search(q, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	results := convertSearchResults(svcResults)
 	s.enrichDisplayNames(results)
 	writeJSON(w, SearchResponse{Results: results, Total: total})
 }
 
 func (s *Server) handleSearchRecent(w http.ResponseWriter, r *http.Request) {
-	if s.search == nil {
+	svc := s.searchSvc
+	if svc == nil {
 		http.Error(w, "search unavailable", http.StatusServiceUnavailable)
 		return
 	}
-
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	results, err := s.search.RecentSessions(limit)
+	svcResults, err := svc.RecentSessions(limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	results := convertSearchResults(svcResults)
 	s.enrichDisplayNames(results)
 	writeJSON(w, results)
+}
+
+func convertSearchResults(svc []services.SearchResult) []SearchResult {
+	results := make([]SearchResult, len(svc))
+	for i, r := range svc {
+		results[i] = SearchResult{
+			SessionID:   r.SessionID,
+			ProjectDir:  r.ProjectDir,
+			CustomTitle: r.CustomTitle,
+			ProfileName: r.ProfileName,
+			Snippet:     r.Snippet,
+			CWD:         r.CWD,
+			GitBranch:   r.GitBranch,
+		}
+	}
+	return results
 }
 
 // enrichDisplayNames overrides custom_title with the display name from
@@ -483,8 +490,8 @@ func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 
 	if profileName == "" {
 		// Try to find from search index
-		if s.search != nil {
-			profileName = s.search.GetProfileName(sessionID)
+		if s.searchSvc != nil {
+			profileName = s.searchSvc.GetProfileName(sessionID)
 		}
 	}
 
@@ -591,8 +598,8 @@ func (s *Server) persistCustomTitle(sessionID, name string) {
 	f.Close()
 
 	// Update search index with the transcript's session ID
-	if s.search != nil {
-		s.search.UpdateCustomTitle(transcriptSID, name)
+	if s.searchSvc != nil {
+		s.searchSvc.UpdateCustomTitle(transcriptSID, name)
 	}
 }
 
