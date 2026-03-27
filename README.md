@@ -14,7 +14,7 @@ Run multiple Claude Code agents simultaneously with named profiles, session trac
 ## Install
 
 ```bash
-git clone <this-repo> ~/Projects/pokegents
+git clone https://github.com/tRidha/pokegents.git ~/Projects/pokegents
 cd ~/Projects/pokegents
 ./install.sh
 source ~/.zshrc
