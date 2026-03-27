@@ -554,7 +554,16 @@ func (s *FileActivityStore) GetSince(projectHash string, afterLine int) ([]Activ
 	}
 	var entries []ActivityEntry
 	for _, line := range lines[afterLine:] {
-		entries = append(entries, ActivityEntry{Raw: line})
+		entry := ActivityEntry{Raw: line}
+		// Parse: [timestamp] [session_id] [agent_name] files — summary
+		if parts := parseActivityLine(line); parts != nil {
+			entry.Timestamp = parts[0]
+			entry.SessionID = parts[1]
+			entry.AgentName = parts[2]
+			entry.Files = parts[3]
+			entry.Summary = parts[4]
+		}
+		entries = append(entries, entry)
 	}
 	return entries, totalLines, nil
 }
@@ -573,6 +582,33 @@ func (s *FileActivityStore) GetLastReadLine(projectHash, sessionID string) (int,
 func (s *FileActivityStore) SetLastReadLine(projectHash, sessionID string, line int) error {
 	os.MkdirAll(s.lastReadDir, 0755)
 	return os.WriteFile(filepath.Join(s.lastReadDir, sessionID), []byte(strconv.Itoa(line)), 0644)
+}
+
+// parseActivityLine extracts fields from a log line:
+// [timestamp] [session_id] [agent_name] files — summary
+// Returns [timestamp, session_id, agent_name, files, summary] or nil.
+func parseActivityLine(line string) []string {
+	// Extract bracketed fields
+	result := make([]string, 5)
+	remaining := line
+	for i := 0; i < 3; i++ {
+		start := strings.Index(remaining, "[")
+		end := strings.Index(remaining, "]")
+		if start == -1 || end == -1 || end <= start {
+			return nil
+		}
+		result[i] = remaining[start+1 : end]
+		remaining = remaining[end+1:]
+	}
+	remaining = strings.TrimSpace(remaining)
+	// Split files — summary
+	if idx := strings.Index(remaining, " — "); idx >= 0 {
+		result[3] = strings.TrimSpace(remaining[:idx])
+		result[4] = strings.TrimSpace(remaining[idx+len(" — "):])
+	} else {
+		result[3] = remaining
+	}
+	return result
 }
 
 func (s *FileActivityStore) rotate(path string) {

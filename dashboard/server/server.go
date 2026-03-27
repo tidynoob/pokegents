@@ -96,6 +96,17 @@ func NewServer(cfg Config) (*Server, error) {
 		},
 	)
 
+	// Search service
+	searchSvc, searchErr := services.NewSearchService(cfg.SearchDBPath, cfg.ClaudeProjectDir, fileStore.Profiles,
+		services.ProfileMatcherFunc(func(cwd string) string {
+			name, _, _ := state.MatchProfile(cwd)
+			return name
+		}),
+	)
+	if searchErr != nil {
+		log.Printf("search service unavailable: %v", searchErr)
+	}
+
 	s := &Server{
 		state:     state,
 		eventBus:  eventBus,
@@ -103,7 +114,7 @@ func NewServer(cfg Config) (*Server, error) {
 		watcher:   NewWatcher(state, eventBus, notifier),
 		search:    search,
 		msgSvc:    msgSvc,
-		searchSvc: nil, // TODO: wire SearchService in Phase 4
+		searchSvc: searchSvc,
 		terminal:  terminal,
 		fileStore: fileStore,
 		mux:       http.NewServeMux(),

@@ -54,6 +54,101 @@ type SessionIdentity struct {
 	ITermSessionID string
 }
 
+// --- Data types (shared across store, services, and server) ---
+
+// RunningSession is the data stored in ~/.pokegents/running/*.json.
+type RunningSession struct {
+	Profile        string `json:"profile"`
+	SessionID      string `json:"session_id"`
+	PID            int    `json:"pid"`
+	ClaudePID      int    `json:"claude_pid"`
+	TTY            string `json:"tty"`
+	DisplayName    string `json:"display_name"`
+	CCDSessionID   string `json:"ccd_session_id,omitempty"`
+	ITermSessionID string `json:"iterm_session_id,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+}
+
+// Agent interface implementation for identity resolution.
+func (rs *RunningSession) GetSessionID() string    { return rs.SessionID }
+func (rs *RunningSession) GetCCDSessionID() string { return rs.CCDSessionID }
+func (rs *RunningSession) GetDisplayName() string  { return rs.DisplayName }
+func (rs *RunningSession) GetTTY() string          { return rs.TTY }
+
+// StatusFile is the data stored in ~/.pokegents/status/*.json.
+type StatusFile struct {
+	SessionID     string   `json:"session_id"`
+	State         string   `json:"state"`
+	Detail        string   `json:"detail"`
+	CWD           string   `json:"cwd"`
+	Timestamp     string   `json:"timestamp"`
+	BusySince     string   `json:"busy_since,omitempty"`
+	LastSummary   string   `json:"last_summary"`
+	LastTrace     string   `json:"last_trace"`
+	UserPrompt    string   `json:"user_prompt"`
+	RecentActions []string `json:"recent_actions,omitempty"`
+}
+
+// Profile represents a pokegent profile configuration.
+type Profile struct {
+	Name         string `json:"name"`
+	Title        string `json:"title"`
+	Emoji        string `json:"emoji"`
+	Color        [3]int `json:"color"`
+	CWD          string `json:"cwd"`
+	SystemPrompt string `json:"system_prompt,omitempty"`
+	ITermProfile string `json:"iterm2_profile,omitempty"`
+}
+
+// AppConfig is the global config from ~/.pokegents/config.json.
+type AppConfig struct {
+	Port                int    `json:"port"`
+	DefaultProfile      string `json:"default_profile"`
+	SkipPermissions     bool   `json:"skip_permissions"`
+	ITermRestoreProfile string `json:"iterm2_restore_profile"`
+}
+
+// Message represents a message between agents.
+type Message struct {
+	ID        string `json:"id"`
+	From      string `json:"from"`
+	FromName  string `json:"from_name"`
+	To        string `json:"to"`
+	ToName    string `json:"to_name"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp"`
+	Delivered bool   `json:"delivered"`
+}
+
+// Connection represents a communication link between two agents.
+type Connection struct {
+	AgentA       string `json:"agent_a"`
+	AgentB       string `json:"agent_b"`
+	AgentAName   string `json:"agent_a_name"`
+	AgentBName   string `json:"agent_b_name"`
+	MessageCount int    `json:"message_count"`
+	LastMessage  string `json:"last_message"`
+}
+
+// ActivityEntry is a single line in the activity log.
+type ActivityEntry struct {
+	Timestamp string `json:"timestamp"`
+	SessionID string `json:"session_id"`
+	AgentName string `json:"agent_name"`
+	Files     string `json:"files"`
+	Summary   string `json:"summary"`
+	Raw       string `json:"-"`
+}
+
+// FileEvent represents a change to a watched file.
+type FileEvent struct {
+	Type      string // "create", "update", "delete", "rename"
+	SessionID string
+	Path      string
+}
+
+// --- State machine result ---
+
 // StateTransitionResult is returned by ApplyEvent with the new state and metadata.
 type StateTransitionResult struct {
 	// NewState is the resulting state after the event.

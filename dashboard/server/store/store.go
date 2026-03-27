@@ -2,6 +2,19 @@
 // All file I/O is centralized here — consumers use interfaces, never os.ReadFile directly.
 package store
 
+import "pokegents/dashboard/server/core"
+
+// Type aliases — canonical definitions live in core/types.go.
+// Store uses these so consumers don't need to import both packages.
+type RunningSession = core.RunningSession
+type StatusFile = core.StatusFile
+type Profile = core.Profile
+type AppConfig = core.AppConfig
+type Message = core.Message
+type Connection = core.Connection
+type ActivityEntry = core.ActivityEntry
+type FileEvent = core.FileEvent
+
 // Store aggregates all sub-stores. Pass this to SessionManager, MessageService, etc.
 type Store struct {
 	Running   RunningStore
@@ -92,91 +105,8 @@ type ActivityStore interface {
 	SetLastReadLine(projectHash, sessionID string, line int) error
 }
 
-// FileEvent represents a change to a watched file.
-type FileEvent struct {
-	Type      string // "create", "update", "delete", "rename"
-	SessionID string
-	Path      string
-}
+// FileEvent is aliased from core/types.go above.
 
-// --- Shared types used across stores ---
-// These will move to core/types.go in Phase 2. For now, defined here
-// to avoid circular imports.
-
-// RunningSession is the data stored in ~/.pokegents/running/*.json.
-type RunningSession struct {
-	Profile        string `json:"profile"`
-	SessionID      string `json:"session_id"`
-	PID            int    `json:"pid"`
-	ClaudePID      int    `json:"claude_pid"`
-	TTY            string `json:"tty"`
-	DisplayName    string `json:"display_name"`
-	CCDSessionID   string `json:"ccd_session_id,omitempty"`
-	ITermSessionID string `json:"iterm_session_id,omitempty"`
-	CreatedAt      string `json:"created_at,omitempty"`
-}
-
-// StatusFile is the data stored in ~/.pokegents/status/*.json.
-type StatusFile struct {
-	SessionID     string   `json:"session_id"`
-	State         string   `json:"state"`
-	Detail        string   `json:"detail"`
-	CWD           string   `json:"cwd"`
-	Timestamp     string   `json:"timestamp"`
-	BusySince     string   `json:"busy_since,omitempty"`
-	LastSummary   string   `json:"last_summary"`
-	LastTrace     string   `json:"last_trace"`
-	UserPrompt    string   `json:"user_prompt"`
-	RecentActions []string `json:"recent_actions,omitempty"`
-}
-
-// Profile represents a pokegent profile configuration.
-type Profile struct {
-	Name         string `json:"name"`
-	Title        string `json:"title"`
-	Emoji        string `json:"emoji"`
-	Color        [3]int `json:"color"`
-	CWD          string `json:"cwd"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	ITermProfile string `json:"iterm2_profile,omitempty"`
-}
-
-// AppConfig is the global config from ~/.pokegents/config.json.
-type AppConfig struct {
-	Port                int    `json:"port"`
-	DefaultProfile      string `json:"default_profile"`
-	SkipPermissions     bool   `json:"skip_permissions"`
-	ITermRestoreProfile string `json:"iterm2_restore_profile"`
-}
-
-// Message represents a message between agents.
-type Message struct {
-	ID        string `json:"id"`
-	From      string `json:"from"`
-	FromName  string `json:"from_name"`
-	To        string `json:"to"`
-	ToName    string `json:"to_name"`
-	Content   string `json:"content"`
-	Timestamp string `json:"timestamp"`
-	Delivered bool   `json:"delivered"`
-}
-
-// Connection represents a communication link between two agents.
-type Connection struct {
-	AgentA       string `json:"agent_a"`
-	AgentB       string `json:"agent_b"`
-	AgentAName   string `json:"agent_a_name"`
-	AgentBName   string `json:"agent_b_name"`
-	MessageCount int    `json:"message_count"`
-	LastMessage  string `json:"last_message"`
-}
-
-// ActivityEntry is a single line in the activity log.
-type ActivityEntry struct {
-	Timestamp string `json:"timestamp"`
-	SessionID string `json:"session_id"`
-	AgentName string `json:"agent_name"`
-	Files     string `json:"files"`
-	Summary   string `json:"summary"`
-	Raw       string `json:"-"` // original log line
-}
+// Data types (RunningSession, StatusFile, etc.) are defined in core/types.go
+// and aliased above. The aliases ensure store consumers can use store.RunningSession
+// without importing core/ directly.

@@ -36,7 +36,8 @@ type StateManager struct {
 }
 
 func NewStateManager(dataDir, claudeProjectDir string) *StateManager {
-	return NewStateManagerWithStore(nil, dataDir, claudeProjectDir)
+	// Legacy constructor — creates its own store
+	return NewStateManagerWithStore(storelib.NewFileStore(dataDir), dataDir, claudeProjectDir)
 }
 
 func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir string) *StateManager {
@@ -159,27 +160,13 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		a.DisplayName = newName
 	}
 
-	// Update running file on disk
+	// Update running file on disk via store
 	if rs, ok := sm.running[sessionID]; ok {
 		rs.DisplayName = newName
 		sm.running[sessionID] = rs
-
-		runningDir := filepath.Join(sm.dataDir, "running")
-		pattern := filepath.Join(runningDir, "*-"+sessionID+".json")
-		matches, _ := filepath.Glob(pattern)
-		for _, f := range matches {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
-			var rf map[string]any
-			if json.Unmarshal(data, &rf) == nil {
-				rf["display_name"] = newName
-				if out, err := json.Marshal(rf); err == nil {
-					os.WriteFile(f, out, 0644)
-				}
-			}
-		}
+		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+			r.DisplayName = newName
+		})
 	}
 
 	// JSONL custom-title is written by server.go persistCustomTitle() which
@@ -217,15 +204,12 @@ func (sm *StateManager) TransitionDoneToIdle() bool {
 		if time.Since(t) > 10*time.Minute {
 			a.State = "idle"
 			a.LastUpdated = time.Now().UTC().Format(time.RFC3339)
-			// Also update the status file on disk
+			// Also update the status file on disk via store
 			if sf, ok := sm.statuses[a.SessionID]; ok {
 				sf.State = "idle"
 				sf.Timestamp = a.LastUpdated
 				sm.statuses[a.SessionID] = sf
-				statusPath := filepath.Join(sm.dataDir, "status", a.SessionID+".json")
-				if data, err := json.Marshal(sf); err == nil {
-					os.WriteFile(statusPath, data, 0644)
-				}
+				sm.store.Status.Upsert(sf)
 			}
 			changed = true
 		}
@@ -361,26 +345,14 @@ func (sm *StateManager) ReconcileRunningFiles() bool {
 		}
 	}
 
-	runningDir := filepath.Join(sm.dataDir, "running")
 	for sid, rs := range sm.running {
 		if rs.ClaudePID > 0 {
 			continue
 		}
 		if pid, ok := ttyToPID[rs.TTY]; ok {
-			pattern := filepath.Join(runningDir, "*-"+sid+".json")
-			matches, _ := filepath.Glob(pattern)
-			for _, f := range matches {
-				data, err := os.ReadFile(f)
-				if err != nil {
-					continue
-				}
-				var rf map[string]any
-				if json.Unmarshal(data, &rf) != nil {
-					continue
-				}
-				rf["claude_pid"] = pid
-				newData, _ := json.Marshal(rf)
-				os.WriteFile(f, newData, 0644)
+			if err := sm.store.Running.Update(sid, func(r *RunningSession) {
+				r.ClaudePID = pid
+			}); err == nil {
 				changed = true
 			}
 		}
@@ -572,16 +544,13 @@ func (sm *StateManager) ReloadStatus(path string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// File was deleted — remove from statuses
-		base := strings.TrimSuffix(filepath.Base(path), ".json")
+	base := strings.TrimSuffix(filepath.Base(path), ".json")
+	sf, err := sm.store.Status.Get(base)
+	if err != nil || sf == nil {
+		// File was deleted or unreadable — remove from statuses
 		delete(sm.statuses, base)
 	} else {
-		var sf StatusFile
-		if json.Unmarshal(data, &sf) == nil && sf.SessionID != "" {
-			sm.statuses[sf.SessionID] = sf
-		}
+		sm.statuses[sf.SessionID] = *sf
 	}
 	sm.rebuildAgents()
 }
@@ -745,72 +714,25 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 // --- internal helpers ---
 
 func (sm *StateManager) loadProfiles() error {
-	if sm.store != nil {
-		profiles, err := sm.store.Profiles.List()
-		if err != nil {
-			return nil
-		}
-		sm.profiles = make(map[string]Profile, len(profiles))
-		for _, p := range profiles {
-			sm.profiles[p.Name] = p
-		}
+	profiles, err := sm.store.Profiles.List()
+	if err != nil {
 		return nil
 	}
-	// Legacy fallback: direct file I/O
-	dir := filepath.Join(sm.dataDir, "profiles")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil // not fatal
-	}
-	sm.profiles = make(map[string]Profile)
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var p Profile
-		if json.Unmarshal(data, &p) == nil {
-			p.Name = strings.TrimSuffix(e.Name(), ".json")
-			sm.profiles[p.Name] = p
-		}
+	sm.profiles = make(map[string]Profile, len(profiles))
+	for _, p := range profiles {
+		sm.profiles[p.Name] = p
 	}
 	return nil
 }
 
 func (sm *StateManager) loadRunning() error {
-	if sm.store != nil {
-		sessions, err := sm.store.Running.List()
-		if err != nil {
-			return nil
-		}
-		sm.running = make(map[string]RunningSession, len(sessions))
-		for _, rs := range sessions {
-			if rs.SessionID != "" {
-				sm.running[rs.SessionID] = rs
-			}
-		}
-		return nil
-	}
-	// Legacy fallback: direct file I/O
-	dir := filepath.Join(sm.dataDir, "running")
-	entries, err := os.ReadDir(dir)
+	sessions, err := sm.store.Running.List()
 	if err != nil {
 		return nil
 	}
-	sm.running = make(map[string]RunningSession)
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var rs RunningSession
-		if json.Unmarshal(data, &rs) == nil && rs.SessionID != "" {
+	sm.running = make(map[string]RunningSession, len(sessions))
+	for _, rs := range sessions {
+		if rs.SessionID != "" {
 			sm.running[rs.SessionID] = rs
 		}
 	}
@@ -818,36 +740,13 @@ func (sm *StateManager) loadRunning() error {
 }
 
 func (sm *StateManager) loadStatuses() error {
-	if sm.store != nil {
-		statuses, err := sm.store.Status.List()
-		if err != nil {
-			return nil
-		}
-		sm.statuses = make(map[string]StatusFile, len(statuses))
-		for _, sf := range statuses {
-			if sf.SessionID != "" {
-				sm.statuses[sf.SessionID] = sf
-			}
-		}
-		return nil
-	}
-	// Legacy fallback: direct file I/O
-	dir := filepath.Join(sm.dataDir, "status")
-	entries, err := os.ReadDir(dir)
+	statuses, err := sm.store.Status.List()
 	if err != nil {
 		return nil
 	}
-	sm.statuses = make(map[string]StatusFile)
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var sf StatusFile
-		if json.Unmarshal(data, &sf) == nil && sf.SessionID != "" {
+	sm.statuses = make(map[string]StatusFile, len(statuses))
+	for _, sf := range statuses {
+		if sf.SessionID != "" {
 			sm.statuses[sf.SessionID] = sf
 		}
 	}

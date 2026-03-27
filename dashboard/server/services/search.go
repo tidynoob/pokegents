@@ -23,6 +23,11 @@ type ProfileMatcher interface {
 	MatchProfile(cwd string) (name string)
 }
 
+// ProfileMatcherFunc adapts a plain function to the ProfileMatcher interface.
+type ProfileMatcherFunc func(cwd string) string
+
+func (f ProfileMatcherFunc) MatchProfile(cwd string) string { return f(cwd) }
+
 // SearchResult is returned by Search and RecentSessions.
 type SearchResult struct {
 	SessionID   string `json:"session_id"`
