@@ -111,7 +111,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'max' || mode === 'standard'
   const showInput = mode !== 'compact-minimal'
-  const outputH = (mode === 'standard-short' || compact) ? 'h-[52px]' : 'h-[90px]'
+  const outputH = (mode === 'standard-short' || compact) ? 'h-[52px]' : 'h-[112px]'
   const title = agent.display_name || agent.profile_name || 'Agent'
   const showDetail = agent.detail && !HIDE_DETAILS.has(agent.detail)
   const [r, g, b] = agent.color
@@ -164,7 +164,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   }
 
   const iconSize = compact ? 20 : 32
-  const textSize = compact ? 'text-[10px]' : 'text-[11px]'
+  const textSize = 'text-[10px]'
   const pad = compact ? 'px-2 py-1.5' : 'p-4'
 
   return (
