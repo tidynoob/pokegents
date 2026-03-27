@@ -44,14 +44,14 @@ func (t *ITerm2Terminal) CloseSession(itermSessionID, tty string) error {
 func (t *ITerm2Terminal) CloneSession(profile, sessionIDPrefix string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSID := strings.ReplaceAll(sessionIDPrefix, `"`, `\"`)
-	// Delay 1s after creating tab to let zsh source .zshrc (which defines ccd)
+	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
 	script := fmt.Sprintf(`
 tell application "iTerm2"
 	tell current window
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "ccd %s --resume %s --fork-session"
+			write text "pokegents %s --resume %s --fork-session"
 		end tell
 	end tell
 end tell`, safeProfile, safeSID)
@@ -71,7 +71,7 @@ tell application "iTerm2"
 		%s
 		delay 1
 		tell current session
-			write text "ccd %s"
+			write text "pokegents %s"
 		end tell
 	end tell
 end tell`, createTab, safeProfile)
@@ -81,14 +81,14 @@ end tell`, createTab, safeProfile)
 func (t *ITerm2Terminal) ResumeSession(profile, sessionID string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)
-	// Delay 1s after creating tab to let zsh source .zshrc (which defines ccd)
+	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
 	script := fmt.Sprintf(`
 tell application "iTerm2"
 	tell current window
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "ccd %s -r %s"
+			write text "pokegents %s -r %s"
 		end tell
 	end tell
 end tell`, safeProfile, safeSession)

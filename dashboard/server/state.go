@@ -28,11 +28,11 @@ type StateManager struct {
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
 	agentOrder    []string                  // user-defined display order (session IDs), persisted
 
-	ccdData          string // ~/.ccsession
+	dataDir          string // ~/.ccsession
 	claudeProjectDir string // ~/.claude/projects
 }
 
-func NewStateManager(ccdData, claudeProjectDir string) *StateManager {
+func NewStateManager(dataDir, claudeProjectDir string) *StateManager {
 	return &StateManager{
 		profiles:         make(map[string]Profile),
 		running:          make(map[string]RunningSession),
@@ -42,7 +42,7 @@ func NewStateManager(ccdData, claudeProjectDir string) *StateManager {
 		activityFeeds:     make(map[string][]ActivityItem),
 		nameOverrides:    make(map[string]string),
 		sessionIDMap:     make(map[string]string),
-		ccdData:          ccdData,
+		dataDir:          dataDir,
 		claudeProjectDir: claudeProjectDir,
 	}
 }
@@ -156,7 +156,7 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		rs.DisplayName = newName
 		sm.running[sessionID] = rs
 
-		runningDir := filepath.Join(sm.ccdData, "running")
+		runningDir := filepath.Join(sm.dataDir, "running")
 		pattern := filepath.Join(runningDir, "*-"+sessionID+".json")
 		matches, _ := filepath.Glob(pattern)
 		for _, f := range matches {
@@ -214,7 +214,7 @@ func (sm *StateManager) TransitionDoneToIdle() bool {
 				sf.State = "idle"
 				sf.Timestamp = a.LastUpdated
 				sm.statuses[a.SessionID] = sf
-				statusPath := filepath.Join(sm.ccdData, "status", a.SessionID+".json")
+				statusPath := filepath.Join(sm.dataDir, "status", a.SessionID+".json")
 				if data, err := json.Marshal(sf); err == nil {
 					os.WriteFile(statusPath, data, 0644)
 				}
@@ -231,7 +231,7 @@ func (sm *StateManager) CleanStale() bool {
 	defer sm.mu.Unlock()
 
 	changed := false
-	runningDir := filepath.Join(sm.ccdData, "running")
+	runningDir := filepath.Join(sm.dataDir, "running")
 	for sid, rs := range sm.running {
 		alive := false
 
@@ -353,7 +353,7 @@ func (sm *StateManager) ReconcileRunningFiles() bool {
 		}
 	}
 
-	runningDir := filepath.Join(sm.ccdData, "running")
+	runningDir := filepath.Join(sm.dataDir, "running")
 	for sid, rs := range sm.running {
 		if rs.ClaudePID > 0 {
 			continue
@@ -737,7 +737,7 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 // --- internal helpers ---
 
 func (sm *StateManager) loadProfiles() error {
-	dir := filepath.Join(sm.ccdData, "profiles")
+	dir := filepath.Join(sm.dataDir, "profiles")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil // not fatal
@@ -761,7 +761,7 @@ func (sm *StateManager) loadProfiles() error {
 }
 
 func (sm *StateManager) loadRunning() error {
-	dir := filepath.Join(sm.ccdData, "running")
+	dir := filepath.Join(sm.dataDir, "running")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -784,7 +784,7 @@ func (sm *StateManager) loadRunning() error {
 }
 
 func (sm *StateManager) loadStatuses() error {
-	dir := filepath.Join(sm.ccdData, "status")
+	dir := filepath.Join(sm.dataDir, "status")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -807,7 +807,7 @@ func (sm *StateManager) loadStatuses() error {
 }
 
 func (sm *StateManager) loadNameOverrides() {
-	path := filepath.Join(sm.ccdData, "name-overrides.json")
+	path := filepath.Join(sm.dataDir, "name-overrides.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return // file doesn't exist yet, that's fine
@@ -819,7 +819,7 @@ func (sm *StateManager) loadNameOverrides() {
 }
 
 func (sm *StateManager) saveNameOverrides() {
-	path := filepath.Join(sm.ccdData, "name-overrides.json")
+	path := filepath.Join(sm.dataDir, "name-overrides.json")
 	data, err := json.Marshal(sm.nameOverrides)
 	if err != nil {
 		return
@@ -828,7 +828,7 @@ func (sm *StateManager) saveNameOverrides() {
 }
 
 func (sm *StateManager) loadSessionIDMap() {
-	path := filepath.Join(sm.ccdData, "session-id-map.json")
+	path := filepath.Join(sm.dataDir, "session-id-map.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -840,7 +840,7 @@ func (sm *StateManager) loadSessionIDMap() {
 }
 
 func (sm *StateManager) saveSessionIDMap() {
-	path := filepath.Join(sm.ccdData, "session-id-map.json")
+	path := filepath.Join(sm.dataDir, "session-id-map.json")
 	data, err := json.Marshal(sm.sessionIDMap)
 	if err != nil {
 		return
@@ -849,7 +849,7 @@ func (sm *StateManager) saveSessionIDMap() {
 }
 
 func (sm *StateManager) loadAgentOrder() {
-	path := filepath.Join(sm.ccdData, "agent-order.json")
+	path := filepath.Join(sm.dataDir, "agent-order.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -858,7 +858,7 @@ func (sm *StateManager) loadAgentOrder() {
 }
 
 func (sm *StateManager) saveAgentOrder() {
-	path := filepath.Join(sm.ccdData, "agent-order.json")
+	path := filepath.Join(sm.dataDir, "agent-order.json")
 	data, err := json.Marshal(sm.agentOrder)
 	if err != nil {
 		return
@@ -963,7 +963,7 @@ func (sm *StateManager) rebuildAgents() {
 		if rs.CreatedAt != "" {
 			a.CreatedAt = rs.CreatedAt
 		} else {
-			runningDir := filepath.Join(sm.ccdData, "running")
+			runningDir := filepath.Join(sm.dataDir, "running")
 			pattern := filepath.Join(runningDir, "*-"+sid+".json")
 			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
 				if info, err := os.Stat(matches[0]); err == nil {

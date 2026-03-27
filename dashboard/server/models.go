@@ -1,6 +1,6 @@
 package server
 
-// Profile represents a ccd profile configuration.
+// Profile represents a pokegents profile configuration.
 type Profile struct {
 	Name         string `json:"name"`
 	Title        string `json:"title"`

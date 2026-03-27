@@ -24,12 +24,12 @@ type Notifier struct {
 	overridesPath string
 }
 
-func NewNotifier(webDir, ccdData string) *Notifier {
+func NewNotifier(webDir, dataDir string) *Notifier {
 	n := &Notifier{
 		lastSent:      make(map[string]time.Time),
 		debounce:      30 * time.Second,
 		spriteDir:     filepath.Join(webDir, "sprites"),
-		overridesPath: filepath.Join(ccdData, "sprite-overrides.json"),
+		overridesPath: filepath.Join(dataDir, "sprite-overrides.json"),
 	}
 	n.loadSprites()
 	n.loadOverrides()
@@ -136,7 +136,7 @@ func (n *Notifier) MaybeNotify(evt HookEvent, agent *AgentState) {
 func sendMacNotification(title, body, iconPath string) {
 	// Prefer terminal-notifier (supports custom icons), fall back to osascript
 	if tn, err := exec.LookPath("terminal-notifier"); err == nil {
-		args := []string{"-title", title, "-message", body, "-group", "ccd"}
+		args := []string{"-title", title, "-message", body, "-group", "pokegents"}
 		if iconPath != "" {
 			args = append(args, "-appIcon", iconPath, "-contentImage", iconPath)
 		}

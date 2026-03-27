@@ -40,11 +40,11 @@ type Config struct {
 // DefaultConfig returns config with sensible defaults, reading port from ~/.ccsession/config.json.
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
-	ccdData := filepath.Join(home, ".ccsession")
+	dataDir := filepath.Join(home, ".ccsession")
 
 	// Read port from config file
 	port := 7834
-	if data, err := os.ReadFile(filepath.Join(ccdData, "config.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(dataDir, "config.json")); err == nil {
 		var cfg struct {
 			Port int `json:"port"`
 		}
@@ -55,17 +55,17 @@ func DefaultConfig() Config {
 
 	return Config{
 		Port:             port,
-		CCDData:          ccdData,
+		DataDir:          dataDir,
 		ClaudeProjectDir: filepath.Join(home, ".claude", "projects"),
-		SearchDBPath:     filepath.Join(ccdData, "search.db"),
+		SearchDBPath:     filepath.Join(dataDir, "search.db"),
 		WebDir:           "", // set at runtime
 	}
 }
 
 func NewServer(cfg Config) (*Server, error) {
-	state := NewStateManager(cfg.CCDData, cfg.ClaudeProjectDir)
+	state := NewStateManager(cfg.DataDir, cfg.ClaudeProjectDir)
 	eventBus := NewEventBus()
-	notifier := NewNotifier(cfg.WebDir, cfg.CCDData)
+	notifier := NewNotifier(cfg.WebDir, cfg.DataDir)
 
 	search, err := NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)
 	if err != nil {
@@ -80,7 +80,7 @@ func NewServer(cfg Config) (*Server, error) {
 		notifier: notifier,
 		watcher:  NewWatcher(state, eventBus, notifier),
 		search:   search,
-		messages: NewMessageStore(cfg.CCDData),
+		messages: NewMessageStore(cfg.DataDir),
 		nudger:   NewNudger(state, terminal),
 		terminal: terminal,
 		mux:      http.NewServeMux(),
@@ -627,7 +627,7 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collect activity from all project logs
-	activityDir := filepath.Join(s.state.ccdData, "activity")
+	activityDir := filepath.Join(s.state.dataDir, "activity")
 	entries, err := os.ReadDir(activityDir)
 	if err != nil {
 		writeJSON(w, []any{})
@@ -743,7 +743,7 @@ func (s *Server) resolveSessionID(id string) string {
 	}
 	// Last resort: scan running files for ccd_session_id field
 	// (covers cases where the in-memory state lost the mapping)
-	runningDir := filepath.Join(s.state.ccdData, "running")
+	runningDir := filepath.Join(s.state.dataDir, "running")
 	entries, err := os.ReadDir(runningDir)
 	if err == nil {
 		for _, e := range entries {
@@ -766,7 +766,7 @@ func (s *Server) resolveSessionID(id string) string {
 		}
 	}
 	// Final fallback: check if a mailbox directory starts with the prefix
-	msgDir := filepath.Join(s.state.ccdData, "messages")
+	msgDir := filepath.Join(s.state.dataDir, "messages")
 	msgEntries, err := os.ReadDir(msgDir)
 	if err == nil {
 		for _, e := range msgEntries {
@@ -874,7 +874,7 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open a new iTerm2 tab and launch a forked clone via ccd
+	// Open a new iTerm2 tab and launch a forked clone via pokegents
 	if err := s.terminal.CloneSession(profileName, sessionID[:8]); err != nil {
 		http.Error(w, fmt.Sprintf("failed: %v", err), http.StatusInternalServerError)
 		return
@@ -883,7 +883,7 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) spriteOverridesPath() string {
-	return filepath.Join(s.state.ccdData, "sprite-overrides.json")
+	return filepath.Join(s.state.dataDir, "sprite-overrides.json")
 }
 
 func (s *Server) loadSpriteOverrides() map[string]string {

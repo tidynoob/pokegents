@@ -31,7 +31,7 @@ export default function App() {
     if (collapsedInitialized.current || agents.length === 0) return
     collapsedInitialized.current = true
     try {
-      const saved: string[] = JSON.parse(localStorage.getItem('ccd-collapsed') || '[]')
+      const saved: string[] = JSON.parse(localStorage.getItem('pokegents-collapsed') || '[]')
       const validIds = new Set(agents.map(a => a.session_id))
       const restored = saved.filter(id => validIds.has(id))
       if (restored.length > 0) {
@@ -43,7 +43,7 @@ export default function App() {
   // Persist collapsed state (skip the initial empty set)
   useEffect(() => {
     if (!collapsedInitialized.current) return
-    localStorage.setItem('ccd-collapsed', JSON.stringify([...collapsedIds]))
+    localStorage.setItem('pokegents-collapsed', JSON.stringify([...collapsedIds]))
   }, [collapsedIds])
   const msgLogRef = useRef<HTMLDivElement>(null)
   const actLogRef = useRef<HTMLDivElement>(null)
@@ -349,7 +349,7 @@ export default function App() {
           <div className="text-center">
             <p className="text-sm text-zinc-600">No agents running</p>
             <p className="text-xs text-zinc-700 mt-1">
-              Start a session with <code className="text-accent-blue">ccd &lt;profile&gt;</code>
+              Start a session with <code className="text-accent-blue">pokegents &lt;profile&gt;</code>
             </p>
           </div>
         </div>

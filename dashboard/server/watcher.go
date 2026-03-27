@@ -34,8 +34,8 @@ func (w *Watcher) Start() error {
 		return err
 	}
 
-	statusDir := filepath.Join(w.state.ccdData, "status")
-	runningDir := filepath.Join(w.state.ccdData, "running")
+	statusDir := filepath.Join(w.state.dataDir, "status")
+	runningDir := filepath.Join(w.state.dataDir, "running")
 
 	if err := w.watcher.Add(statusDir); err != nil {
 		log.Printf("watcher: cannot watch %s: %v", statusDir, err)

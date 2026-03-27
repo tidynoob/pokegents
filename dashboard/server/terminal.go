@@ -12,11 +12,11 @@ type TerminalIntegration interface {
 	SetTabName(itermSessionID, tty, name string) error
 	// CloseSession closes the terminal session/tab.
 	CloseSession(itermSessionID, tty string) error
-	// CloneSession opens a new tab and launches a forked ccd session.
+	// CloneSession opens a new tab and launches a forked pokegents session.
 	CloneSession(profile, sessionIDPrefix string) error
-	// ResumeSession opens a new tab and resumes an existing ccd session.
+	// ResumeSession opens a new tab and resumes an existing pokegents session.
 	ResumeSession(profile, sessionID string) error
-	// LaunchProfile opens a new tab and starts a fresh ccd session for the given profile.
+	// LaunchProfile opens a new tab and starts a fresh pokegents session for the given profile.
 	LaunchProfile(profile, itermProfile string) error
 	// IsAvailable reports whether the terminal integration is functional
 	// on the current platform.

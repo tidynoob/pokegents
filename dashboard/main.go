@@ -35,7 +35,7 @@ func runServe() {
 
 	// Override from environment
 	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
-		cfg.CCDData = v
+		cfg.DataDir = v
 	}
 	if v := os.Getenv("DASHBOARD_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
@@ -68,10 +68,10 @@ func runServe() {
 func runIndex() {
 	cfg := server.DefaultConfig()
 	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
-		cfg.CCDData = v
+		cfg.DataDir = v
 	}
 
-	state := server.NewStateManager(cfg.CCDData, cfg.ClaudeProjectDir)
+	state := server.NewStateManager(cfg.DataDir, cfg.ClaudeProjectDir)
 	state.LoadAll()
 
 	search, err := server.NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)

@@ -35,15 +35,15 @@ type AgentConnection struct {
 // MessageStore manages inter-agent messages.
 type MessageStore struct {
 	mu      sync.Mutex
-	ccdData string
+	dataDir string
 	history []Message // recent message history for UI
 }
 
-func NewMessageStore(ccdData string) *MessageStore {
-	msgDir := filepath.Join(ccdData, "messages")
+func NewMessageStore(dataDir string) *MessageStore {
+	msgDir := filepath.Join(dataDir, "messages")
 	os.MkdirAll(msgDir, 0755)
 	ms := &MessageStore{
-		ccdData: ccdData,
+		dataDir: dataDir,
 		history: make([]Message, 0),
 	}
 	ms.loadHistory()
@@ -67,7 +67,7 @@ func (ms *MessageStore) Send(from, fromName, to, toName, content string) (*Messa
 	}
 
 	// Write to recipient's mailbox directory
-	mailbox := filepath.Join(ms.ccdData, "messages", to)
+	mailbox := filepath.Join(ms.dataDir, "messages", to)
 	os.MkdirAll(mailbox, 0755)
 
 	data, err := json.Marshal(msg)
@@ -112,7 +112,7 @@ func (ms *MessageStore) DeliverPending(sessionID string) []Message {
 	defer ms.mu.Unlock()
 
 	allMessages := ms.readMailbox(sessionID)
-	mailbox := filepath.Join(ms.ccdData, "messages", sessionID)
+	mailbox := filepath.Join(ms.dataDir, "messages", sessionID)
 
 	var delivered []Message
 	for _, msg := range allMessages {
@@ -140,7 +140,7 @@ func (ms *MessageStore) ConsumePending(sessionID string) []Message {
 	messages := ms.readMailbox(sessionID)
 
 	// Delete consumed messages from mailbox
-	mailbox := filepath.Join(ms.ccdData, "messages", sessionID)
+	mailbox := filepath.Join(ms.dataDir, "messages", sessionID)
 	for _, msg := range messages {
 		os.Remove(filepath.Join(mailbox, msg.ID+".json"))
 	}
@@ -162,7 +162,7 @@ func (ms *MessageStore) ConsumePending(sessionID string) []Message {
 }
 
 func (ms *MessageStore) readMailbox(sessionID string) []Message {
-	mailbox := filepath.Join(ms.ccdData, "messages", sessionID)
+	mailbox := filepath.Join(ms.dataDir, "messages", sessionID)
 	entries, err := os.ReadDir(mailbox)
 	if err != nil {
 		return nil
@@ -248,7 +248,7 @@ func (ms *MessageStore) GetConnections() []AgentConnection {
 // --- persistence ---
 
 func (ms *MessageStore) historyPath() string {
-	return filepath.Join(ms.ccdData, "messages", "_history.json")
+	return filepath.Join(ms.dataDir, "messages", "_history.json")
 }
 
 func (ms *MessageStore) loadHistory() {
