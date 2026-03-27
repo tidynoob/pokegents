@@ -145,11 +145,31 @@ export default function App() {
     return Object.entries(groups)
   }, [visibleAgents])
 
+  // Map any ID (session_id or ccd_session_id) → session_id for sprite/agent lookups
+  const resolveId = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const a of agents) {
+      m[a.session_id] = a.session_id
+      if (a.ccd_session_id && a.ccd_session_id !== a.session_id) m[a.ccd_session_id] = a.session_id
+    }
+    return (id: string) => m[id] || id
+  }, [agents])
+
+  const getSpriteForId = useMemo(() => {
+    return (id: string) => {
+      const sid = resolveId(id)
+      return spriteOverrides[sid] || POKEMON_SPRITES[hashString(sid) % POKEMON_SPRITES.length]
+    }
+  }, [resolveId, spriteOverrides])
+
   // Build a map of session_id → connected agent info (for icons)
   const agentMap = useMemo(() => {
     const m: Record<string, { session_id: string; emoji: string; display_name: string }> = {}
     for (const a of agents) {
       m[a.session_id] = { session_id: a.session_id, emoji: a.emoji, display_name: a.display_name || a.profile_name }
+      if (a.ccd_session_id && a.ccd_session_id !== a.session_id) {
+        m[a.ccd_session_id] = m[a.session_id]
+      }
     }
     return m
   }, [agents])
@@ -263,7 +283,15 @@ export default function App() {
         hideSprite={hiddenSprites.has(agent.session_id)}
 
         onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
-        cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
+        cardRef={(el) => {
+          if (el) {
+            cardRefs.current.set(agent.session_id, el)
+            if (agent.ccd_session_id && agent.ccd_session_id !== agent.session_id) cardRefs.current.set(agent.ccd_session_id, el)
+          } else {
+            cardRefs.current.delete(agent.session_id)
+            if (agent.ccd_session_id) cardRefs.current.delete(agent.ccd_session_id)
+          }
+        }}
       />
     </div>
   )
@@ -422,8 +450,8 @@ export default function App() {
                 <div className="text-[10px] text-zinc-700 font-mono">No messages yet</div>
               ) : messages.map((msg) => {
                 const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-                const fromSprite = spriteOverrides[msg.from] || POKEMON_SPRITES[hashString(msg.from) % POKEMON_SPRITES.length]
-                const toSprite = spriteOverrides[msg.to] || POKEMON_SPRITES[hashString(msg.to) % POKEMON_SPRITES.length]
+                const fromSprite = getSpriteForId(msg.from)
+                const toSprite = getSpriteForId(msg.to)
                 return (
                   <div key={msg.id + (msg.delivered ? '-d' : '')} className="flex items-start gap-1.5 text-[10px] font-mono">
                     <span className="text-zinc-700 shrink-0 mt-0.5">{time}</span>
@@ -451,7 +479,7 @@ export default function App() {
                 <div className="text-[10px] text-zinc-700 font-mono">No activity yet</div>
               ) : activity.map((entry, i) => {
                 const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-                const sprite = spriteOverrides[entry.session_id] || POKEMON_SPRITES[hashString(entry.session_id) % POKEMON_SPRITES.length]
+                const sprite = getSpriteForId(entry.session_id)
                 return (
                   <div
                     key={i}

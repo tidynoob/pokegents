@@ -1,5 +1,6 @@
 export interface AgentState {
   session_id: string
+  ccd_session_id?: string
   profile_name: string
   display_name: string
   emoji: string

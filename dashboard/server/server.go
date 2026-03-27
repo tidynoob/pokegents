@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"pokegents/dashboard/server/store"
 )
 
 // Server is the main dashboard HTTP server.
@@ -63,7 +65,8 @@ func DefaultConfig() Config {
 }
 
 func NewServer(cfg Config) (*Server, error) {
-	state := NewStateManager(cfg.DataDir, cfg.ClaudeProjectDir)
+	fileStore := store.NewFileStore(cfg.DataDir)
+	state := NewStateManagerWithStore(fileStore, cfg.DataDir, cfg.ClaudeProjectDir)
 	eventBus := NewEventBus()
 	notifier := NewNotifier(cfg.WebDir, cfg.DataDir)
 

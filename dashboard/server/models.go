@@ -1,44 +1,18 @@
 package server
 
-// Profile represents a pokegents profile configuration.
-type Profile struct {
-	Name         string `json:"name"`
-	Title        string `json:"title"`
-	Emoji        string `json:"emoji"`
-	Color        [3]int `json:"color"`
-	CWD          string `json:"cwd"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	ITermProfile string `json:"iterm2_profile,omitempty"`
-}
+import "pokegents/dashboard/server/store"
 
-// RunningSession is the data stored in ~/.ccsession/running/*.json.
-type RunningSession struct {
-	Profile        string `json:"profile"`
-	SessionID      string `json:"session_id"`
-	PID            int    `json:"pid"`
-	ClaudePID      int    `json:"claude_pid"`
-	TTY            string `json:"tty"`
-	DisplayName    string `json:"display_name"`
-	CCDSessionID   string `json:"ccd_session_id,omitempty"`
-	ITermSessionID string `json:"iterm_session_id,omitempty"`
-	CreatedAt      string `json:"created_at,omitempty"`
-}
-
-// StatusFile is the data stored in ~/.ccsession/status/*.json.
-type StatusFile struct {
-	SessionID     string   `json:"session_id"`
-	State         string   `json:"state"`
-	Detail        string   `json:"detail"`
-	CWD           string   `json:"cwd"`
-	Timestamp     string   `json:"timestamp"`
-	BusySince     string   `json:"busy_since,omitempty"`
-	LastSummary   string   `json:"last_summary"`
-	LastTrace     string   `json:"last_trace"`
-	UserPrompt    string   `json:"user_prompt"`
-	RecentActions []string `json:"recent_actions,omitempty"`
-}
+// Type aliases — these types are defined in store/ and used throughout server/.
+// Using aliases means existing code (state.go, server.go, etc.) compiles unchanged.
+// In Phase 2, direct references to store.X will replace these.
+type RunningSession = store.RunningSession
+type StatusFile = store.StatusFile
+type Profile = store.Profile
+type Message = store.Message
+type AgentConnection = store.Connection
 
 // AgentState is the merged view sent to the frontend.
+// This is server-only (not in store) because it combines data from multiple sources.
 type AgentState struct {
 	SessionID    string `json:"session_id"`
 	CCDSessionID string `json:"ccd_session_id,omitempty"`

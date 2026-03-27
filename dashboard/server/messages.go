@@ -10,29 +10,7 @@ import (
 	"time"
 )
 
-// Message represents a message between agents.
-type Message struct {
-	ID        string `json:"id"`
-	From      string `json:"from"`       // session ID of sender
-	FromName  string `json:"from_name"`  // display name of sender
-	To        string `json:"to"`         // session ID of recipient
-	ToName    string `json:"to_name"`    // display name of recipient
-	Content   string `json:"content"`
-	Timestamp string `json:"timestamp"`
-	Delivered bool   `json:"delivered"`
-}
-
-// AgentConnection represents a communication link between two agents.
-type AgentConnection struct {
-	AgentA       string `json:"agent_a"`       // session ID
-	AgentB       string `json:"agent_b"`       // session ID
-	AgentAName   string `json:"agent_a_name"`
-	AgentBName   string `json:"agent_b_name"`
-	MessageCount int    `json:"message_count"`
-	LastMessage  string `json:"last_message"`  // timestamp
-}
-
-// MessageStore manages inter-agent messages.
+// MessageManager manages inter-agent messages.
 type MessageStore struct {
 	mu      sync.Mutex
 	dataDir string

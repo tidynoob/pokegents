@@ -371,7 +371,35 @@ Becomes a thin wrapper:
 - `send_message` → POST /api/messages
 - `check_messages` → POST /api/messages/consume/{id}
 
-**Key change:** If dashboard is down, the MCP server can fall back to reading Store files directly (running files for list_agents, message files for check_messages). Currently it fails completely.
+**Key change:** If dashboard is down, the MCP server falls back to reading Store files directly.
+
+#### MCP Fallback Contract (implemented in Phase 0)
+
+**Detection:** Each API call has a 2s timeout (AbortController). On timeout or connection refused, the tool switches to file mode. After a failure, API calls are skipped for 30s (backoff) to avoid 2s delays on every tool call.
+
+**`list_agents` fallback:**
+- Scan `~/.pokegents/running/*.json`
+- Parse fields: `profile`, `session_id`, `ccd_session_id`, `display_name`, `tty`
+- For state: read `~/.pokegents/status/{session_id}.json`, parse `state`, `detail`, `user_prompt`
+- Return same shape as `/api/sessions` response
+
+**`check_messages` fallback:**
+- Resolve own session ID from `POKEGENTS_SESSION_ID` env var (always set by pokegent.sh)
+- Read all `~/.pokegents/messages/{ccd_session_id}/*.json` (skip files starting with `_` like `_msg_budget`)
+- Sort by `timestamp` field
+- Delete each file after reading (consume semantics)
+- Return same shape as `/api/messages/consume/{id}` response
+
+**`send_message` fallback:**
+- Resolve recipient by scanning `~/.pokegents/running/*.json` for `ccd_session_id` prefix match
+- Generate message ID: `Date.now() * 1e6 + random(0, 1e6)`
+- Write JSON to `~/.pokegents/messages/{to_ccd_session_id}/{id}.json`
+- Fields: `id`, `from`, `from_name`, `to`, `to_name`, `content`, `timestamp` (ISO 8601), `delivered: false`
+- Budget tracking unchanged (file-based, always works)
+
+**ID resolution without API:**
+- `resolveAgent` scans running files for `ccd_session_id` prefix match, falls back to `session_id` prefix
+- Claude PID fallback: matches `process.ppid` against `claude_pid` field in running files
 
 ---
 

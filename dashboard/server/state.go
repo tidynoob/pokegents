@@ -13,12 +13,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	storelib "pokegents/dashboard/server/store"
 )
 
 // StateManager holds the in-memory merged view of all agent state.
 type StateManager struct {
 	mu       sync.RWMutex
-	profiles map[string]Profile     // keyed by profile name
+	store    *storelib.Store          // Layer 0 file-backed store
+	profiles map[string]Profile       // keyed by profile name
 	running  map[string]RunningSession // keyed by session_id
 	statuses map[string]StatusFile     // keyed by session_id
 	agents   map[string]*AgentState    // keyed by session_id
@@ -28,12 +31,17 @@ type StateManager struct {
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
 	agentOrder    []string                  // user-defined display order (session IDs), persisted
 
-	dataDir          string // ~/.ccsession
+	dataDir          string // ~/.ccsession — kept for paths not yet migrated to store
 	claudeProjectDir string // ~/.claude/projects
 }
 
 func NewStateManager(dataDir, claudeProjectDir string) *StateManager {
+	return NewStateManagerWithStore(nil, dataDir, claudeProjectDir)
+}
+
+func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir string) *StateManager {
 	return &StateManager{
+		store:            s,
 		profiles:         make(map[string]Profile),
 		running:          make(map[string]RunningSession),
 		statuses:         make(map[string]StatusFile),
@@ -737,6 +745,18 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 // --- internal helpers ---
 
 func (sm *StateManager) loadProfiles() error {
+	if sm.store != nil {
+		profiles, err := sm.store.Profiles.List()
+		if err != nil {
+			return nil
+		}
+		sm.profiles = make(map[string]Profile, len(profiles))
+		for _, p := range profiles {
+			sm.profiles[p.Name] = p
+		}
+		return nil
+	}
+	// Legacy fallback: direct file I/O
 	dir := filepath.Join(sm.dataDir, "profiles")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -761,6 +781,20 @@ func (sm *StateManager) loadProfiles() error {
 }
 
 func (sm *StateManager) loadRunning() error {
+	if sm.store != nil {
+		sessions, err := sm.store.Running.List()
+		if err != nil {
+			return nil
+		}
+		sm.running = make(map[string]RunningSession, len(sessions))
+		for _, rs := range sessions {
+			if rs.SessionID != "" {
+				sm.running[rs.SessionID] = rs
+			}
+		}
+		return nil
+	}
+	// Legacy fallback: direct file I/O
 	dir := filepath.Join(sm.dataDir, "running")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -784,6 +818,20 @@ func (sm *StateManager) loadRunning() error {
 }
 
 func (sm *StateManager) loadStatuses() error {
+	if sm.store != nil {
+		statuses, err := sm.store.Status.List()
+		if err != nil {
+			return nil
+		}
+		sm.statuses = make(map[string]StatusFile, len(statuses))
+		for _, sf := range statuses {
+			if sf.SessionID != "" {
+				sm.statuses[sf.SessionID] = sf
+			}
+		}
+		return nil
+	}
+	// Legacy fallback: direct file I/O
 	dir := filepath.Join(sm.dataDir, "status")
 	entries, err := os.ReadDir(dir)
 	if err != nil {

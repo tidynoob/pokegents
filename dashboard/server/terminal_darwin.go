@@ -51,7 +51,7 @@ tell application "iTerm2"
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "pokegents %s --resume %s --fork-session"
+			write text "pokegent %s --resume %s --fork-session"
 		end tell
 	end tell
 end tell`, safeProfile, safeSID)
@@ -71,7 +71,7 @@ tell application "iTerm2"
 		%s
 		delay 1
 		tell current session
-			write text "pokegents %s"
+			write text "pokegent %s"
 		end tell
 	end tell
 end tell`, createTab, safeProfile)
@@ -88,7 +88,7 @@ tell application "iTerm2"
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "pokegents %s -r %s"
+			write text "pokegent %s -r %s"
 		end tell
 	end tell
 end tell`, safeProfile, safeSession)
