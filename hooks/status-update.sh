@@ -125,7 +125,7 @@ case "$EVENT" in
     ;;
   "Stop")
     STATE="done"
-    SUMMARY=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null | head -c 200 || echo "")
+    SUMMARY=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null | head -c 2000 || echo "")
     # If Stop fires after /compact with no assistant message, show "Compacted"
     if [ -z "$SUMMARY" ]; then
       STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"

@@ -92,16 +92,25 @@ pokegent dashboard stop      # Stop the dashboard server
 ```
 
 The dashboard shows:
-- All active agents grouped by profile with colored cards
-- **Status**: idle (grey), busy (yellow), done (green), needs input (red)
+- All active agents in a flat grid with colored cards
+- **Status**: idle (grey/dimmed), busy (yellow), done (green), needs input (red)
 - **Your last prompt** to each agent for context
 - **Live thinking traces** while agents are busy
-- **Final responses** when agents finish (with markdown formatting)
-- **Pixel creature icon** unique to each session
+- **Full responses** when agents finish (with markdown formatting, scrollable)
+- **Pixel creature icon** unique to each session (deterministic from session ID)
+- **Context health bar** (green/yellow/red) showing token usage per agent
 - **Click** an agent to switch to its iTerm2 tab
 - **Double-click** the name to rename an agent
-- **Press `/`** to search past sessions with full-text search
+- **Drag and drop** cards to reorder agents (persisted across sessions)
+- **Collapse** agents to sprite bubbles via the red dot in the top-right corner
+- **Paste images** (Cmd+V) into agent input boxes — uploads to Claude's image cache
+- **Spawn new agents** from the "+ New" dropdown (top-left)
+- **Press `/`** to search past sessions with full-text search (with Pokemon sprites)
 - **Resume** past sessions directly from search results
+- **Idle dimming** — agents idle for 10+ minutes fade to 60% opacity
+- **Message delivery animations** — sender sprite flies to recipient
+- **Configurable sprite animations** — busy (hop/shake/wiggle), idle (blink/doze), done (sway)
+- **Floating emoji bubbles** — work emojis when busy, celebration emoji on completion
 
 ### Multiple concurrent agents
 
@@ -272,7 +281,11 @@ When multiple agents work on the same project, they automatically share an activ
 1. **On finish** — the agent's changed files and summary are appended to `~/.pokegents/activity/`
 2. **On next prompt** — agents see what others changed since their last turn, with file overlap warnings
 
-This prevents agents from silently overwriting each other's work. The dashboard shows the activity feed in the bottom bar alongside messages.
+This prevents agents from silently overwriting each other's work. The dashboard shows the activity feed in a collapsible bottom bar alongside the message log.
+
+## Image support
+
+Paste screenshots or images (Cmd+V) directly into any agent's input box in the dashboard. The image is saved to `~/.claude/image-cache/{session_id}/` and the file path is inserted into the prompt. When you send it, the agent reads the image via its Read tool. Include a prompt like "describe this image" or "look at this screenshot" alongside the path.
 
 ## Built-in profiles
 

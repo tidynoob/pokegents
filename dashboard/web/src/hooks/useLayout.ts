@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 
-export type LayoutMode = 'max' | 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
+export type LayoutMode = 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
 
 export interface GridLayout {
   cols: number
@@ -12,11 +12,8 @@ const MIN_CELL_WIDTH = 280
 const GAP = 8
 const PADDING = 24
 const HEADER_HEIGHT = 48
-const GROUP_LABEL_HEIGHT = 22
-const GROUP_GAP = 16
 
-const H_MAX = 250
-const H_STANDARD = 220
+const H_STANDARD = 250
 const H_STANDARD_SHORT = 180
 const H_COMPACT = 128
 const H_COMPACT_MINIMAL = 92
@@ -27,12 +24,12 @@ export function useGridLayout(
   agentsPerProfile?: number[]
 ): GridLayout {
   const [layout, setLayout] = useState<GridLayout>(() =>
-    compute(agentCount, profileCount || 1, agentsPerProfile)
+    compute(agentCount)
   )
 
   const recompute = useCallback(() => {
-    setLayout(compute(agentCount, profileCount || 1, agentsPerProfile))
-  }, [agentCount, profileCount, agentsPerProfile])
+    setLayout(compute(agentCount))
+  }, [agentCount])
 
   useEffect(() => {
     recompute()
@@ -43,8 +40,8 @@ export function useGridLayout(
   return layout
 }
 
-function compute(agentCount: number, profileCount: number, agentsPerProfile?: number[]): GridLayout {
-  if (agentCount === 0) return { cols: 2, mode: 'max' }
+function compute(agentCount: number): GridLayout {
+  if (agentCount === 0) return { cols: 2, mode: 'standard' }
 
   const w = window.innerWidth - PADDING
   const h = window.innerHeight
@@ -60,19 +57,6 @@ function compute(agentCount: number, profileCount: number, agentsPerProfile?: nu
     break
   }
 
-  // Max mode: count rows PER profile group (each group starts a new row)
-  const groupRows = agentsPerProfile
-    ? agentsPerProfile.reduce((sum, n) => sum + Math.ceil(n / cols), 0)
-    : profileCount // fallback: 1 row per profile
-  const maxHeight = groupRows * H_MAX
-    + (groupRows - 1) * GAP
-    + profileCount * (GROUP_LABEL_HEIGHT + GROUP_GAP)
-
-  if (maxHeight <= availableWithHeader) {
-    return { cols, mode: 'max' }
-  }
-
-  // Standard and below: flat grid, rows = ceil(total / cols)
   const flatRows = Math.ceil(agentCount / cols)
 
   const stdHeight = flatRows * H_STANDARD + (flatRows - 1) * GAP

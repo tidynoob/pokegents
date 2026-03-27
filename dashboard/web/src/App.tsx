@@ -124,26 +124,9 @@ export default function App() {
     return ordered
   }, [baseVisible, dragOrder])
 
-  const { profileCount, agentsPerProfile } = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const a of visibleAgents) {
-      counts[a.profile_name || 'other'] = (counts[a.profile_name || 'other'] || 0) + 1
-    }
-    return { profileCount: Object.keys(counts).length, agentsPerProfile: Object.values(counts) }
-  }, [visibleAgents])
-  const { cols, mode } = useGridLayout(visibleAgents.length, profileCount, agentsPerProfile)
-  const showHeader = mode === 'max' || mode === 'standard' || mode === 'standard-short'
+  const { cols, mode } = useGridLayout(visibleAgents.length)
+  const showHeader = mode === 'standard' || mode === 'standard-short'
 
-  // Group by profile for non-compact mode
-  const grouped = useMemo(() => {
-    const groups: Record<string, AgentState[]> = {}
-    for (const a of visibleAgents) {
-      const key = a.profile_name || 'other'
-      if (!groups[key]) groups[key] = []
-      groups[key].push(a)
-    }
-    return Object.entries(groups)
-  }, [visibleAgents])
 
   // Map any ID (session_id or ccd_session_id) → session_id for sprite/agent lookups
   const resolveId = useMemo(() => {
@@ -381,35 +364,7 @@ export default function App() {
             </p>
           </div>
         </div>
-      ) : mode === 'max' ? (
-        /* Max: grouped by profile in separate rows */
-        <div className="flex-1 min-h-0 overflow-auto flex flex-col gap-3">
-          {grouped.map(([profileName, profileAgents]) => (
-            <div key={profileName}>
-              <div className="text-[9px] text-zinc-600 uppercase tracking-wider mb-1.5 px-0.5">{profileName}</div>
-              <div
-                className="grid gap-2"
-                style={{
-                  gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-                }}
-              >
-                {profileAgents.map((agent) => renderCard(agent, mode))}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : mode === 'standard' || mode === 'standard-short' ? (
-        /* Standard / standard-short: flat grid with header */
-        <div
-          className="flex-1 grid gap-2 min-h-0 content-start overflow-auto"
-          style={{
-            gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          }}
-        >
-          {visibleAgents.map((agent) => renderCard(agent, mode))}
-        </div>
       ) : (
-        /* Compact: flat grid, minimal */
         <div
           className="flex-1 grid gap-2 min-h-0 content-start overflow-auto"
           style={{

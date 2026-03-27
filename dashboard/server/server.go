@@ -132,6 +132,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
+	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
+	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
 	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
 	s.mux.HandleFunc("POST /api/profiles/{name}/launch", s.handleLaunchProfile)
@@ -917,6 +919,74 @@ func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
 		s.terminal.CloseSession(itermSID, tty)
 	}()
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+
+	// Read image data (max 10MB)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "invalid upload", http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, 10<<20))
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+
+	// Find the image cache dir and next number
+	home, _ := os.UserHomeDir()
+	cacheDir := filepath.Join(home, ".claude", "image-cache", sessionID)
+	os.MkdirAll(cacheDir, 0755)
+
+	// Find next available number
+	num := 1
+	for {
+		if _, err := os.Stat(filepath.Join(cacheDir, fmt.Sprintf("%d.png", num))); os.IsNotExist(err) {
+			break
+		}
+		num++
+	}
+
+	imgPath := filepath.Join(cacheDir, fmt.Sprintf("%d.png", num))
+	if err := os.WriteFile(imgPath, data, 0644); err != nil {
+		http.Error(w, "write error", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the file path — the agent can read it directly via the Read tool.
+	// Claude Code's [Image #N] syntax only works for images pasted through its
+	// own terminal paste handler, not for externally written files.
+	writeJSON(w, map[string]any{"image_num": num, "path": imgPath, "ref": fmt.Sprintf("[Image: %s]", imgPath)})
+}
+
+func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	path := s.state.FindTranscriptPath(sessionID)
+	if path == "" {
+		writeJSON(w, store.TranscriptPage{})
+		return
+	}
+
+	tail := 100
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tail = n
+		}
+	}
+	afterUUID := r.URL.Query().Get("after")
+
+	reader := store.NewTranscriptReader(s.state.claudeProjectDir)
+	page := reader.ParseTranscript(path, tail, afterUUID)
+	writeJSON(w, page)
 }
 
 func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {

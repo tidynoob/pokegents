@@ -627,7 +627,7 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 		sf.Detail = "finished"
 		sf.RecentActions = nil
 		sf.BusySince = ""
-		sf.LastSummary = truncate(evt.LastAssistantMessage, 200)
+		sf.LastSummary = truncate(evt.LastAssistantMessage, 2000)
 	case "PermissionRequest":
 		sf.State = "needs_input"
 		sf.Detail = "needs permission for " + evt.ToolName

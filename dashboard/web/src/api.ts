@@ -116,6 +116,40 @@ export async function saveAgentOrder(order: string[]): Promise<void> {
   })
 }
 
+export interface TranscriptEntry {
+  uuid: string
+  type: 'user' | 'assistant' | 'tool_result' | 'system'
+  timestamp: string
+  content?: string
+  blocks?: { type: string; text?: string; name?: string; input?: string }[]
+  tool_use_id?: string
+  truncated?: boolean
+  full_size?: number
+  model?: string
+  tokens?: { input: number; output: number; cache_read?: number; cache_create?: number }
+}
+
+export interface TranscriptPage {
+  entries: TranscriptEntry[] | null
+  has_more: boolean
+}
+
+export async function fetchTranscript(sessionId: string, tail = 100, after?: string): Promise<TranscriptPage> {
+  const params = new URLSearchParams({ tail: String(tail) })
+  if (after) params.set('after', after)
+  const res = await fetch(`${BASE}/sessions/${sessionId}/transcript?${params}`)
+  if (!res.ok) return { entries: null, has_more: false }
+  return res.json()
+}
+
+export async function uploadImage(sessionId: string, imageBlob: Blob): Promise<{ image_num: number; path: string; ref: string } | null> {
+  const form = new FormData()
+  form.append('image', imageBlob, 'paste.png')
+  const res = await fetch(`${BASE}/sessions/${sessionId}/image`, { method: 'POST', body: form })
+  if (!res.ok) return null
+  return res.json()
+}
+
 export async function fetchMessageHistory(): Promise<AgentMessage[]> {
   const res = await fetch(`${BASE}/messages`)
   if (!res.ok) return []

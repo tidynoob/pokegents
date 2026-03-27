@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { StatusBadge } from './StatusBadge'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt } from '../api'
+import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { POKEMON_SPRITES } from './sprites'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
@@ -56,6 +56,7 @@ function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: numb
 function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus?: () => void; onBlur?: () => void }) {
   const [value, setValue] = useState('')
   const [sending, setSending] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -65,24 +66,55 @@ function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus
     await sendPrompt(sessionId, value.trim())
     setValue('')
     setSending(false)
+    if (textareaRef.current) textareaRef.current.style.height = '28px'
+  }
+
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault()
+        const blob = item.getAsFile()
+        if (!blob) continue
+        const result = await uploadImage(sessionId, blob)
+        if (result) {
+          setValue(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + result.path + ' ')
+        }
+        return
+      }
+    }
   }
 
   return (
     <form onSubmit={handleSubmit} onClick={(e) => e.stopPropagation()} data-no-drag className="mt-1.5 shrink-0">
-      <input
-        type="text"
+      <textarea
+        ref={textareaRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onFocus={onFocus}
         onBlur={onBlur}
+        onPaste={handlePaste}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            handleSubmit(e)
+          }
+        }}
+        onInput={(e) => {
+          const t = e.currentTarget
+          t.style.height = '28px'
+          t.style.height = Math.min(t.scrollHeight, 80) + 'px'
+        }}
+        rows={1}
         placeholder="Send command..."
-        className="w-full bg-black/30 border border-zinc-800 rounded-md px-2.5 py-1.5 text-[10px] font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-zinc-600 transition-colors"
+        className="w-full bg-black/30 border border-zinc-800 rounded-md px-2.5 py-1.5 text-[10px] font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-zinc-600 transition-colors resize-none"
+        style={{ height: 28 }}
       />
     </form>
   )
 }
 
-type LayoutMode = 'max' | 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
+type LayoutMode = 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
 
 interface AgentCardProps {
   agent: AgentState
@@ -109,7 +141,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
 
 export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, cardRef }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
-  const showPrompt = mode === 'max' || mode === 'standard'
+  const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
   const outputH = (mode === 'standard-short' || compact) ? 'h-[52px]' : 'h-[112px]'
   const title = agent.display_name || agent.profile_name || 'Agent'
@@ -364,7 +396,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, effectiveIdle, outputText
         </div>
       ) : outputText ? (
         <div
-          className={`${textSize} font-mono leading-relaxed whitespace-pre-wrap overflow-hidden ${
+          className={`${textSize} font-mono leading-relaxed whitespace-pre-wrap ${
             effectiveIdle ? 'text-zinc-500' : isDone ? 'text-emerald-300/70' : 'text-zinc-400'
           } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-white/5`}
         >
