@@ -2,6 +2,8 @@
 
 Run multiple Claude Code agents simultaneously with named profiles, session tracking, real-time notifications, and a web dashboard to monitor them all.
 
+![Pokegents Dashboard](docs/screenshot.png)
+
 ## What it does
 
 - **Named profiles** — Each project gets a profile with its own working directory, system prompt, emoji, and terminal color
