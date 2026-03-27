@@ -447,13 +447,18 @@ if last_title: print(last_title)
       rm -f "$running_file"
 
       if [[ "$fork_session" == "true" ]]; then
-        # Fork: keep our fresh pokegent UUID — Claude will generate its own session ID.
+        # Fork: fresh UUID — Claude will generate its own session ID.
         # The SessionStart hook will reconcile via POKEGENTS_SESSION_ID env var.
         session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
       else
-        # Normal resume: use the resolved session ID
+        # Normal resume: use the resolved session ID for running file naming
         session_id="${matches[1]}"
       fi
+
+      # ALWAYS generate a fresh ccd_session_id for mailbox routing.
+      # Even for normal resume — if the original session is still running,
+      # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
+      local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
       running_file="$RUNNING_DIR/${profile_name}-${session_id}.json"
       jq -n \
@@ -462,7 +467,7 @@ if last_title: print(last_title)
         --arg pid "$$" \
         --arg tty "$(tty)" \
         --arg name "$display_name" \
-        --arg ccd_sid "$session_id" \
+        --arg ccd_sid "$ccd_session_id" \
         --arg iterm_sid "$iterm_sid" \
         --arg created_at "$created_at" \
         '{profile: $profile, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
@@ -493,7 +498,7 @@ with open(sys.argv[1]) as f:
 
 You are one of several concurrent Claude Code agents managed by pokegents. You can communicate with other agents using MCP tools.
 
-**Your session ID:** $session_id
+**Your session ID:** ${ccd_session_id:-$session_id}
 
 **Available MCP tools (pokegents-messaging):**
 - \`list_agents\` — see all active agents and their status
@@ -535,8 +540,10 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   fi
   trap "rm -f '$running_file' '$dyn_profile_cleanup'" EXIT INT TERM HUP
 
+  # Use ccd_session_id for POKEGENTS_SESSION_ID (unique per agent, even for resume/clone).
+  # Falls back to session_id for fresh launches where ccd_session_id isn't set separately.
   POKEGENTS_ROOT="$POKEGENTS_ROOT" POKEGENTS_DATA="$POKEGENTS_DATA" POKEGENTS_PROFILE_NAME="$profile_name" \
-    POKEGENTS_SESSION_ID="$session_id" \
+    POKEGENTS_SESSION_ID="${ccd_session_id:-$session_id}" \
     CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude "${claude_args[@]}"
 
   # Disarm trap and clean up explicitly
