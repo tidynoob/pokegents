@@ -1,30 +1,30 @@
 #!/usr/bin/env zsh
-# ccd — Claude Code session manager
-# Source this file in your .zshrc:  source /path/to/ccd/ccd.sh
+# pokegents — Claude Code Agent Orchestration Platform
+# Source this file in your .zshrc:  source /path/to/pokegents/pokegent.sh
 
 # Resolve install directory at source time
-CCD_ROOT="${${(%):-%x}:A:h}"
-CCD_DATA="${CCD_DATA:-$HOME/.ccsession}"
+POKEGENTS_ROOT="${${(%):-%x}:A:h}"
+POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
 
 # Platform detection — iTerm2 features are optional
-CCD_HAS_ITERM=false
-[[ "$TERM_PROGRAM" == "iTerm.app" ]] && CCD_HAS_ITERM=true
-CCD_IS_MACOS=false
-[[ "$OSTYPE" == darwin* ]] && CCD_IS_MACOS=true
+POKEGENTS_HAS_ITERM=false
+[[ "$TERM_PROGRAM" == "iTerm.app" ]] && POKEGENTS_HAS_ITERM=true
+POKEGENTS_IS_MACOS=false
+[[ "$OSTYPE" == darwin* ]] && POKEGENTS_IS_MACOS=true
 
-ccd() {
-  local PROFILES_DIR="$CCD_DATA/profiles"
-  local HISTORY_DIR="$CCD_DATA/history"
-  local RUNNING_DIR="$CCD_DATA/running"
-  local CCD_CONFIG="$CCD_DATA/config.json"
+pokegent() {
+  local PROFILES_DIR="$POKEGENTS_DATA/profiles"
+  local HISTORY_DIR="$POKEGENTS_DATA/history"
+  local RUNNING_DIR="$POKEGENTS_DATA/running"
+  local POKEGENTS_CONFIG="$POKEGENTS_DATA/config.json"
   mkdir -p "$HISTORY_DIR" "$RUNNING_DIR"
 
   # Load config (single source of truth for port, defaults, etc.)
-  local CCD_PORT=$(jq -r '.port // 7834' "$CCD_CONFIG" 2>/dev/null || echo "7834")
-  local CCD_DEFAULT_PROFILE=$(jq -r '.default_profile // "personal"' "$CCD_CONFIG" 2>/dev/null || echo "personal")
-  local CCD_SKIP_PERMISSIONS=$(jq -r '.skip_permissions // false' "$CCD_CONFIG" 2>/dev/null || echo "false")
-  local CCD_ITERM_RESTORE=$(jq -r '.iterm2_restore_profile // "Default"' "$CCD_CONFIG" 2>/dev/null || echo "Default")
-  export CCD_DASHBOARD_URL="http://localhost:$CCD_PORT"
+  local POKEGENTS_PORT=$(jq -r '.port // 7834' "$POKEGENTS_CONFIG" 2>/dev/null || echo "7834")
+  local POKEGENTS_DEFAULT_PROFILE=$(jq -r '.default_profile // "personal"' "$POKEGENTS_CONFIG" 2>/dev/null || echo "personal")
+  local POKEGENTS_SKIP_PERMISSIONS=$(jq -r '.skip_permissions // false' "$POKEGENTS_CONFIG" 2>/dev/null || echo "false")
+  local POKEGENTS_ITERM_RESTORE=$(jq -r '.iterm2_restore_profile // "Default"' "$POKEGENTS_CONFIG" 2>/dev/null || echo "Default")
+  export POKEGENTS_DASHBOARD_URL="http://localhost:$POKEGENTS_PORT"
 
   # Clean up stale running session files
   for rf in "$RUNNING_DIR"/*.json(N); do
@@ -61,7 +61,7 @@ ccd() {
   # -h / --help
   if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     cat <<'HELP'
-Usage: ccd [command|profile] [options]
+Usage: pokegent [command|profile] [options]
 
 Commands:
   (none)              Launch default profile (personal)
@@ -72,65 +72,65 @@ Commands:
   -h, --help          Show this help message
 
 Launching a profile:
-  ccd <profile>       Start a new Claude Code session with the given profile
-  ccd <profile> -r              Resume a session (opens Claude's resume picker)
-  ccd <profile> -r <id>        Resume a specific session by ID (prefix match)
-  ccd <profile> -c             Same as -r
-  ccd <profile> --resume       Same as -r
-  ccd <profile> -w <name>    Launch in an isolated git worktree
-  ccd <profile> --worktree <name>   Same as -w
+  pokegent <profile>       Start a new Claude Code session with the given profile
+  pokegent <profile> -r              Resume a session (opens Claude's resume picker)
+  pokegent <profile> -r <id>        Resume a specific session by ID (prefix match)
+  pokegent <profile> -c             Same as -r
+  pokegent <profile> --resume       Same as -r
+  pokegent <profile> -w <name>    Launch in an isolated git worktree
+  pokegent <profile> --worktree <name>   Same as -w
 
 Options (passed through to claude):
   Any extra arguments after the profile name are forwarded to claude.
 
 Examples:
-  ccd                 Launch personal profile
-  ccd client          Launch client profile
-  ccd platform -c     Resume a recent platform session
-  ccd platform -w pinecone   Launch platform in worktree "pinecone"
-  ccd edit client     Edit the client profile config
-  ccd ls              List all profiles
+  pokegent                 Launch personal profile
+  pokegent client          Launch client profile
+  pokegent platform -c     Resume a recent platform session
+  pokegent platform -w pinecone   Launch platform in worktree "pinecone"
+  pokegent edit client     Edit the client profile config
+  pokegent ls              List all profiles
 
 HELP
-    _ccd_list_profiles
+    _pokegent_list_profiles
     return 0
   fi
 
   # ls
   if [[ "$1" == "ls" ]]; then
-    _ccd_list_profiles
+    _pokegent_list_profiles
     return 0
   fi
 
   # dashboard
   if [[ "$1" == "dashboard" ]]; then
-    local dashboard_bin="$CCD_ROOT/dashboard/ccd-dashboard"
+    local dashboard_bin="$POKEGENTS_ROOT/dashboard/pokegents-dashboard"
     case "${2:-open}" in
       start)
         if [[ ! -f "$dashboard_bin" ]]; then
-          echo "Dashboard not built. Run: cd $CCD_ROOT/dashboard && make build"
+          echo "Dashboard not built. Run: cd $POKEGENTS_ROOT/dashboard && make build"
           return 1
         fi
         "$dashboard_bin" serve &
-        echo "Dashboard started at http://localhost:$CCD_PORT"
+        echo "Dashboard started at http://localhost:$POKEGENTS_PORT"
         ;;
       stop)
-        _ccd_kill_dashboard
+        _pokegent_kill_dashboard
         echo "Dashboard stopped"
         ;;
       restart)
-        _ccd_kill_dashboard
+        _pokegent_kill_dashboard
         sleep 0.5
         "$dashboard_bin" serve &
-        echo "Dashboard restarted at http://localhost:$CCD_PORT"
+        echo "Dashboard restarted at http://localhost:$POKEGENTS_PORT"
         ;;
       open|"")
         # Open as standalone app window (separate Dock/Cmd+Tab entry)
         local chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         if [[ -x "$chrome" ]]; then
-          "$chrome" --app=http://localhost:$CCD_PORT --user-data-dir="$HOME/.ccd-dashboard-chrome" &>/dev/null &
+          "$chrome" --app=http://localhost:$POKEGENTS_PORT --user-data-dir="$HOME/.pokegents-dashboard-chrome" &>/dev/null &
         else
-          open "http://localhost:$CCD_PORT"
+          open "http://localhost:$POKEGENTS_PORT"
         fi
         ;;
     esac
@@ -139,13 +139,13 @@ HELP
 
   # doctor — verify installation health
   if [[ "$1" == "doctor" ]]; then
-    _ccd_doctor
+    _pokegent_doctor
     return $?
   fi
 
   # reload — stop all sessions, rebuild dashboard, relaunch everything
   if [[ "$1" == "reload" ]]; then
-    _ccd_reload
+    _pokegent_reload
     return $?
   fi
 
@@ -161,7 +161,7 @@ HELP
 
   # No args → default profile from config
   if [[ -z "$1" ]]; then
-    set -- "$CCD_DEFAULT_PROFILE"
+    set -- "$POKEGENTS_DEFAULT_PROFILE"
   fi
 
   # edit <profile>
@@ -176,7 +176,7 @@ HELP
 
   if [[ ! -f "$profile_file" ]]; then
     echo "Unknown profile: $profile_name"
-    echo "Run 'ccd ls' to see available profiles."
+    echo "Run 'pokegent ls' to see available profiles."
     return 1
   fi
 
@@ -235,7 +235,7 @@ HELP
   local display_name="$title"
   if [[ "$continue_mode" == "true" && -n "$resume_session_id" ]]; then
     # Check name overrides first (prefix match)
-    local _overrides_file="$CCD_DATA/name-overrides.json"
+    local _overrides_file="$POKEGENTS_DATA/name-overrides.json"
     if [[ -f "$_overrides_file" ]]; then
       local _override=$(jq -r --arg sid "$resume_session_id" '
         to_entries[] | select(.key | startswith($sid)) | .value
@@ -286,7 +286,7 @@ if last_title: print(last_title)
   fi
 
   # Terminal theming (iTerm2-specific — gracefully skipped on other terminals)
-  if [[ "$CCD_HAS_ITERM" == "true" ]]; then
+  if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
     local iterm2_profile=$(jq -r '.iterm2_profile // empty' "$profile_file")
     if [[ -n "$iterm2_profile" ]]; then
       printf "\033]1337;SetProfile=%s\a" "$iterm2_profile"
@@ -305,9 +305,9 @@ if last_title: print(last_title)
   local session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
   # Set tab icon to the agent's Pokemon sprite via a per-session dynamic profile (iTerm2 only)
-  local sprite_dir="$CCD_ROOT/dashboard/web/public/sprites"
-  if [[ "$CCD_HAS_ITERM" == "true" && -d "$sprite_dir" ]]; then
-    local overrides_file="$CCD_DATA/sprite-overrides.json"
+  local sprite_dir="$POKEGENTS_ROOT/dashboard/web/public/sprites"
+  if [[ "$POKEGENTS_HAS_ITERM" == "true" && -d "$sprite_dir" ]]; then
+    local overrides_file="$POKEGENTS_DATA/sprite-overrides.json"
     local sprite=""
     # For resume, use the original session ID for override lookup (the dashboard
     # stores overrides keyed by the original session_id, not the fresh clone UUID)
@@ -351,7 +351,7 @@ if last_title: print(last_title)
     if [[ -n "$sprite" && -f "$sprite_dir/${sprite}.png" ]]; then
       local abs_sprite_path="${sprite_dir:A}/${sprite}.png"
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
-      local dyn_profile="$dyn_profile_dir/ccd-session-${session_id}.json"
+      local dyn_profile="$dyn_profile_dir/pokegents-session-${session_id}.json"
       local profile_guid="CCD-SESSION-${session_id}"
       # Inherit from the CCD profile (not General) so colors/styling are preserved
       local parent_profile=$(jq -r '.iterm2_profile // "General"' "$profile_file")
@@ -369,7 +369,7 @@ if last_title: print(last_title)
   fi
 
   # Reset status file to idle (clear stale state from previous run)
-  local status_file="$CCD_DATA/status/${session_id}.json"
+  local status_file="$POKEGENTS_DATA/status/${session_id}.json"
   jq -n \
     --arg session_id "$session_id" \
     --arg state "idle" \
@@ -398,7 +398,7 @@ if last_title: print(last_title)
 
   # Build claude args — skip_permissions is configurable per-profile or global
   local profile_skip=$(jq -r '.skip_permissions // empty' "$profile_file" 2>/dev/null)
-  local skip_perms="${profile_skip:-$CCD_SKIP_PERMISSIONS}"
+  local skip_perms="${profile_skip:-$POKEGENTS_SKIP_PERMISSIONS}"
   local claude_args=(--name "$display_name")
   if [[ "$skip_perms" == "true" ]]; then
     claude_args=(--dangerously-skip-permissions "${claude_args[@]}")
@@ -440,8 +440,8 @@ if last_title: print(last_title)
       rm -f "$running_file"
 
       if [[ "$fork_session" == "true" ]]; then
-        # Fork: keep our fresh ccd UUID — Claude will generate its own session ID.
-        # The SessionStart hook will reconcile via CCD_SESSION_ID env var.
+        # Fork: keep our fresh pokegent UUID — Claude will generate its own session ID.
+        # The SessionStart hook will reconcile via POKEGENTS_SESSION_ID env var.
         session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
       else
         # Normal resume: use the resolved session ID
@@ -484,11 +484,11 @@ with open(sys.argv[1]) as f:
   local messaging_prompt="
 ## Agent Messaging
 
-You are one of several concurrent Claude Code agents managed by ccd. You can communicate with other agents using MCP tools.
+You are one of several concurrent Claude Code agents managed by pokegents. You can communicate with other agents using MCP tools.
 
 **Your session ID:** $session_id
 
-**Available MCP tools (ccd-messaging):**
+**Available MCP tools (pokegents-messaging):**
 - \`list_agents\` — see all active agents and their status
 - \`send_message(to, content)\` — send a message to another agent (use 8-char session ID prefix from list_agents)
 - \`check_messages\` — check your inbox for messages from other agents
@@ -522,13 +522,13 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
 
   # Trap for cleanup on abnormal exit (tab close, SIGHUP, etc.)
   local dyn_profile_cleanup=""
-  if [[ "$CCD_HAS_ITERM" == "true" ]]; then
-    dyn_profile_cleanup="$HOME/Library/Application Support/iTerm2/DynamicProfiles/ccd-session-${session_id}.json"
+  if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
+    dyn_profile_cleanup="$HOME/Library/Application Support/iTerm2/DynamicProfiles/pokegents-session-${session_id}.json"
   fi
   trap "rm -f '$running_file' '$dyn_profile_cleanup'" EXIT INT TERM HUP
 
-  CCD_ROOT="$CCD_ROOT" CCD_DATA="$CCD_DATA" CCD_PROFILE_NAME="$profile_name" \
-    CCD_SESSION_ID="$session_id" \
+  POKEGENTS_ROOT="$POKEGENTS_ROOT" POKEGENTS_DATA="$POKEGENTS_DATA" POKEGENTS_PROFILE_NAME="$profile_name" \
+    POKEGENTS_SESSION_ID="$session_id" \
     CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude "${claude_args[@]}"
 
   # Disarm trap and clean up explicitly
@@ -538,12 +538,12 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
 
   # Save to history (skip for resumed sessions)
   if [[ "$continue_mode" != "true" ]]; then
-    _ccd_save_history "$session_id" "$history_file"
+    _pokegent_save_history "$session_id" "$history_file"
   fi
 
   # Restore terminal
-  if [[ "$CCD_HAS_ITERM" == "true" ]]; then
-    printf "\033]1337;SetProfile=%s\a" "$CCD_ITERM_RESTORE"
+  if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
+    printf "\033]1337;SetProfile=%s\a" "$POKEGENTS_ITERM_RESTORE"
   fi
   echo -ne "\033]0;$title (done)\007"
 }
@@ -552,7 +552,7 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-_ccd_doctor() {
+_pokegent_doctor() {
   local ok=0 warn=0 fail=0
 
   _doc_ok()   { echo "  ✓ $1"; ((ok++)); }
@@ -577,18 +577,18 @@ _ccd_doctor() {
   # ── Data directories ──
   echo "Data directories:"
   for dir in profiles history running status messages; do
-    [[ -d "$CCD_DATA/$dir" ]] && _doc_ok "$CCD_DATA/$dir" || _doc_fail "$CCD_DATA/$dir missing"
+    [[ -d "$POKEGENTS_DATA/$dir" ]] && _doc_ok "$POKEGENTS_DATA/$dir" || _doc_fail "$POKEGENTS_DATA/$dir missing"
   done
   echo ""
 
   # ── Profiles ──
   echo "Profiles:"
   local pcount=0
-  for f in "$CCD_DATA/profiles"/*.json(N); do ((pcount++)); done
+  for f in "$POKEGENTS_DATA/profiles"/*.json(N); do ((pcount++)); done
   if [[ "$pcount" -gt 0 ]]; then
     _doc_ok "$pcount profile(s) found"
   else
-    _doc_fail "No profiles in $CCD_DATA/profiles/"
+    _doc_fail "No profiles in $POKEGENTS_DATA/profiles/"
   fi
   echo ""
 
@@ -596,12 +596,12 @@ _ccd_doctor() {
   echo "Hooks:"
   local settings="$HOME/.claude/settings.json"
   if [[ -f "$settings" ]]; then
-    local hook_cmd="$CCD_ROOT/hooks/status-update.sh"
+    local hook_cmd="$POKEGENTS_ROOT/hooks/status-update.sh"
     local hook_count=$(jq --arg h "$hook_cmd" '[.hooks // {} | to_entries[] | select(.value | tostring | contains($h))] | length' "$settings" 2>/dev/null || echo "0")
     if [[ "$hook_count" -gt 0 ]]; then
       _doc_ok "$hook_count event(s) registered in settings.json"
     else
-      _doc_fail "No ccd hooks in settings.json — run install.sh"
+      _doc_fail "No pokegent hooks in settings.json — run install.sh"
     fi
     if [[ -f "$hook_cmd" && -x "$hook_cmd" ]]; then
       _doc_ok "status-update.sh is executable"
@@ -621,33 +621,33 @@ _ccd_doctor() {
   # ── MCP ──
   echo "MCP messaging:"
   if command -v claude &>/dev/null; then
-    if claude mcp list 2>/dev/null | grep -q "ccd-messaging"; then
-      _doc_ok "ccd-messaging registered"
+    if claude mcp list 2>/dev/null | grep -q "pokegents-messaging"; then
+      _doc_ok "pokegents-messaging registered"
     else
-      _doc_fail "ccd-messaging not registered — run: claude mcp add -s user ccd-messaging -- node \"$CCD_ROOT/mcp/server.js\""
+      _doc_fail "pokegents-messaging not registered — run: claude mcp add -s user pokegents-messaging -- node \"$POKEGENTS_ROOT/mcp/server.js\""
     fi
   else
     _doc_warn "claude CLI not available, cannot check MCP"
   fi
-  if [[ -f "$CCD_ROOT/mcp/node_modules/@modelcontextprotocol/sdk/server/mcp.js" ]]; then
+  if [[ -f "$POKEGENTS_ROOT/mcp/node_modules/@modelcontextprotocol/sdk/server/mcp.js" ]]; then
     _doc_ok "MCP SDK installed"
   else
-    _doc_fail "MCP SDK not installed — run: cd $CCD_ROOT/mcp && npm ci"
+    _doc_fail "MCP SDK not installed — run: cd $POKEGENTS_ROOT/mcp && npm ci"
   fi
   echo ""
 
   # ── Dashboard ──
   echo "Dashboard:"
-  if [[ -f "$CCD_ROOT/dashboard/ccd-dashboard" ]]; then
+  if [[ -f "$POKEGENTS_ROOT/dashboard/pokegents-dashboard" ]]; then
     _doc_ok "Dashboard binary exists"
   else
-    _doc_warn "Dashboard not built — run: cd $CCD_ROOT/dashboard && make build"
+    _doc_warn "Dashboard not built — run: cd $POKEGENTS_ROOT/dashboard && make build"
   fi
-  local port="${CCD_PORT:-7834}"
+  local port="${POKEGENTS_PORT:-7834}"
   if lsof -ti :"$port" &>/dev/null; then
     _doc_ok "Dashboard running on port $port"
   else
-    _doc_warn "Dashboard not running — start with: ccd dashboard start"
+    _doc_warn "Dashboard not running — start with: pokegent dashboard start"
   fi
   echo ""
 
@@ -656,23 +656,23 @@ _ccd_doctor() {
   [[ $fail -eq 0 ]] && echo "Installation looks healthy!" || echo "Run install.sh to fix failures."
 }
 
-_ccd_kill_dashboard() {
-  # Kill by port since the binary may run as "main" or "ccd-dashboard"
-  local pids=$(lsof -ti :${CCD_PORT:-7834} 2>/dev/null)
+_pokegent_kill_dashboard() {
+  # Kill by port since the binary may run as "main" or "pokegents-dashboard"
+  local pids=$(lsof -ti :${POKEGENTS_PORT:-7834} 2>/dev/null)
   if [[ -n "$pids" ]]; then
     echo "$pids" | xargs kill 2>/dev/null
     # Wait for port to actually free up
     local i=0
-    while lsof -ti :${CCD_PORT:-7834} &>/dev/null && [[ $i -lt 10 ]]; do
+    while lsof -ti :${POKEGENTS_PORT:-7834} &>/dev/null && [[ $i -lt 10 ]]; do
       sleep 0.5
       ((i++))
     done
   fi
 }
 
-_ccd_list_profiles() {
+_pokegent_list_profiles() {
   echo "Available profiles:"
-  for f in "$CCD_DATA/profiles"/*.json(N); do
+  for f in "$POKEGENTS_DATA/profiles"/*.json(N); do
     local pname=$(basename "$f" .json)
     local emoji=$(jq -r '.emoji' "$f")
     local title=$(jq -r '.title' "$f")
@@ -681,8 +681,8 @@ _ccd_list_profiles() {
   done
 }
 
-_ccd_reload() {
-  local RUNNING_DIR="$CCD_DATA/running"
+_pokegent_reload() {
+  local RUNNING_DIR="$POKEGENTS_DATA/running"
   local my_tty=$(tty 2>/dev/null)
 
   echo "=== CCD Reload ==="
@@ -712,7 +712,7 @@ _ccd_reload() {
   fi
 
   # ── 2. Save snapshot to file for safety ───────────────────────────────
-  local snapshot_file="$CCD_DATA/reload-snapshot.json"
+  local snapshot_file="$POKEGENTS_DATA/reload-snapshot.json"
   local entries="[]"
   for ((i=1; i<=total; i++)); do
     entries=$(echo "$entries" | jq \
@@ -781,7 +781,7 @@ _ccd_reload() {
     fi
   done
 
-  # Give ccd() cleanup a moment to finish (removes running files, saves history)
+  # Give pokegent() cleanup a moment to finish (removes running files, saves history)
   sleep 1
 
   # ── 5. Close old iTerm tabs ───────────────────────────────────────────
@@ -806,7 +806,7 @@ tell application \"iTerm2\"
 end tell" &>/dev/null
   done
 
-  # Clean any leftover running files (ccd() cleanup should have handled most)
+  # Clean any leftover running files (pokegent() cleanup should have handled most)
   for ((i=1; i<=total; i++)); do
     [[ -n "$my_tty" && "${snap_ttys[$i]}" == "$my_tty" ]] && continue
     rm -f "$RUNNING_DIR"/${snap_profiles[$i]}-${snap_sids[$i]}.json
@@ -815,7 +815,7 @@ end tell" &>/dev/null
   # ── 6. Rebuild dashboard ──────────────────────────────────────────────
   echo ""
   echo "Rebuilding dashboard..."
-  if (cd "$CCD_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o ccd-dashboard . 2>&1); then
+  if (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard . 2>&1); then
     echo "  Build successful"
   else
     echo "  Build FAILED — using existing binary"
@@ -823,13 +823,13 @@ end tell" &>/dev/null
 
   # ── 7. Restart dashboard ──────────────────────────────────────────────
   echo "Restarting dashboard..."
-  _ccd_kill_dashboard
+  _pokegent_kill_dashboard
   sleep 0.5
-  local dashboard_bin="$CCD_ROOT/dashboard/ccd-dashboard"
+  local dashboard_bin="$POKEGENTS_ROOT/dashboard/pokegents-dashboard"
   if [[ -f "$dashboard_bin" ]]; then
     "$dashboard_bin" serve &>/dev/null &
     disown
-    echo "  Dashboard running at http://localhost:$CCD_PORT"
+    echo "  Dashboard running at http://localhost:$POKEGENTS_PORT"
   else
     echo "  WARNING: Dashboard binary not found"
   fi
@@ -856,7 +856,7 @@ tell application \"iTerm2\"
   tell current window
     create tab with profile \"$iterm_prof\"
     tell current session of current tab
-      write text \"ccd $profile -r $sid\"
+      write text \"pokegent $profile -r $sid\"
     end tell
   end tell
 end tell" &>/dev/null
@@ -871,12 +871,12 @@ end tell" &>/dev/null
     relaunched=$((total - 1))
     echo ""
     echo "This session was skipped. To restart it:"
-    echo "  Type /exit, then run: ccd ${CCD_PROFILE_NAME:-personal} -r ${CCD_SESSION_ID:-}"
+    echo "  Type /exit, then run: pokegent ${POKEGENTS_PROFILE_NAME:-personal} -r ${POKEGENTS_SESSION_ID:-}"
   fi
   echo "Relaunched $relaunched session(s). Snapshot at: $snapshot_file"
 }
 
-_ccd_save_history() {
+_pokegent_save_history() {
   local session_id="$1" history_file="$2"
   local timestamp=$(date "+%Y-%m-%d %H:%M")
 

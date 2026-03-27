@@ -1,4 +1,4 @@
-module ccd/dashboard
+module pokegents/dashboard
 
 go 1.26.1
 

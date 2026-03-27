@@ -31,7 +31,7 @@ type Server struct {
 // Config holds server configuration.
 type Config struct {
 	Port             int
-	CCDData          string
+	DataDir          string
 	ClaudeProjectDir string
 	SearchDBPath     string
 	WebDir           string
@@ -107,6 +107,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
 	s.mux.HandleFunc("POST /api/profiles/{name}/launch", s.handleLaunchProfile)
+	s.mux.HandleFunc("GET /api/agent-order", s.handleGetAgentOrder)
+	s.mux.HandleFunc("PUT /api/agent-order", s.handleSetAgentOrder)
 	s.mux.HandleFunc("GET /api/events", s.eventBus.ServeSSE)
 	s.mux.HandleFunc("POST /api/events", s.handlePostEvent)
 	s.mux.HandleFunc("GET /api/search", s.handleSearch)
@@ -184,8 +186,9 @@ func (s *Server) startTracePoller() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			// Clean up stale running files and reconcile mismatched session IDs
-			if s.state.CleanStale() || s.state.ReconcileRunningFiles() {
+			// Clean up stale running files, reconcile mismatched session IDs,
+			// and transition done→idle after 10 minutes
+			if s.state.CleanStale() || s.state.ReconcileRunningFiles() || s.state.TransitionDoneToIdle() {
 				s.eventBus.Publish("state_update", s.state.GetAgents())
 			}
 
@@ -299,6 +302,22 @@ func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleGetAgentOrder(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.state.GetAgentOrder())
+}
+
+func (s *Server) handleSetAgentOrder(w http.ResponseWriter, r *http.Request) {
+	var order []string
+	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	s.state.SetAgentOrder(order)
+	// Broadcast reordered state
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

@@ -26,6 +26,7 @@ type StateManager struct {
 	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
+	agentOrder    []string                  // user-defined display order (session IDs), persisted
 
 	ccdData          string // ~/.ccsession
 	claudeProjectDir string // ~/.claude/projects
@@ -62,6 +63,7 @@ func (sm *StateManager) LoadAll() error {
 	}
 	sm.loadNameOverrides()
 	sm.loadSessionIDMap()
+	sm.loadAgentOrder()
 	sm.rebuildAgents()
 	sm.reconcileNameOverrides()
 
@@ -97,12 +99,25 @@ func (sm *StateManager) GetAgents() []AgentState {
 		result = append(result, *a)
 	}
 
-	// Stable sort: by profile name, then creation time
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].ProfileName != result[j].ProfileName {
-			return result[i].ProfileName < result[j].ProfileName
+	// Sort by user-defined order. Agents in agentOrder come first (in that order),
+	// unordered agents go at the end sorted by creation time.
+	orderIndex := make(map[string]int, len(sm.agentOrder))
+	for i, sid := range sm.agentOrder {
+		orderIndex[sid] = i + 1 // 1-based so 0 means "not in list"
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		oi, oj := orderIndex[result[i].SessionID], orderIndex[result[j].SessionID]
+		if oi != 0 && oj != 0 {
+			return oi < oj
 		}
-		return (result[i].CreatedAt) < (result[j].CreatedAt)
+		if oi != 0 {
+			return true // ordered agents before unordered
+		}
+		if oj != 0 {
+			return false
+		}
+		// Both unordered: sort by creation time
+		return result[i].CreatedAt < result[j].CreatedAt
 	})
 
 	return result
@@ -171,6 +186,43 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		sm.nameOverrides[rs.CCDSessionID] = newName
 	}
 	sm.saveNameOverrides()
+}
+
+// TransitionDoneToIdle transitions agents that have been "done" for more than
+// 10 minutes to "idle" state. Returns true if any agent was transitioned.
+func (sm *StateManager) TransitionDoneToIdle() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	changed := false
+	for _, a := range sm.agents {
+		if a.State != "done" {
+			continue
+		}
+		if a.LastUpdated == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, a.LastUpdated)
+		if err != nil {
+			continue
+		}
+		if time.Since(t) > 10*time.Minute {
+			a.State = "idle"
+			a.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+			// Also update the status file on disk
+			if sf, ok := sm.statuses[a.SessionID]; ok {
+				sf.State = "idle"
+				sf.Timestamp = a.LastUpdated
+				sm.statuses[a.SessionID] = sf
+				statusPath := filepath.Join(sm.ccdData, "status", a.SessionID+".json")
+				if data, err := json.Marshal(sf); err == nil {
+					os.WriteFile(statusPath, data, 0644)
+				}
+			}
+			changed = true
+		}
+	}
+	return changed
 }
 
 // CleanStale removes running files for dead sessions and rebuilds state. Returns true if anything changed.
@@ -794,6 +846,41 @@ func (sm *StateManager) saveSessionIDMap() {
 		return
 	}
 	os.WriteFile(path, data, 0644)
+}
+
+func (sm *StateManager) loadAgentOrder() {
+	path := filepath.Join(sm.ccdData, "agent-order.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	json.Unmarshal(data, &sm.agentOrder)
+}
+
+func (sm *StateManager) saveAgentOrder() {
+	path := filepath.Join(sm.ccdData, "agent-order.json")
+	data, err := json.Marshal(sm.agentOrder)
+	if err != nil {
+		return
+	}
+	os.WriteFile(path, data, 0644)
+}
+
+// GetAgentOrder returns the current agent display order.
+func (sm *StateManager) GetAgentOrder() []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	result := make([]string, len(sm.agentOrder))
+	copy(result, sm.agentOrder)
+	return result
+}
+
+// SetAgentOrder saves a new agent display order.
+func (sm *StateManager) SetAgentOrder(order []string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.agentOrder = order
+	sm.saveAgentOrder()
 }
 
 // reconcileNameOverrides uses the session ID map to fix name-override entries

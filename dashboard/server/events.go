@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // SSEEvent is a single server-sent event.
@@ -77,10 +78,17 @@ func (eb *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	ctx := r.Context()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-heartbeat.C:
+			// SSE comment keeps the connection alive through proxies/browsers
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			flusher.Flush()
 		case evt, ok := <-ch:
 			if !ok {
 				return

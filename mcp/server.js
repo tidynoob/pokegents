@@ -4,20 +4,21 @@ import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 
-const CCD_DATA = process.env.CCD_DATA || join(process.env.HOME, ".ccsession");
+// Support both new (POKEGENTS_*) and legacy (CCD_*) env vars during migration
+const POKEGENTS_DATA = process.env.POKEGENTS_DATA || process.env.CCD_DATA || join(process.env.HOME, ".pokegents");
 
 // Read port from config file, fall back to env var, then default
 function getPort() {
   try {
-    const cfg = JSON.parse(readFileSync(join(CCD_DATA, "config.json"), "utf8"));
+    const cfg = JSON.parse(readFileSync(join(POKEGENTS_DATA, "config.json"), "utf8"));
     return cfg.port || 7834;
   } catch { return 7834; }
 }
-const DASHBOARD_URL = process.env.CCD_DASHBOARD_URL || `http://localhost:${getPort()}`;
-const MESSAGE_BUDGET = parseInt(process.env.CCD_MESSAGE_BUDGET || "5");
+const DASHBOARD_URL = process.env.POKEGENTS_DASHBOARD_URL || process.env.CCD_DASHBOARD_URL || `http://localhost:${getPort()}`;
+const MESSAGE_BUDGET = parseInt(process.env.POKEGENTS_MESSAGE_BUDGET || process.env.CCD_MESSAGE_BUDGET || "5");
 
 function getBudgetFile(sessionId) {
-  return join(CCD_DATA, "messages", sessionId, "_msg_budget");
+  return join(POKEGENTS_DATA, "messages", sessionId, "_msg_budget");
 }
 
 function getMessageCount(sessionId) {
@@ -30,7 +31,7 @@ function getMessageCount(sessionId) {
 
 function incrementMessageCount(sessionId) {
   const count = getMessageCount(sessionId) + 1;
-  const dir = join(CCD_DATA, "messages", sessionId);
+  const dir = join(POKEGENTS_DATA, "messages", sessionId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(getBudgetFile(sessionId), String(count));
   return count;
@@ -49,12 +50,11 @@ function resolveAgent(agents, idPrefix) {
   );
   if (direct) return direct;
 
-  // Fallback: the agent may have a stale CCD_SESSION_ID from before fork
-  // reconciliation. Match by claude_pid — the MCP server's parent is the
+  // Fallback: match by claude_pid — the MCP server's parent is the
   // Claude process, which is stored as claude_pid in running files.
   try {
     const ppid = process.ppid;
-    const runningDir = join(CCD_DATA, "running");
+    const runningDir = join(POKEGENTS_DATA, "running");
     for (const file of readdirSync(runningDir)) {
       if (!file.endsWith(".json")) continue;
       try {
@@ -79,8 +79,8 @@ async function apiCall(path, options = {}) {
 }
 
 const server = new McpServer({
-  name: "ccd-agent-messaging",
-  version: "0.1.0",
+  name: "pokegents-messaging",
+  version: "0.2.0",
 });
 
 // List active agents
@@ -130,13 +130,13 @@ server.tool(
       ),
   },
   async ({ from, to, content }) => {
-    // Auto-detect sender from environment if not provided
-    const ccdSid = process.env.CCD_SESSION_ID || "";
-    const fromHint = from || ccdSid.slice(0, 8);
+    // Auto-detect sender from environment (support both new and legacy env vars)
+    const sessionIdEnv = process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+    const fromHint = from || sessionIdEnv.slice(0, 8);
 
     const agents = await apiCall("/api/sessions");
     const fromAgent = resolveAgent(agents, fromHint);
-    const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || ccdSid);
+    const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
@@ -178,7 +178,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: `Message sent to ${toAgent.display_name || toAgent.profile_name} (${toAgent.session_id.slice(0, 8)}).${remaining > 0 ? ` ${remaining} messages remaining in budget.` : " Budget reached — wait for user input before sending more."}\n\nReminder: YOUR session ID is "${from}" — use this when calling check_messages.`,
+          text: `Message sent to ${toAgent.display_name || toAgent.profile_name} (${(toAgent.ccd_session_id || toAgent.session_id).slice(0, 8)}).${remaining > 0 ? ` ${remaining} messages remaining in budget.` : " Budget reached — wait for user input before sending more."}\n\nReminder: YOUR session ID is "${from}" — use this when calling check_messages.`,
         },
       ],
     };
@@ -198,13 +198,13 @@ server.tool(
       ),
   },
   async ({ my_session_id }) => {
-    // Auto-detect session ID from environment, fall back to parameter
-    const ccdSid = process.env.CCD_SESSION_ID || "";
-    const idHint = my_session_id || ccdSid.slice(0, 8);
+    // Auto-detect session ID from environment (support both new and legacy env vars)
+    const sessionIdEnv = process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+    const idHint = my_session_id || sessionIdEnv.slice(0, 8);
 
     const agents = await apiCall("/api/sessions");
     const me = resolveAgent(agents, idHint);
-    const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || ccdSid);
+    const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
 
     const messages = await apiCall(`/api/messages/consume/${sessionId}`, { method: "POST" });
 

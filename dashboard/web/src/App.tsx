@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridLayout } from './hooks/useLayout'
-import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, launchProfile, ActivityEntry, ProfileInfo } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, launchProfile, saveAgentOrder, ActivityEntry, ProfileInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard } from './components/AgentCard'
 import { SessionBrowser } from './components/SessionBrowser'
@@ -19,12 +19,12 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [bottomTab, setBottomTab] = useState<'messages' | 'activity'>('messages')
   const [bottomOpen, setBottomOpen] = useState(false)
-  const [mutedCtx, setMutedCtx] = useState(true)
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
   const [showLauncher, setShowLauncher] = useState(false)
   const launcherRef = useRef<HTMLDivElement>(null)
+  const dragSrcId = useRef<string | null>(null)
 
   // Restore from localStorage AFTER first agents load (so we know which IDs are valid)
   useEffect(() => {
@@ -59,7 +59,7 @@ export default function App() {
     fetchMessageHistory().then(setMessages).catch(() => {})
     fetchActivity().then(setActivity).catch(() => {})
     fetchProfiles().then(p => setProfiles(p.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
-    // Poll messages + activity every 5s
+    // Poll messages + activity every 5s, fallback session poll every 10s
     const interval = setInterval(() => {
       fetchMessageHistory().then(msgs => {
         setMessages(prev => msgs.length !== prev.length ? msgs : prev)
@@ -68,7 +68,22 @@ export default function App() {
         setActivity(prev => acts.length !== prev.length ? acts : prev)
       }).catch(() => {})
     }, 5000)
-    return () => clearInterval(interval)
+    const fallbackPoll = setInterval(() => {
+      fetchSessions().then(fresh => {
+        setAgents(prev => {
+          if (fresh.length !== prev.length) return fresh
+          for (let i = 0; i < fresh.length; i++) {
+            if (fresh[i].session_id !== prev[i].session_id ||
+                fresh[i].state !== prev[i].state ||
+                fresh[i].detail !== prev[i].detail ||
+                fresh[i].user_prompt !== prev[i].user_prompt ||
+                fresh[i].display_name !== prev[i].display_name) return fresh
+          }
+          return prev
+        })
+      }).catch(() => {})
+    }, 10000)
+    return () => { clearInterval(interval); clearInterval(fallbackPoll) }
   }, [])
 
   useEffect(() => {
@@ -86,18 +101,28 @@ export default function App() {
     }
   }, [newMessage])
 
-  // Sort agents by profile, then creation time (oldest first for stable ordering)
-  const sorted = useMemo(() =>
-    [...agents].sort((a, b) => {
-      if (a.profile_name !== b.profile_name) return a.profile_name.localeCompare(b.profile_name)
-      return (a.created_at || '').localeCompare(b.created_at || '')
-    }),
-    [agents]
-  )
+  // Server returns agents in user-defined order (or creation time for unordered).
+  // During drag, we override with a local order for live preview.
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null)
 
-  // Split into collapsed (shown as bubbles) and visible (shown as cards)
-  const collapsedAgents = useMemo(() => sorted.filter(a => collapsedIds.has(a.session_id)), [sorted, collapsedIds])
-  const visibleAgents = useMemo(() => sorted.filter(a => !collapsedIds.has(a.session_id)), [sorted, collapsedIds])
+  const baseVisible = useMemo(() => agents.filter(a => !collapsedIds.has(a.session_id)), [agents, collapsedIds])
+  const collapsedAgents = useMemo(() => agents.filter(a => collapsedIds.has(a.session_id)), [agents, collapsedIds])
+
+  const visibleAgents = useMemo(() => {
+    if (!dragOrder) return baseVisible
+    // Reorder baseVisible according to dragOrder
+    const map = new Map(baseVisible.map(a => [a.session_id, a]))
+    const ordered: AgentState[] = []
+    for (const id of dragOrder) {
+      const a = map.get(id)
+      if (a) ordered.push(a)
+    }
+    // Append any agents not in dragOrder (newly spawned)
+    for (const a of baseVisible) {
+      if (!dragOrder.includes(a.session_id)) ordered.push(a)
+    }
+    return ordered
+  }, [baseVisible, dragOrder])
 
   const { profileCount, agentsPerProfile } = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -118,7 +143,7 @@ export default function App() {
       groups[key].push(a)
     }
     return Object.entries(groups)
-  }, [sorted])
+  }, [visibleAgents])
 
   // Build a map of session_id → connected agent info (for icons)
   const agentMap = useMemo(() => {
@@ -178,6 +203,71 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handler)
   }, [showLauncher])
 
+  const handleDragOver = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault()
+    const srcId = dragSrcId.current
+    if (!srcId || srcId === targetId) return
+    setDragOrder(prev => {
+      const ids = prev || visibleAgents.map(a => a.session_id)
+      const srcIdx = ids.indexOf(srcId)
+      const tgtIdx = ids.indexOf(targetId)
+      if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return prev
+      const next = [...ids]
+      next.splice(srcIdx, 1)
+      next.splice(tgtIdx, 0, srcId)
+      return next
+    })
+  }
+
+  const handleDrop = () => {
+    if (dragOrder) {
+      const allIds = [...dragOrder, ...collapsedAgents.map(a => a.session_id)]
+      saveAgentOrder(allIds)
+    }
+    dragSrcId.current = null
+    setDragOrder(null)
+  }
+
+  const handleDragEnd = () => {
+    dragSrcId.current = null
+    setDragOrder(null)
+  }
+
+  const dragAllowed = useRef(true)
+
+  const renderCard = (agent: AgentState, cardMode: typeof mode) => (
+    <div
+      key={agent.session_id}
+      draggable={dragAllowed.current}
+      onMouseDown={(e) => {
+        const el = e.target as HTMLElement
+        dragAllowed.current = !(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || !!el.closest('[data-no-drag]'))
+      }}
+      onDragStart={(e) => {
+        if (!dragAllowed.current) { e.preventDefault(); return }
+        dragSrcId.current = agent.session_id
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      onDragOver={(e) => handleDragOver(e, agent.session_id)}
+      onDrop={handleDrop}
+      onDragEnd={handleDragEnd}
+      style={{ transition: 'transform 200ms ease' }}
+    >
+      <AgentCard
+        agent={agent}
+        onClick={() => focusAgent(agent.session_id)}
+        mode={cardMode}
+        connectedAgents={connectedAgentsMap[agent.session_id]}
+        spriteOverride={spriteOverrides[agent.session_id]}
+        isReading={readingAgents.has(agent.session_id)}
+        hideSprite={hiddenSprites.has(agent.session_id)}
+
+        onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
+        cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
+      />
+    </div>
+  )
+
   return (
     <div className="h-screen flex flex-col p-3 overflow-hidden">
       {/* Header — hidden in compact mode */}
@@ -213,16 +303,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setMutedCtx(m => !m)}
-              className={`text-[10px] px-2 py-1 rounded-lg border transition-colors ${
-                mutedCtx
-                  ? 'text-zinc-600 border-zinc-800/50 hover:text-zinc-400 hover:border-zinc-700'
-                  : 'text-emerald-500/70 border-zinc-800/50 hover:text-emerald-400 hover:border-zinc-700'
-              }`}
-            >
-              CTX {mutedCtx ? '○' : '●'}
-            </button>
             <button
               onClick={triggerTestDelivery}
               className="text-[10px] text-zinc-600 hover:text-zinc-400 px-2 py-1 rounded-lg border border-zinc-800/50 hover:border-zinc-700 transition-colors"
@@ -285,21 +365,7 @@ export default function App() {
                   gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
                 }}
               >
-                {profileAgents.map((agent) => (
-                  <AgentCard
-                    key={agent.session_id}
-                    agent={agent}
-                    onClick={() => focusAgent(agent.session_id)}
-                    mode={mode}
-                    connectedAgents={connectedAgentsMap[agent.session_id]}
-                    spriteOverride={spriteOverrides[agent.session_id]}
-                    isReading={readingAgents.has(agent.session_id)}
-                    hideSprite={hiddenSprites.has(agent.session_id)}
-                    mutedCtx={mutedCtx}
-                    onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
-                    cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
-                  />
-                ))}
+                {profileAgents.map((agent) => renderCard(agent, mode))}
               </div>
             </div>
           ))}
@@ -312,21 +378,7 @@ export default function App() {
             gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           }}
         >
-          {visibleAgents.map((agent) => (
-            <AgentCard
-              key={agent.session_id}
-              agent={agent}
-              onClick={() => focusAgent(agent.session_id)}
-              mode={mode}
-              connectedAgents={connectedAgentsMap[agent.session_id]}
-              spriteOverride={spriteOverrides[agent.session_id]}
-              isReading={readingAgents.has(agent.session_id)}
-              hideSprite={hiddenSprites.has(agent.session_id)}
-              mutedCtx={mutedCtx}
-              onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
-              cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
-            />
-          ))}
+          {visibleAgents.map((agent) => renderCard(agent, mode))}
         </div>
       ) : (
         /* Compact: flat grid, minimal */
@@ -336,21 +388,7 @@ export default function App() {
             gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           }}
         >
-          {visibleAgents.map((agent) => (
-            <AgentCard
-              key={agent.session_id}
-              agent={agent}
-              onClick={() => focusAgent(agent.session_id)}
-              mode={mode}
-              connectedAgents={connectedAgentsMap[agent.session_id]}
-              spriteOverride={spriteOverrides[agent.session_id]}
-              isReading={readingAgents.has(agent.session_id)}
-              hideSprite={hiddenSprites.has(agent.session_id)}
-              mutedCtx={mutedCtx}
-              onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
-              cardRef={(el) => { if (el) cardRefs.current.set(agent.session_id, el); else cardRefs.current.delete(agent.session_id) }}
-            />
-          ))}
+          {visibleAgents.map((agent) => renderCard(agent, mode))}
         </div>
       )}
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# ccd status hook — writes structured status to $CCD_DATA/status/
+# pokegents status hook — writes structured status to $POKEGENTS_DATA/status/
 #
 # State machine:
 #   idle        — just started/resumed, no work yet (grey)
@@ -10,8 +10,8 @@
 # NOTE: No set -e! Hooks must NEVER crash — a broken hook blocks all Claude operations.
 # Every command that can fail uses 2>/dev/null || fallback instead.
 
-CCD_DATA="${CCD_DATA:-$HOME/.ccsession}"
-STATUS_DIR="$CCD_DATA/status"
+POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
+STATUS_DIR="$POKEGENTS_DATA/status"
 mkdir -p "$STATUS_DIR"
 
 INPUT=$(cat)
@@ -35,23 +35,23 @@ BUSY_SINCE=""
 CLEAR_OUTPUT=false
 
 # Quick reconciliation: if no running file exists for this session ID, try matching
-# by CCD_SESSION_ID and patch it. This handles --fork-session where SessionStart
+# by POKEGENTS_SESSION_ID and patch it. This handles --fork-session where SessionStart
 # may not fire but other events do.
 # IMPORTANT: Only match by ccd_session_id field, NOT by session_id field.
 # Matching by session_id would steal the original agent's file when cloning.
-RUNNING_DIR_CHECK="$CCD_DATA/running"
+RUNNING_DIR_CHECK="$POKEGENTS_DATA/running"
 if [ -d "$RUNNING_DIR_CHECK" ] && [ "$EVENT" != "SessionStart" ] && [ "$EVENT" != "SessionEnd" ]; then
   HAS_RF=false
   for _rf in "$RUNNING_DIR_CHECK"/*-"${SESSION_ID}".json; do
     [ -f "$_rf" ] && HAS_RF=true && break
   done
   if [ "$HAS_RF" = "false" ]; then
-    CCD_SID_CHECK="${CCD_SESSION_ID:-}"
-    if [ -n "$CCD_SID_CHECK" ]; then
+    POKEGENTS_SID_CHECK="${POKEGENTS_SESSION_ID:-}"
+    if [ -n "$POKEGENTS_SID_CHECK" ]; then
       for _rf in "$RUNNING_DIR_CHECK"/*.json; do
         [ -f "$_rf" ] || continue
         _RF_CCD=$(jq -r '.ccd_session_id // empty' "$_rf" 2>/dev/null)
-        if [ "$_RF_CCD" = "$CCD_SID_CHECK" ]; then
+        if [ "$_RF_CCD" = "$POKEGENTS_SID_CHECK" ]; then
           # Rename to match SESSION_ID — but only if no collision
           _RF_PROF=$(jq -r '.profile // "unknown"' "$_rf" 2>/dev/null)
           _NEW_RF="$RUNNING_DIR_CHECK/${_RF_PROF}-${SESSION_ID}.json"
@@ -103,10 +103,10 @@ case "$EVENT" in
       DETAIL="processing prompt"
       CLEAR_OUTPUT=true
     fi
-    # Reset message budget for this agent's turn (use CCD_SESSION_ID for clone safety)
-    BUDGET_LOOKUP="${CCD_SESSION_ID:-$SESSION_ID}"
-    BUDGET_FILE="$CCD_DATA/messages/${BUDGET_LOOKUP}/_msg_budget"
-    mkdir -p "$CCD_DATA/messages/${BUDGET_LOOKUP}" 2>/dev/null
+    # Reset message budget for this agent's turn (use POKEGENTS_SESSION_ID for clone safety)
+    BUDGET_LOOKUP="${POKEGENTS_SESSION_ID:-$SESSION_ID}"
+    BUDGET_FILE="$POKEGENTS_DATA/messages/${BUDGET_LOOKUP}/_msg_budget"
+    mkdir -p "$POKEGENTS_DATA/messages/${BUDGET_LOOKUP}" 2>/dev/null
     echo "0" > "$BUDGET_FILE" 2>/dev/null
     ;;
   "PreToolUse")
@@ -202,8 +202,8 @@ case "$EVENT" in
     # Disable errexit for the reconciliation block — individual jq failures
     # shouldn't abort the whole hook
     set +e
-    RUNNING_DIR="$CCD_DATA/running"
-    CCD_SID="${CCD_SESSION_ID:-}"
+    RUNNING_DIR="$POKEGENTS_DATA/running"
+    POKEGENTS_SID="${POKEGENTS_SESSION_ID:-}"
 
     # Find Claude's PID from session registry
     CLAUDE_PID=""
@@ -222,32 +222,32 @@ case "$EVENT" in
     done
 
     # Find matching running file using priority passes:
-    # Pass 1: CCD_SESSION_ID (most specific — handles fork/clone correctly)
+    # Pass 1: POKEGENTS_SESSION_ID (most specific — handles fork/clone correctly)
     # Pass 2: exact session_id match
     # Pass 3: TTY fallback (only if no better match found)
     # Separate passes prevent TTY collisions from stealing another agent's file.
     if [ -d "$RUNNING_DIR" ]; then
       MATCHED_RF=""
 
-      # Pass 1: CCD_SESSION_ID — match ONLY against ccd_session_id field
+      # Pass 1: POKEGENTS_SESSION_ID — match ONLY against ccd_session_id field
       # Do NOT match against session_id to avoid stealing the original agent's
-      # file when cloning (the clone's CCD_SID could match the original's session_id)
-      if [ -z "$MATCHED_RF" ] && [ -n "$CCD_SID" ]; then
+      # file when cloning (the clone's POKEGENTS_SID could match the original's session_id)
+      if [ -z "$MATCHED_RF" ] && [ -n "$POKEGENTS_SID" ]; then
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
-          RF_CCD_SID=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
-          if [ "$RF_CCD_SID" = "$CCD_SID" ]; then
+          RF_POKEGENTS_SID=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
+          if [ "$RF_POKEGENTS_SID" = "$POKEGENTS_SID" ]; then
             MATCHED_RF="$rf"
             break
           fi
         done
       fi
 
-      # Pass 2: exact session_id (only if no CCD_SESSION_ID — legacy fallback)
-      # When CCD_SESSION_ID is set, skip this pass to avoid stealing the original
-      # agent's file during --fork-session (clone has CCD_SID but SESSION_ID may
+      # Pass 2: exact session_id (only if no POKEGENTS_SESSION_ID — legacy fallback)
+      # When POKEGENTS_SESSION_ID is set, skip this pass to avoid stealing the original
+      # agent's file during --fork-session (clone has POKEGENTS_SID but SESSION_ID may
       # match the original's running file)
-      if [ -z "$MATCHED_RF" ] && [ -z "$CCD_SID" ]; then
+      if [ -z "$MATCHED_RF" ] && [ -z "$POKEGENTS_SID" ]; then
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
           RF_SID=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
@@ -258,8 +258,8 @@ case "$EVENT" in
         done
       fi
 
-      # Pass 3: TTY fallback (only if no CCD_SESSION_ID and no exact match)
-      if [ -z "$MATCHED_RF" ] && [ -z "$CCD_SID" ] && [ -n "$CLAUDE_TTY" ]; then
+      # Pass 3: TTY fallback (only if no POKEGENTS_SESSION_ID and no exact match)
+      if [ -z "$MATCHED_RF" ] && [ -z "$POKEGENTS_SID" ] && [ -n "$CLAUDE_TTY" ]; then
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
           RF_TTY=$(jq -r '.tty // empty' "$rf" 2>/dev/null)
@@ -304,7 +304,7 @@ case "$EVENT" in
   "SessionEnd")
     STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"
     rm -f "$STATUS_FILE"
-    RUNNING_DIR="$CCD_DATA/running"
+    RUNNING_DIR="$POKEGENTS_DATA/running"
     for rf in "$RUNNING_DIR"/*-"${SESSION_ID}".json; do
       [ -f "$rf" ] && rm -f "$rf"
     done
@@ -379,9 +379,9 @@ fi
 
 # ── Activity log ──────────────────────────────────────────────────────────
 # Shared append-only log so agents know what others changed.
-# Stored per-project at ~/.ccsession/activity/{project_hash}.log
-ACTIVITY_DIR="$CCD_DATA/activity"
-LASTREAD_DIR="$CCD_DATA/activity-lastread"
+# Stored per-project at ~/.pokegents/activity/{project_hash}.log
+ACTIVITY_DIR="$POKEGENTS_DATA/activity"
+LASTREAD_DIR="$POKEGENTS_DATA/activity-lastread"
 PROJECT_HASH=""
 if [ -n "$CWD" ]; then
   PROJECT_HASH=$(echo "$CWD" | sed 's|/|-|g; s|^-||' 2>/dev/null || echo "default")
@@ -403,10 +403,10 @@ if [ "$EVENT" = "Stop" ] && [ -n "$PROJECT_HASH" ]; then
   fi
   # Get display name from running file
   AGENT_NAME=""
-  for _rf in "$CCD_DATA/running"/*-"${SESSION_ID}".json; do
+  for _rf in "$POKEGENTS_DATA/running"/*-"${SESSION_ID}".json; do
     [ -f "$_rf" ] && AGENT_NAME=$(jq -r '.display_name // empty' "$_rf" 2>/dev/null) && break
   done
-  [ -z "$AGENT_NAME" ] && AGENT_NAME="${CCD_PROFILE_NAME:-unknown}"
+  [ -z "$AGENT_NAME" ] && AGENT_NAME="${POKEGENTS_PROFILE_NAME:-unknown}"
   # Build log entry
   LOG_SUMMARY=$(echo "$SUMMARY" | head -c 120 | tr '\n' ' ')
   if [ -n "$CHANGED_FILES" ]; then
@@ -453,9 +453,9 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
   fi
 
   # Part 2: Pending messages — deliver (marks delivered + returns content)
-  # Use CCD_SESSION_ID (unique per agent, even for clones) not SESSION_ID (shared by clones)
-  DASHBOARD_URL="${CCD_DASHBOARD_URL:-http://localhost:7834}"
-  MSG_LOOKUP_ID="${CCD_SESSION_ID:-$SESSION_ID}"
+  # Use POKEGENTS_SESSION_ID (unique per agent, even for clones) not SESSION_ID (shared by clones)
+  DASHBOARD_URL="${POKEGENTS_DASHBOARD_URL:-http://localhost:7834}"
+  MSG_LOOKUP_ID="${POKEGENTS_SESSION_ID:-$SESSION_ID}"
   DELIVERED=$(curl -s -m 1 -X POST "$DASHBOARD_URL/api/messages/deliver/$MSG_LOOKUP_ID" 2>/dev/null || echo "[]")
   MSG_COUNT=$(echo "$DELIVERED" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
   if [ "$MSG_COUNT" -gt 0 ]; then

@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"ccd/dashboard/server"
+	"pokegents/dashboard/server"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: ccd-dashboard <command>")
+		fmt.Println("Usage: pokegents-dashboard <command>")
 		fmt.Println("Commands:")
 		fmt.Println("  serve    Start the dashboard server")
 		fmt.Println("  index    Build the search index and exit")
@@ -34,7 +34,7 @@ func runServe() {
 	cfg := server.DefaultConfig()
 
 	// Override from environment
-	if v := os.Getenv("CCD_DATA"); v != "" {
+	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
 		cfg.CCDData = v
 	}
 	if v := os.Getenv("DASHBOARD_PORT"); v != "" {
@@ -67,7 +67,7 @@ func runServe() {
 
 func runIndex() {
 	cfg := server.DefaultConfig()
-	if v := os.Getenv("CCD_DATA"); v != "" {
+	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
 		cfg.CCDData = v
 	}
 

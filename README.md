@@ -1,4 +1,4 @@
-# ccd — Claude Code Session Manager
+# pokegents — Claude Code Agent Orchestration Platform
 
 Run multiple Claude Code agents simultaneously with named profiles, session tracking, real-time notifications, and a web dashboard to monitor them all.
 
@@ -14,8 +14,8 @@ Run multiple Claude Code agents simultaneously with named profiles, session trac
 ## Install
 
 ```bash
-git clone <this-repo> ~/Projects/ccd
-cd ~/Projects/ccd
+git clone <this-repo> ~/Projects/pokegents
+cd ~/Projects/pokegents
 ./install.sh
 source ~/.zshrc
 ```
@@ -27,32 +27,32 @@ source ~/.zshrc
 **Optional:** iTerm2 (enables tab colors, tab focus from dashboard, agent nudging)
 
 The installer will:
-1. Create `~/.ccsession/` data directories
-2. Install default config (`~/.ccsession/config.json`)
+1. Create `~/.pokegents/` data directories
+2. Install default config (`~/.pokegents/config.json`)
 3. Install a default personal profile
 4. Configure Claude Code hooks (merges with existing hooks, never overwrites)
 5. Register the MCP messaging server (if Claude CLI available)
 6. Build the dashboard (if Go/Node are available)
-7. Add `source ccd.sh` to your `.zshrc`
+7. Add `source pokegent.sh` to your `.zshrc`
 
-Verify your installation: `ccd doctor`
+Verify your installation: `pokegent doctor`
 
 ## Usage
 
 ### Launching sessions
 
 ```bash
-ccd                     # Launch default (personal) profile
-ccd my-project          # Launch a named profile
-ccd my-project -r       # Resume a session (interactive picker)
-ccd my-project -r abc123 # Resume a specific session by ID prefix
-ccd ls                  # List all profiles
+pokegent                     # Launch default (personal) profile
+pokegent my-project          # Launch a named profile
+pokegent my-project -r       # Resume a session (interactive picker)
+pokegent my-project -r abc123 # Resume a specific session by ID prefix
+pokegent ls                  # List all profiles
 ```
 
 ### Managing profiles
 
 ```bash
-ccd edit my-project     # Create or edit a profile
+pokegent edit my-project     # Create or edit a profile
 ```
 
 This opens a JSON file in your editor. Profile schema:
@@ -84,9 +84,9 @@ See `defaults/profiles/example-project.json` for a template.
 ### Dashboard
 
 ```bash
-ccd dashboard start     # Start the dashboard server (background)
-ccd dashboard           # Open http://localhost:7834 in browser
-ccd dashboard stop      # Stop the dashboard server
+pokegent dashboard start     # Start the dashboard server (background)
+pokegent dashboard           # Open http://localhost:7834 in browser
+pokegent dashboard stop      # Stop the dashboard server
 ```
 
 The dashboard shows:
@@ -103,7 +103,7 @@ The dashboard shows:
 
 ### Multiple concurrent agents
 
-ccd handles running multiple agents on the same profile. When you launch a second session of the same profile, it prompts you to name both sessions to tell them apart:
+pokegent handles running multiple agents on the same profile. When you launch a second session of the same profile, it prompts you to name both sessions to tell them apart:
 
 ```
 ⚠  Profile 'client' is already running in 1 other session(s):
@@ -116,14 +116,14 @@ Name for this new session (enter for "Client SDK"): test-writer
 ## Architecture
 
 ```
-~/.ccsession/                    # User data (per-machine)
+~/.pokegents/                    # User data (per-machine)
 ├── profiles/*.json              # Profile configs
 ├── running/*.json               # Active session registry
 ├── status/*.json                # Live status from hooks
 └── history/*.json               # Last 5 sessions per profile
 
-~/Projects/ccd/                  # Code (shared via git)
-├── ccd.sh                       # Shell function (sourced in .zshrc)
+~/Projects/pokegents/                  # Code (shared via git)
+├── pokegent.sh                       # Shell function (sourced in .zshrc)
 ├── install.sh                   # Installer
 ├── hooks/
 │   ├── status-update.sh         # Writes status on every Claude event
@@ -173,7 +173,7 @@ Each agent's system prompt includes its session ID and messaging instructions. M
 
 ## Configuration
 
-### Config file (`~/.ccsession/config.json`)
+### Config file (`~/.pokegents/config.json`)
 
 ```json
 {
@@ -188,7 +188,7 @@ Each agent's system prompt includes its session ID and messaging instructions. M
 | Field | Default | Description |
 |-------|---------|-------------|
 | `port` | `7834` | Dashboard server port |
-| `default_profile` | `"personal"` | Profile launched by bare `ccd` command |
+| `default_profile` | `"personal"` | Profile launched by bare `pokegent` command |
 | `skip_permissions` | `false` | Global default for `--dangerously-skip-permissions` |
 | `iterm2_restore_profile` | `"Default"` | iTerm2 profile restored on session exit |
 
@@ -198,12 +198,12 @@ Per-profile `skip_permissions` can be set in the profile JSON to override the gl
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CCD_DATA` | `~/.ccsession` | Data directory path |
-| `CCD_DASHBOARD_URL` | `http://localhost:{port}` | Dashboard URL (auto-set from config) |
+| `POKEGENTS_DATA` | `~/.pokegents` | Data directory path |
+| `POKEGENTS_DASHBOARD_URL` | `http://localhost:{port}` | Dashboard URL (auto-set from config) |
 
 ### Adding to an existing Claude Code setup
 
-If you already have hooks in `~/.claude/settings.json`, the installer merges ccd's hooks alongside yours — it never overwrites existing hooks.
+If you already have hooks in `~/.claude/settings.json`, the installer merges pokegents' hooks alongside yours — it never overwrites existing hooks.
 
 ## Platform support
 
@@ -225,56 +225,56 @@ Core functionality (profiles, session tracking, dashboard, messaging) works ever
 Pull the latest changes and re-run the installer:
 
 ```bash
-cd ~/Projects/ccd    # or wherever you cloned it
+cd ~/Projects/pokegents    # or wherever you cloned it
 git pull
 ./install.sh         # re-registers hooks, rebuilds dashboard
 ```
 
-The installer is idempotent — it won't overwrite your profiles, config, or existing hooks. It only adds/updates ccd's own hooks and rebuilds binaries.
+The installer is idempotent — it won't overwrite your profiles, config, or existing hooks. It only adds/updates pokegents' own hooks and rebuilds binaries.
 
-If you're running agents when you update, use `ccd reload` to restart everything cleanly:
+If you're running agents when you update, use `pokegent reload` to restart everything cleanly:
 
 ```bash
-ccd reload           # saves all running sessions, rebuilds, relaunches
+pokegent reload           # saves all running sessions, rebuilds, relaunches
 ```
 
 ## Full command reference
 
 ```bash
 # Sessions
-ccd                         # Launch default profile
-ccd <profile>               # Launch a named profile
-ccd <profile> -r            # Resume (Claude's session picker)
-ccd <profile> -r <id>       # Resume specific session by ID prefix
-ccd <profile> -c            # Resume from ccd's recent session history
+pokegent                         # Launch default profile
+pokegent <profile>               # Launch a named profile
+pokegent <profile> -r            # Resume (Claude's session picker)
+pokegent <profile> -r <id>       # Resume specific session by ID prefix
+pokegent <profile> -c            # Resume from pokegent's recent session history
 
 # Profile management
-ccd ls                      # List all profiles
-ccd edit <profile>          # Create or edit a profile in $EDITOR
+pokegent ls                      # List all profiles
+pokegent edit <profile>          # Create or edit a profile in $EDITOR
 
 # Dashboard
-ccd dashboard               # Open dashboard in browser
-ccd dashboard start         # Start dashboard server (background)
-ccd dashboard stop          # Stop dashboard server
-ccd dashboard restart       # Rebuild and restart
+pokegent dashboard               # Open dashboard in browser
+pokegent dashboard start         # Start dashboard server (background)
+pokegent dashboard stop          # Stop dashboard server
+pokegent dashboard restart       # Rebuild and restart
 
 # Operations
-ccd reload                  # Stop all sessions, rebuild, relaunch everything
-ccd doctor                  # Verify installation (deps, hooks, config, MCP)
+pokegent reload                  # Stop all sessions, rebuild, relaunch everything
+pokegent doctor                  # Verify installation (deps, hooks, config, MCP)
 ```
 
 ## Activity log
 
 When multiple agents work on the same project, they automatically share an activity log. On each turn:
 
-1. **On finish** — the agent's changed files and summary are appended to `~/.ccsession/activity/`
+1. **On finish** — the agent's changed files and summary are appended to `~/.pokegents/activity/`
 2. **On next prompt** — agents see what others changed since their last turn, with file overlap warnings
 
 This prevents agents from silently overwriting each other's work. The dashboard shows the activity feed in the bottom bar alongside messages.
 
 ## Built-in profiles
 
-ccd ships with three default profile templates in `defaults/profiles/`:
+pokegents ships with three default profile templates in `defaults/profiles/`:
 
 | Profile | Purpose |
 |---------|---------|
@@ -286,20 +286,20 @@ The reviewer profile includes a system prompt for coordinating with other agents
 
 ## Troubleshooting
 
-**Agent doesn't show in dashboard**: Check that `~/.ccsession/running/` has a file for the session. Sessions started before installing ccd won't have running files.
+**Agent doesn't show in dashboard**: Check that `~/.pokegents/running/` has a file for the session. Sessions started before installing pokegents won't have running files.
 
-**Status stuck on wrong state**: The status file may be stale. Delete it: `rm ~/.ccsession/status/<session-id>.json` — it will be recreated on the next hook event.
+**Status stuck on wrong state**: The status file may be stale. Delete it: `rm ~/.pokegents/status/<session-id>.json` — it will be recreated on the next hook event.
 
-**Dashboard says "offline"**: Make sure the server is running: `ccd dashboard start`. Check logs: `cat /tmp/ccd-dashboard.log`.
+**Dashboard says "offline"**: Make sure the server is running: `pokegent dashboard start`. Check logs: `cat /tmp/pokegents-dashboard.log`.
 
-**Search returns no results**: The search index builds on startup and updates every 5 minutes. Force a rebuild: `cd dashboard && ./ccd-dashboard index`.
+**Search returns no results**: The search index builds on startup and updates every 5 minutes. Force a rebuild: `cd dashboard && ./pokegents-dashboard index`.
 
-**Messages not delivered**: Agents receive message notifications on their next prompt. If an agent is idle, the auto-nudge types "check messages" after 2 seconds (iTerm2 only). Check `ccd doctor` to verify MCP registration.
+**Messages not delivered**: Agents receive message notifications on their next prompt. If an agent is idle, the auto-nudge types "check messages" after 2 seconds (iTerm2 only). Check `pokegent doctor` to verify MCP registration.
 
-**`ccd` command not found after install**: Run `source ~/.zshrc` or open a new terminal tab. ccd requires zsh.
+**`pokegent` command not found after install**: Run `source ~/.zshrc` or open a new terminal tab. pokegent requires zsh.
 
-**Dashboard build fails**: Ensure Go 1.21+ and Node.js 18+ are installed. Run `ccd doctor` to check. Build manually: `cd dashboard && make build`.
+**Dashboard build fails**: Ensure Go 1.21+ and Node.js 18+ are installed. Run `pokegent doctor` to check. Build manually: `cd dashboard && make build`.
 
-**Hook errors blocking Claude**: If you see hook errors on every prompt, the hook script may have a syntax error. Run `bash -n hooks/status-update.sh` to check. As a last resort, remove ccd hooks from `~/.claude/settings.json` and re-run `./install.sh`.
+**Hook errors blocking Claude**: If you see hook errors on every prompt, the hook script may have a syntax error. Run `bash -n hooks/status-update.sh` to check. As a last resort, remove pokegent hooks from `~/.claude/settings.json` and re-run `./install.sh`.
 
 **Wrong agent name in resume page**: Rename the agent in the dashboard (double-click the name). This updates both the dashboard and Claude's session title. Old sessions from before the rename may still show the original name.

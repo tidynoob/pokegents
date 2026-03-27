@@ -18,7 +18,7 @@ function renderMiniMarkdown(text: string): string {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
 }
 
-function HealthBar({ tokens, window: ctxWindow, muted }: { tokens: number; window: number; muted?: boolean }) {
+function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
       <div className="flex items-center gap-1.5 mt-1">
@@ -32,16 +32,9 @@ function HealthBar({ tokens, window: ctxWindow, muted }: { tokens: number; windo
   const usage = tokens / (ctxWindow || 1000000)
   const hp = Math.max(0, Math.min(100, (1 - usage) * 100))
 
-  let color: string
-  if (muted) {
-    color = 'rgba(255, 255, 255, 0.1)'
-    if (hp < 20) color = 'rgba(255, 255, 255, 0.04)'
-    else if (hp < 50) color = 'rgba(255, 255, 255, 0.07)'
-  } else {
-    color = '#4ade80'
-    if (hp < 20) color = '#f87171'
-    else if (hp < 50) color = '#facc15'
-  }
+  let color = '#4ade80'
+  if (hp < 20) color = '#f87171'
+  else if (hp < 50) color = '#facc15'
 
   const usedK = Math.round(tokens / 1000)
   const totalK = Math.round(ctxWindow / 1000)
@@ -60,7 +53,7 @@ function HealthBar({ tokens, window: ctxWindow, muted }: { tokens: number; windo
   )
 }
 
-function QuickInput({ sessionId }: { sessionId: string }) {
+function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus?: () => void; onBlur?: () => void }) {
   const [value, setValue] = useState('')
   const [sending, setSending] = useState(false)
 
@@ -75,11 +68,13 @@ function QuickInput({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} onClick={(e) => e.stopPropagation()} className="mt-1.5 shrink-0">
+    <form onSubmit={handleSubmit} onClick={(e) => e.stopPropagation()} data-no-drag className="mt-1.5 shrink-0">
       <input
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
+        onFocus={onFocus}
+        onBlur={onBlur}
         placeholder="Send command..."
         className="w-full bg-black/30 border border-zinc-800 rounded-md px-2.5 py-1.5 text-[10px] font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-zinc-600 transition-colors"
       />
@@ -97,7 +92,6 @@ interface AgentCardProps {
   spriteOverride?: string
   isReading?: boolean
   hideSprite?: boolean
-  mutedCtx?: boolean
   onCollapse?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
 }
@@ -113,7 +107,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, mutedCtx, onCollapse, cardRef }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, cardRef }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'max' || mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -127,7 +121,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const isError = agent.state === 'error'
   // After 30min of "done", treat as idle for display purposes
   const ageSeconds = agent.last_updated ? (Date.now() - new Date(agent.last_updated).getTime()) / 1000 : 0
-  const effectiveIdle = isIdle || (isDone && ageSeconds > 1800)
+  const effectiveIdle = isIdle
   const outputText = isBusy ? agent.last_trace : agent.last_summary
 
   const [editing, setEditing] = useState(false)
@@ -136,6 +130,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [showSpritePicker, setShowSpritePicker] = useState(false)
   const [flashDismissed, setFlashDismissed] = useState(false)
+  const [inputFocused, setInputFocused] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -177,19 +172,23 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
       <div
         ref={cardRef ? (el) => cardRef(el) : undefined}
         onContextMenu={handleContextMenu}
-        className={`text-left rounded-xl ${pad} border cursor-default overflow-hidden flex flex-col min-h-0 transition-all duration-150 relative group`}
+        className={`text-left rounded-xl ${pad} border cursor-default overflow-hidden flex flex-col min-h-0 transition-all duration-300 relative group`}
         style={{
-          background: `rgba(${r}, ${g}, ${b}, 0.06)`,
-          borderColor: `rgba(${r}, ${g}, ${b}, 0.15)`,
+          background: `rgba(${r}, ${g}, ${b}, ${effectiveIdle && !inputFocused ? 0.03 : 0.06})`,
+          borderColor: `rgba(${r}, ${g}, ${b}, ${effectiveIdle && !inputFocused ? 0.08 : 0.15})`,
+          opacity: effectiveIdle && !inputFocused ? 0.6 : 1,
         }}
         onMouseEnter={(e) => {
+          e.currentTarget.style.opacity = '1'
           e.currentTarget.style.background = `rgba(${r}, ${g}, ${b}, 0.14)`
           e.currentTarget.style.borderColor = `rgba(${r}, ${g}, ${b}, 0.3)`
           if (isDone && !flashDismissed) setFlashDismissed(true)
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.background = `rgba(${r}, ${g}, ${b}, 0.06)`
-          e.currentTarget.style.borderColor = `rgba(${r}, ${g}, ${b}, 0.15)`
+          const dim = effectiveIdle && !inputFocused
+          e.currentTarget.style.opacity = dim ? '0.6' : '1'
+          e.currentTarget.style.background = `rgba(${r}, ${g}, ${b}, ${dim ? 0.03 : 0.06})`
+          e.currentTarget.style.borderColor = `rgba(${r}, ${g}, ${b}, ${dim ? 0.08 : 0.15})`
         }}
       >
         {/* Done flash — pulses for 1 minute after completion, dismissed on hover */}
@@ -258,7 +257,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
                     {title}
                   </h3>
                 )}
-                <HealthBar tokens={agent.context_tokens} window={agent.context_window} muted={mutedCtx} />
+                <HealthBar tokens={agent.context_tokens} window={agent.context_window} />
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
                 <StatusBadge status={agent.state} lastUpdated={agent.last_updated} busySince={agent.busy_since} />
@@ -294,7 +293,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         />
         {/* Quick command input */}
         {showInput && (
-          <QuickInput sessionId={agent.session_id} />
+          <QuickInput sessionId={agent.session_id} onFocus={() => setInputFocused(true)} onBlur={() => setInputFocused(false)} />
         )}
       </div>
 
@@ -342,6 +341,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, effectiveIdle, outputText
   return (
     <div
       ref={scrollRef}
+      data-no-drag
       className={`rounded-md ${compact ? 'px-2 py-1.5' : 'px-3 py-2'} ${outputH} overflow-y-auto overflow-x-hidden cursor-pointer hover:brightness-110`}
       style={{ background: 'rgba(0, 0, 0, 0.35)' }}
       onClick={(e) => { e.stopPropagation(); focusAgent(agent.session_id) }}

@@ -1,10 +1,10 @@
 #!/bin/bash
 # Reliable dashboard restart — kills old process, rebuilds, starts, verifies
 DASHBOARD_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$DASHBOARD_DIR/ccd-dashboard"
-LOG="/tmp/ccd-dashboard.log"
-CCD_DATA="${CCD_DATA:-$HOME/.ccsession}"
-PORT=$(jq -r '.port // 7834' "$CCD_DATA/config.json" 2>/dev/null || echo "7834")
+BINARY="$DASHBOARD_DIR/pokegents-dashboard"
+LOG="/tmp/pokegents-dashboard.log"
+POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.ccsession}"
+PORT=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
 
 # Kill existing
 kill $(lsof -ti :$PORT) 2>/dev/null

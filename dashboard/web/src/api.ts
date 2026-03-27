@@ -102,6 +102,20 @@ export async function fetchActivity(limit = 50): Promise<ActivityEntry[]> {
   return res.json()
 }
 
+export async function fetchAgentOrder(): Promise<string[]> {
+  const res = await fetch(`${BASE}/agent-order`)
+  if (!res.ok) return []
+  return res.json()
+}
+
+export async function saveAgentOrder(order: string[]): Promise<void> {
+  await fetch(`${BASE}/agent-order`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(order),
+  })
+}
+
 export async function fetchMessageHistory(): Promise<AgentMessage[]> {
   const res = await fetch(`${BASE}/messages`)
   if (!res.ok) return []

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# ccd installer — sets up data dirs, hooks, profiles, and shell integration
+# pokegents installer — sets up data dirs, hooks, profiles, and shell integration
 set -euo pipefail
 
-CCD_ROOT="$(cd "$(dirname "$0")" && pwd)"
-CCD_DATA="${CCD_DATA:-$HOME/.ccsession}"
+POKEGENTS_ROOT="$(cd "$(dirname "$0")" && pwd)"
+POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
-echo "Installing ccd from $CCD_ROOT"
-echo "Data directory: $CCD_DATA"
+echo "Installing pokegents from $POKEGENTS_ROOT"
+echo "Data directory: $POKEGENTS_DATA"
 echo ""
 
 # ── Dependency check ────────────────────────────────────────────────────
@@ -48,37 +48,37 @@ echo "✓ Dependencies checked"
 echo ""
 
 # ── 1. Create data directories ──────────────────────────────────────────
-mkdir -p "$CCD_DATA"/{profiles,history,running,status,messages}
+mkdir -p "$POKEGENTS_DATA"/{profiles,history,running,status,messages}
 echo "✓ Data directories ready"
 
 # ── 2. Copy default config (if not present) ──────────────────────────────
-if [ ! -f "$CCD_DATA/config.json" ]; then
-  cp "$CCD_ROOT/defaults/config.json" "$CCD_DATA/config.json"
-  echo "✓ Default config installed at $CCD_DATA/config.json"
+if [ ! -f "$POKEGENTS_DATA/config.json" ]; then
+  cp "$POKEGENTS_ROOT/defaults/config.json" "$POKEGENTS_DATA/config.json"
+  echo "✓ Default config installed at $POKEGENTS_DATA/config.json"
   echo "  Edit to customize: port, default_profile, skip_permissions"
 else
   echo "· Config already exists, skipping"
 fi
 
-CCD_PORT=$(jq -r '.port // 7834' "$CCD_DATA/config.json" 2>/dev/null || echo "7834")
+POKEGENTS_PORT=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
 
 # ── Copy default profiles (only if profiles dir is empty) ─────────────
-if [ -z "$(ls -A "$CCD_DATA/profiles" 2>/dev/null)" ]; then
-  cp "$CCD_ROOT"/defaults/profiles/personal.json "$CCD_DATA/profiles/"
+if [ -z "$(ls -A "$POKEGENTS_DATA/profiles" 2>/dev/null)" ]; then
+  cp "$POKEGENTS_ROOT"/defaults/profiles/personal.json "$POKEGENTS_DATA/profiles/"
   echo "✓ Default personal profile installed"
-  echo "  Create more profiles: ccd edit <name>"
-  echo "  See example: $CCD_ROOT/defaults/profiles/example-project.json"
+  echo "  Create more profiles: pokegent edit <name>"
+  echo "  See example: $POKEGENTS_ROOT/defaults/profiles/example-project.json"
 else
   echo "· Profiles already exist, skipping defaults"
 fi
 
 # ── 3. Make hooks executable ─────────────────────────────────────────────
-chmod +x "$CCD_ROOT"/hooks/*.sh
+chmod +x "$POKEGENTS_ROOT"/hooks/*.sh
 echo "✓ Hooks marked executable"
 
 # ── 4. Set up Claude Code hooks (MERGE, not replace) ────────────────────
-HOOK_CMD="$CCD_ROOT/hooks/status-update.sh"
-STATUSLINE_CMD="$CCD_ROOT/hooks/statusline.sh"
+HOOK_CMD="$POKEGENTS_ROOT/hooks/status-update.sh"
+STATUSLINE_CMD="$POKEGENTS_ROOT/hooks/statusline.sh"
 
 if [ ! -f "$CLAUDE_SETTINGS" ]; then
   mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
@@ -135,40 +135,40 @@ jq --arg hook "$HOOK_CMD" --arg sl "$STATUSLINE_CMD" '
 echo "✓ Claude Code hooks configured (merged with existing)"
 
 # ── 5. Install MCP messaging server ─────────────────────────────────────
-if [ -d "$CCD_ROOT/mcp" ] && [[ "$HAS_NODE" == "true" ]]; then
+if [ -d "$POKEGENTS_ROOT/mcp" ] && [[ "$HAS_NODE" == "true" ]]; then
   echo ""
   echo "Installing MCP messaging server..."
-  (cd "$CCD_ROOT/mcp" && npm ci --silent)
+  (cd "$POKEGENTS_ROOT/mcp" && npm ci --silent)
 
   if [[ "$HAS_CLAUDE" == "true" ]]; then
-    if claude mcp add -s user ccd-messaging -- node "$CCD_ROOT/mcp/server.js" 2>/dev/null; then
+    if claude mcp add -s user pokegents-messaging -- node "$POKEGENTS_ROOT/mcp/server.js" 2>/dev/null; then
       echo "✓ MCP messaging server registered"
     else
       echo "· MCP registration failed. Register manually:"
-      echo "  claude mcp add -s user ccd-messaging -- node \"$CCD_ROOT/mcp/server.js\""
+      echo "  claude mcp add -s user pokegents-messaging -- node \"$POKEGENTS_ROOT/mcp/server.js\""
     fi
   else
     echo "· claude CLI not found. Register MCP manually when available:"
-    echo "  claude mcp add -s user ccd-messaging -- node \"$CCD_ROOT/mcp/server.js\""
+    echo "  claude mcp add -s user pokegents-messaging -- node \"$POKEGENTS_ROOT/mcp/server.js\""
   fi
 else
   echo "· Skipping MCP server (requires node + npm)"
 fi
 
 # ── 6. Build dashboard (optional) ───────────────────────────────────────
-if [ -d "$CCD_ROOT/dashboard" ]; then
+if [ -d "$POKEGENTS_ROOT/dashboard" ]; then
   if [[ "$HAS_GO" == "true" && "$HAS_NODE" == "true" ]]; then
     echo ""
     echo "Building dashboard..."
-    (cd "$CCD_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o ccd-dashboard . 2>&1) \
+    (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard . 2>&1) \
       && echo "✓ Go server built" \
       || echo "✗ Go server build failed"
-    (cd "$CCD_ROOT/dashboard/web" && npm ci --silent && npm run build 2>&1 | tail -1) \
+    (cd "$POKEGENTS_ROOT/dashboard/web" && npm ci --silent && npm run build 2>&1 | tail -1) \
       && echo "✓ Frontend built" \
       || echo "✗ Frontend build failed"
 
-    echo "  Start dashboard: ccd dashboard start"
-    echo "  Open: http://localhost:$CCD_PORT"
+    echo "  Start dashboard: pokegent dashboard start"
+    echo "  Open: http://localhost:$POKEGENTS_PORT"
   else
     local_missing=""
     [[ "$HAS_GO" == "false" ]] && local_missing="go"
@@ -181,17 +181,17 @@ fi
 
 # ── 7. Update .zshrc ────────────────────────────────────────────────────
 ZSHRC="$HOME/.zshrc"
-SOURCE_LINE="source \"$CCD_ROOT/ccd.sh\""
+SOURCE_LINE="source \"$POKEGENTS_ROOT/pokegent.sh\""
 
-if grep -qF 'ccd.sh' "$ZSHRC" 2>/dev/null; then
-  echo "· ccd already sourced in .zshrc"
-elif grep -qF 'ccd()' "$ZSHRC" 2>/dev/null; then
+if grep -qF 'pokegent.sh' "$ZSHRC" 2>/dev/null; then
+  echo "· pokegent already sourced in .zshrc"
+elif grep -qF 'pokegent()' "$ZSHRC" 2>/dev/null; then
   echo ""
-  echo "⚠ Found inline ccd() function in .zshrc."
+  echo "⚠ Found inline pokegent() function in .zshrc."
   echo "  Remove it manually, then add:  $SOURCE_LINE"
 else
   echo "" >> "$ZSHRC"
-  echo "# ccd — Claude Code session manager" >> "$ZSHRC"
+  echo "# pokegents — Claude Code session manager" >> "$ZSHRC"
   echo "$SOURCE_LINE" >> "$ZSHRC"
   echo "✓ Added source line to .zshrc"
 fi
@@ -200,8 +200,8 @@ echo ""
 echo "Done! Restart your shell or run:  source ~/.zshrc"
 echo ""
 echo "Quick start:"
-echo "  ccd                   # launch personal profile"
-echo "  ccd ls                # list profiles"
-echo "  ccd edit my-project   # create a new profile"
-echo "  ccd my-project        # launch it"
-echo "  ccd doctor            # verify installation"
+echo "  pokegent                   # launch personal profile"
+echo "  pokegent ls                # list profiles"
+echo "  pokegent edit my-project   # create a new profile"
+echo "  pokegent my-project        # launch it"
+echo "  pokegent doctor            # verify installation"
