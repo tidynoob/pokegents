@@ -31,6 +31,29 @@ func (t *ITerm2Terminal) WriteText(itermSessionID, tty, text string) error {
 	return exec.Command("osascript", "-e", script).Run()
 }
 
+// IsSessionFocused checks if the given iTerm2 session is the currently selected session
+// in the frontmost window. Used to avoid nudging a terminal the user is actively typing in.
+func (t *ITerm2Terminal) IsSessionFocused(itermSessionID, tty string) bool {
+	script := fmt.Sprintf(`
+tell application "iTerm2"
+	if (count of windows) = 0 then return "no"
+	tell current window
+		tell current session of current tab
+			set sid to id
+			set stty to tty
+		end tell
+	end tell
+	if "%s" is not "" and sid = "%s" then return "yes"
+	if "%s" is not "" and stty = "%s" then return "yes"
+	return "no"
+end tell`, itermSessionID, itermSessionID, tty, tty)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "yes"
+}
+
 func (t *ITerm2Terminal) SetTabName(itermSessionID, tty, name string) error {
 	script := buildSetTabNameScript(itermSessionID, tty, name)
 	return exec.Command("osascript", "-e", script).Run()

@@ -25,6 +25,8 @@ func NewFileStore(dataDir string) *Store {
 			lastReadDir:  filepath.Join(dataDir, "activity-lastread"),
 		},
 		Metadata: &FileMetadataStore{dir: dataDir},
+		Projects: &FileProjectStore{dir: filepath.Join(dataDir, "projects")},
+		Roles:    &FileRoleStore{dir: filepath.Join(dataDir, "roles")},
 	}
 }
 
@@ -655,4 +657,96 @@ func (s *FileMetadataStore) SaveJSON(filename string, data any) error {
 		return err
 	}
 	return atomicWrite(filepath.Join(s.dir, filename), bytes, 0644)
+}
+
+// ============================================================================
+// FileProjectStore
+// ============================================================================
+
+type FileProjectStore struct {
+	dir string
+}
+
+func (s *FileProjectStore) Get(name string) (*ProjectConfig, error) {
+	path := filepath.Join(s.dir, name+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var p ProjectConfig
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, err
+	}
+	p.Name = name
+	return &p, nil
+}
+
+func (s *FileProjectStore) List() ([]ProjectConfig, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, nil // empty is OK (dir may not exist yet)
+	}
+	var result []ProjectConfig
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var p ProjectConfig
+		if json.Unmarshal(data, &p) == nil {
+			p.Name = name
+			result = append(result, p)
+		}
+	}
+	return result, nil
+}
+
+// ============================================================================
+// FileRoleStore
+// ============================================================================
+
+type FileRoleStore struct {
+	dir string
+}
+
+func (s *FileRoleStore) Get(name string) (*RoleConfig, error) {
+	path := filepath.Join(s.dir, name+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var r RoleConfig
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, err
+	}
+	r.Name = name
+	return &r, nil
+}
+
+func (s *FileRoleStore) List() ([]RoleConfig, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, nil // empty is OK
+	}
+	var result []RoleConfig
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var r RoleConfig
+		if json.Unmarshal(data, &r) == nil {
+			r.Name = name
+			result = append(result, r)
+		}
+	}
+	return result, nil
 }

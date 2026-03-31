@@ -14,16 +14,36 @@ type Message = core.Message
 type Connection = core.Connection
 type ActivityEntry = core.ActivityEntry
 type FileEvent = core.FileEvent
+type ProjectConfig = core.ProjectConfig
+type RoleConfig = core.RoleConfig
 
 // Store aggregates all sub-stores. Pass this to SessionManager, MessageService, etc.
 type Store struct {
 	Running   RunningStore
 	Status    StatusStore
 	Profiles  ProfileStore
+	Projects  ProjectStore
+	Roles     RoleStore
 	Config    ConfigStore
 	Messages  MessageStore
 	Activity  ActivityStore
 	Metadata  MetadataStore
+}
+
+// ProjectStore manages project configuration files (~/.pokegents/projects/*.json).
+type ProjectStore interface {
+	// Get returns a project by name.
+	Get(name string) (*ProjectConfig, error)
+	// List returns all projects.
+	List() ([]ProjectConfig, error)
+}
+
+// RoleStore manages role configuration files (~/.pokegents/roles/*.json).
+type RoleStore interface {
+	// Get returns a role by name.
+	Get(name string) (*RoleConfig, error)
+	// List returns all roles.
+	List() ([]RoleConfig, error)
 }
 
 // MetadataStore manages small JSON metadata files (name overrides, session ID map, agent order).

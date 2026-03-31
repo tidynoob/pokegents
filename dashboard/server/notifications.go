@@ -63,17 +63,23 @@ func (n *Notifier) loadOverrides() {
 	n.overrides = m
 }
 
-func (n *Notifier) spritePathForSession(sessionID string) string {
+func (n *Notifier) spritePathForSession(ids ...string) string {
 	if len(n.sprites) == 0 {
 		return ""
 	}
-	// Check overrides first (reload each time in case user changed it)
 	n.loadOverrides()
-	sprite := n.overrides[sessionID]
+	// Check overrides under all provided IDs
+	sprite := ""
+	for _, id := range ids {
+		if s, ok := n.overrides[id]; ok && s != "" {
+			sprite = s
+			break
+		}
+	}
 	if sprite == "" {
-		// Same hash as frontend JS: uses 32-bit integer overflow (hash |= 0)
+		// Hash the first ID (ccd_session_id) — matches pokegent.sh
 		h := int32(0)
-		for _, c := range sessionID {
+		for _, c := range ids[0] {
 			h = ((h << 5) - h) + int32(c)
 		}
 		idx := int(math.Abs(float64(h))) % len(n.sprites)
@@ -129,7 +135,12 @@ func (n *Notifier) MaybeNotify(evt HookEvent, agent *AgentState) {
 	n.lastSent[evt.SessionID] = time.Now()
 	n.mu.Unlock()
 
-	spritePath := n.spritePathForSession(evt.SessionID)
+	// Pass both IDs — check overrides under either, hash the ccd_session_id
+	spriteIDs := []string{evt.SessionID}
+	if agent.CCDSessionID != "" {
+		spriteIDs = []string{agent.CCDSessionID, evt.SessionID}
+	}
+	spritePath := n.spritePathForSession(spriteIDs...)
 	go sendMacNotification(title, body, spritePath)
 }
 

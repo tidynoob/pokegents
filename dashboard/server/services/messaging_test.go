@@ -21,7 +21,7 @@ func newTestMessaging(t *testing.T) (*MessagingService, string) {
 	}
 	getAgent := func(id string) *AgentInfo { return agents[id] }
 
-	svc := NewMessagingService(fs.Messages, writeText, getAgent)
+	svc := NewMessagingService(fs.Messages, writeText, getAgent, nil)
 	return svc, dir
 }
 

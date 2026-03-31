@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 
-export type LayoutMode = 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
+export type LayoutMode = 'standard' | 'compact' | 'compact-minimal'
 
 export interface GridLayout {
   cols: number
@@ -14,22 +14,28 @@ const PADDING = 24
 const HEADER_HEIGHT = 48
 
 const H_STANDARD = 250
-const H_STANDARD_SHORT = 180
 const H_COMPACT = 128
 const H_COMPACT_MINIMAL = 92
 
+export interface LayoutSettings {
+  cardHeight?: number
+  cardMinWidth?: number
+}
+
 export function useGridLayout(
   agentCount: number,
-  profileCount?: number,
-  agentsPerProfile?: number[]
+  layoutSettings?: LayoutSettings,
 ): GridLayout {
+  const minW = layoutSettings?.cardMinWidth || MIN_CELL_WIDTH
+  const cardH = layoutSettings?.cardHeight || H_STANDARD
+
   const [layout, setLayout] = useState<GridLayout>(() =>
-    compute(agentCount)
+    compute(agentCount, minW, cardH)
   )
 
   const recompute = useCallback(() => {
-    setLayout(compute(agentCount))
-  }, [agentCount])
+    setLayout(compute(agentCount, minW, cardH))
+  }, [agentCount, minW, cardH])
 
   useEffect(() => {
     recompute()
@@ -40,7 +46,7 @@ export function useGridLayout(
   return layout
 }
 
-function compute(agentCount: number): GridLayout {
+function compute(agentCount: number, minCellWidth: number, cardHeight: number): GridLayout {
   if (agentCount === 0) return { cols: 2, mode: 'standard' }
 
   const w = window.innerWidth - PADDING
@@ -48,7 +54,7 @@ function compute(agentCount: number): GridLayout {
   const availableWithHeader = h - HEADER_HEIGHT - PADDING
   const availableNoHeader = h - PADDING
 
-  const maxCols = Math.max(2, Math.floor(w / MIN_CELL_WIDTH))
+  const maxCols = Math.max(2, Math.floor(w / minCellWidth))
   let cols = 2
   for (let c = 2; c <= maxCols; c++) {
     const cellW = (w - GAP * (c - 1)) / c
@@ -59,14 +65,9 @@ function compute(agentCount: number): GridLayout {
 
   const flatRows = Math.ceil(agentCount / cols)
 
-  const stdHeight = flatRows * H_STANDARD + (flatRows - 1) * GAP
+  const stdHeight = flatRows * cardHeight + (flatRows - 1) * GAP
   if (stdHeight <= availableWithHeader) {
     return { cols, mode: 'standard' }
-  }
-
-  const stdShortHeight = flatRows * H_STANDARD_SHORT + (flatRows - 1) * GAP
-  if (stdShortHeight <= availableWithHeader) {
-    return { cols, mode: 'standard-short' }
   }
 
   const compactHeight = flatRows * H_COMPACT + (flatRows - 1) * GAP

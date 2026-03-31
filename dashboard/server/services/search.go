@@ -34,6 +34,8 @@ type SearchResult struct {
 	ProjectDir  string `json:"project_dir"`
 	CustomTitle string `json:"custom_title"`
 	ProfileName string `json:"profile_name"`
+	Role        string `json:"role,omitempty"`
+	Project     string `json:"project,omitempty"`
 	Snippet     string `json:"snippet"`
 	CWD         string `json:"cwd"`
 	GitBranch   string `json:"git_branch"`
@@ -263,7 +265,9 @@ func (ss *SearchService) Search(query string, limit, offset int) ([]SearchResult
 			snippet(sessions_fts, 3, '<mark>', '</mark>', '...', 40) as snippet,
 			COALESCE(m.cwd, ''),
 			COALESCE(m.git_branch, ''),
-			rank
+			rank,
+			COALESCE(m.role, ''),
+			COALESCE(m.project, '')
 		FROM sessions_fts f
 		LEFT JOIN session_meta m ON f.session_id = m.session_id
 		WHERE sessions_fts MATCH ?
@@ -279,7 +283,7 @@ func (ss *SearchService) Search(query string, limit, offset int) ([]SearchResult
 	for rows.Next() {
 		var r SearchResult
 		var rank float64
-		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &rank); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &rank, &r.Role, &r.Project); err != nil {
 			continue
 		}
 		results = append(results, r)
@@ -300,7 +304,8 @@ func (ss *SearchService) RecentSessions(limit int) ([]SearchResult, error) {
 	rows, err := ss.db.Query(`
 		SELECT session_id, project_dir, COALESCE(custom_title, ''),
 			   COALESCE(profile_name, ''), COALESCE(first_user_message, ''),
-			   COALESCE(cwd, ''), COALESCE(git_branch, '')
+			   COALESCE(cwd, ''), COALESCE(git_branch, ''),
+			   COALESCE(role, ''), COALESCE(project, '')
 		FROM session_meta
 		ORDER BY last_modified DESC
 		LIMIT ?
@@ -313,7 +318,7 @@ func (ss *SearchService) RecentSessions(limit int) ([]SearchResult, error) {
 	var results []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &r.Role, &r.Project); err != nil {
 			continue
 		}
 		results = append(results, r)

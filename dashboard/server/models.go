@@ -17,6 +17,10 @@ type AgentState struct {
 	SessionID    string `json:"session_id"`
 	CCDSessionID string `json:"ccd_session_id,omitempty"`
 	ProfileName  string `json:"profile_name"`
+	Role         string `json:"role,omitempty"`
+	Project      string `json:"project,omitempty"`
+	RoleEmoji    string `json:"role_emoji,omitempty"`
+	ProjectColor [3]int `json:"project_color,omitempty"`
 	DisplayName  string `json:"display_name"`
 	Emoji        string `json:"emoji"`
 	Color        [3]int `json:"color"`
@@ -66,6 +70,8 @@ type SearchResult struct {
 	ProjectDir     string `json:"project_dir"`
 	CustomTitle    string `json:"custom_title"`
 	ProfileName    string `json:"profile_name"`
+	Role           string `json:"role,omitempty"`
+	Project        string `json:"project,omitempty"`
 	Snippet        string `json:"snippet"`
 	MessageType    string `json:"message_type"`
 	Timestamp      string `json:"timestamp"`

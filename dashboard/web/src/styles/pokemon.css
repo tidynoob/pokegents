@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
 @tailwind base;
@@ -6,9 +7,137 @@
 
 body {
   font-family: 'Inter', system-ui, sans-serif;
-  background: #0a0a0f;
-  color: #e4e4e7;
+  background: #2a6858;
+  color: #f8f8f0;
 }
+
+/* GBA horizontal scanlines on background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    180deg,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 0, 0, 0.07) 2px,
+    rgba(0, 0, 0, 0.07) 4px
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* GBA-style pixel borders */
+.gba-border {
+  border: 3px solid #1a4838;
+  border-radius: 8px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.15),
+    inset -1px -1px 0 rgba(0,0,0,0.3),
+    2px 2px 0 rgba(0,0,0,0.2);
+}
+
+/* Blue card row style from Fire Red party screen */
+.gba-card {
+  background:
+    repeating-linear-gradient(
+      180deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.06) 2px,
+      rgba(0, 0, 0, 0.06) 4px
+    ),
+    linear-gradient(180deg, #58a0d8 0%, #4890c8 30%, #3878a8 100%);
+  border: 2px solid #2860a0;
+  border-radius: 8px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.25),
+    inset -1px -1px 0 rgba(0,0,0,0.15),
+    2px 2px 0 rgba(0,0,0,0.15);
+}
+
+/* Orange selected card (like Charizard's highlighted card) */
+.gba-card-selected {
+  background:
+    repeating-linear-gradient(
+      180deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.06) 2px,
+      rgba(0, 0, 0, 0.06) 4px
+    ),
+    linear-gradient(180deg, #f89868 0%, #e87848 30%, #c86038 100%);
+  border: 2px solid #a04828;
+  border-radius: 8px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.3),
+    inset -1px -1px 0 rgba(0,0,0,0.2),
+    2px 2px 0 rgba(0,0,0,0.15);
+}
+
+/* Fire Red HP bar style */
+.gba-hp-bar {
+  background: #303030;
+  border: 1px solid #181818;
+  border-radius: 2px;
+  box-shadow: inset 1px 1px 0 rgba(0,0,0,0.5);
+}
+
+/* GBA dialog box (like "Choose a POKéMON.") */
+.gba-dialog {
+  background: #f8f8f0;
+  border: 3px solid #484848;
+  border-radius: 6px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.8),
+    2px 2px 0 rgba(0,0,0,0.2);
+  color: #383838;
+}
+
+/* GBA button (like CANCEL) */
+.gba-button {
+  background: linear-gradient(180deg, #a888b8 0%, #8870a0 100%);
+  border: 2px solid #685880;
+  border-radius: 16px;
+  color: #f8f8f0;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.2),
+    1px 1px 0 rgba(0,0,0,0.3);
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.5);
+}
+
+.gba-button:hover {
+  background: linear-gradient(180deg, #b898c8 0%, #9880b0 100%);
+}
+
+/* Teal panel (like the left panel behind Charizard) */
+.gba-panel {
+  background:
+    repeating-linear-gradient(
+      180deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.05) 2px,
+      rgba(0, 0, 0, 0.05) 4px
+    ),
+    linear-gradient(180deg, #4a9888 0%, #3a7a6a 50%, #2a6858 100%);
+  border: 2px solid #1a4838;
+  border-radius: 8px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.1),
+    2px 2px 0 rgba(0,0,0,0.15);
+}
+
+/* Pixel text shadow (GBA style) */
+.pixel-shadow {
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.5);
+}
+
+/* GBA-style scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #2a5848; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: #4a9888; border-radius: 4px; border: 1px solid #2a5848; }
+::-webkit-scrollbar-thumb:hover { background: #5aac98; }
 
 /* ─── Sprite Animation System ─────────────────────────────────── */
 /* Each animation is a one-shot that plays once then the JS reverts to sprite-idle */
@@ -202,8 +331,79 @@ body {
   animation: bubble-float 1.2s ease-in-out infinite;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+/* ─── Scanline toggle ─────────────────────────────────── */
+body.no-scanlines::before { display: none; }
+body.no-scanlines .gba-card {
+  background: linear-gradient(180deg, #58a0d8 0%, #4890c8 30%, #3878a8 100%);
+}
+body.no-scanlines .gba-card-selected {
+  background: linear-gradient(180deg, #f89868 0%, #e87848 30%, #c86038 100%);
+}
+body.no-scanlines .gba-panel {
+  background: linear-gradient(180deg, #4a9888 0%, #3a7a6a 50%, #2a6858 100%);
+}
+
+/* ─── Classic Dark Theme ──────────────────────────────── */
+/* Reverts Fire Red GBA styling back to the original dark zinc theme */
+
+body.theme-classic {
+  background: #0a0a0f;
+  color: #e4e4e7;
+}
+body.theme-classic::before { display: none; }
+
+body.theme-classic .gba-card {
+  background: #111116;
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 12px;
+  box-shadow: none;
+}
+body.theme-classic .gba-card-selected {
+  background: #111116;
+  border: 1px solid rgba(251, 146, 60, 0.3);
+  border-radius: 12px;
+  box-shadow: none;
+}
+body.theme-classic .gba-hp-bar {
+  background: #18181b;
+  border: 1px solid #27272a;
+  box-shadow: none;
+}
+body.theme-classic .gba-dialog {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  box-shadow: none;
+  color: #a1a1aa;
+}
+body.theme-classic .gba-button {
+  background: transparent;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  color: #a1a1aa;
+  box-shadow: none;
+  text-shadow: none;
+}
+body.theme-classic .gba-button:hover {
+  background: #1a1a21;
+  border-color: #3f3f46;
+  color: #e4e4e7;
+}
+body.theme-classic .gba-panel {
+  background: #111116;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  box-shadow: none;
+}
+body.theme-classic .pixel-shadow {
+  text-shadow: none;
+}
+body.theme-classic ::-webkit-scrollbar-track { background: transparent; }
+body.theme-classic ::-webkit-scrollbar-thumb { background: #27272a; border: none; }
+body.theme-classic ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* ─── Font Size Scaling (uses zoom for uniform scaling) ─ */
+body.font-size-small  #root { zoom: 0.88; }
+body.font-size-medium #root { zoom: 1; }
+body.font-size-large  #root { zoom: 1.15; }
+

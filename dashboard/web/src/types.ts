@@ -5,6 +5,10 @@ export interface AgentState {
   display_name: string
   emoji: string
   color: [number, number, number]
+  role?: string
+  project?: string
+  role_emoji?: string
+  project_color?: [number, number, number]
   state: string
   detail: string
   cwd: string
@@ -37,6 +41,10 @@ export interface SearchResult {
   project_dir: string
   custom_title: string
   profile_name: string
+  role?: string
+  project?: string
+  role_emoji?: string
+  project_color?: [number, number, number]
   snippet: string
   message_type: string
   timestamp: string

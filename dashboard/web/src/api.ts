@@ -37,6 +37,26 @@ export async function renameAgent(sessionId: string, name: string): Promise<void
   })
 }
 
+export async function assignRole(sessionId: string, role: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/role`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role }),
+  })
+  if (!res.ok) return { status: 'error' }
+  return res.json()
+}
+
+export async function assignProject(sessionId: string, project: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/project`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project }),
+  })
+  if (!res.ok) return { status: 'error' }
+  return res.json()
+}
+
 export async function setSprite(sessionId: string, sprite: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/sprite`, {
     method: 'POST',
@@ -169,6 +189,39 @@ export async function fetchProfiles(): Promise<ProfileInfo[]> {
   return res.json()
 }
 
+export interface ProjectInfo {
+  name: string
+  title: string
+  color: [number, number, number]
+}
+
+export interface RoleInfo {
+  name: string
+  title: string
+  emoji: string
+}
+
+export async function fetchProjectList(): Promise<ProjectInfo[]> {
+  const res = await fetch(`${BASE}/projects`)
+  if (!res.ok) return []
+  return res.json()
+}
+
+export async function fetchRoleList(): Promise<RoleInfo[]> {
+  const res = await fetch(`${BASE}/roles`)
+  if (!res.ok) return []
+  return res.json()
+}
+
 export async function launchProfile(name: string): Promise<void> {
-  await fetch(`${BASE}/profiles/${name}/launch`, { method: 'POST' })
+  // Try new launch endpoint first (supports role@project), fall back to legacy
+  const res = await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile: name }),
+  })
+  if (res.status === 404) {
+    // Fallback: legacy endpoint for old servers
+    await fetch(`${BASE}/profiles/${encodeURIComponent(name)}/launch`, { method: 'POST' })
+  }
 }

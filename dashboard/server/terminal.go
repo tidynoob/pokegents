@@ -21,4 +21,7 @@ type TerminalIntegration interface {
 	// IsAvailable reports whether the terminal integration is functional
 	// on the current platform.
 	IsAvailable() bool
+	// IsSessionFocused checks if the given session is the currently active/selected
+	// terminal session. Used to avoid nudging while the user is typing.
+	IsSessionFocused(itermSessionID, tty string) bool
 }

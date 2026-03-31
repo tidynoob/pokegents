@@ -67,6 +67,8 @@ type RunningSession struct {
 	CCDSessionID   string `json:"ccd_session_id,omitempty"`
 	ITermSessionID string `json:"iterm_session_id,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
+	Role           string `json:"role,omitempty"`    // role name (empty for legacy/bare project)
+	Project        string `json:"project,omitempty"` // project name (empty for legacy profiles)
 }
 
 // Agent interface implementation for identity resolution.
@@ -104,8 +106,32 @@ type Profile struct {
 type AppConfig struct {
 	Port                int    `json:"port"`
 	DefaultProfile      string `json:"default_profile"`
+	DefaultProject      string `json:"default_project,omitempty"`
+	DefaultRole         string `json:"default_role,omitempty"`
 	SkipPermissions     bool   `json:"skip_permissions"`
 	ITermRestoreProfile string `json:"iterm2_restore_profile"`
+}
+
+// ProjectConfig defines a workspace — where the agent works.
+// Stored in ~/.pokegents/projects/*.json.
+type ProjectConfig struct {
+	Name          string   `json:"name"`
+	Title         string   `json:"title"`
+	Color         [3]int   `json:"color"`
+	CWD           string   `json:"cwd"`
+	AddDirs       []string `json:"add_dirs,omitempty"`
+	ContextPrompt string   `json:"context_prompt,omitempty"`
+	ITermProfile  string   `json:"iterm2_profile,omitempty"`
+}
+
+// RoleConfig defines a persona — how the agent behaves.
+// Stored in ~/.pokegents/roles/*.json.
+type RoleConfig struct {
+	Name            string `json:"name"`
+	Title           string `json:"title"`
+	Emoji           string `json:"emoji"`
+	SystemPrompt    string `json:"system_prompt"`
+	SkipPermissions *bool  `json:"skip_permissions,omitempty"` // nil = inherit from config
 }
 
 // Message represents a message between agents.

@@ -33,9 +33,9 @@ func NewNudger(state *StateManager, terminal TerminalIntegration) *Nudger {
 		terminal:   terminal,
 		pending:    make(map[string]*time.Timer),
 		lastNudge:  make(map[string]time.Time),
-		debounce:   10 * time.Second,
-		batchDelay: 2 * time.Second,
-		minIdle:    3 * time.Second,
+		debounce:   5 * time.Second,
+		batchDelay: 500 * time.Millisecond,
+		minIdle:    1 * time.Second,
 	}
 }
 

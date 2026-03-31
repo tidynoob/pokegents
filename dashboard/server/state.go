@@ -29,7 +29,8 @@ type StateManager struct {
 	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
-	agentOrder    []string                  // user-defined display order (session IDs), persisted
+	agentOrder         []string                  // user-defined display order (session IDs), persisted
+	pendingRelaunches  map[string]string         // session_id → pokegent command to run when idle
 
 	dataDir          string // ~/.ccsession — kept for paths not yet migrated to store
 	claudeProjectDir string // ~/.claude/projects
@@ -181,6 +182,78 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		sm.nameOverrides[rs.CCDSessionID] = newName
 	}
 	sm.saveNameOverrides()
+}
+
+// SetAgentRole updates the role field on a running agent and recalculates the profile composite key.
+func (sm *StateManager) SetAgentRole(sessionID, role string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if rs, ok := sm.running[sessionID]; ok {
+		rs.Role = role
+		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
+		sm.running[sessionID] = rs
+		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+			r.Role = role
+			r.Profile = rs.Profile
+		})
+	}
+	sm.rebuildAgents()
+}
+
+// SetAgentProject updates the project field on a running agent and recalculates the profile composite key.
+func (sm *StateManager) SetAgentProject(sessionID, project string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if rs, ok := sm.running[sessionID]; ok {
+		rs.Project = project
+		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
+		sm.running[sessionID] = rs
+		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+			r.Project = project
+			r.Profile = rs.Profile
+		})
+	}
+	sm.rebuildAgents()
+}
+
+// composeProfileKey builds the composite profile key from role and project.
+func (sm *StateManager) composeProfileKey(role, project, fallback string) string {
+	if role != "" && project != "" {
+		return role + "@" + project
+	}
+	if project != "" {
+		return "@" + project
+	}
+	if role != "" {
+		return role + "@"
+	}
+	return fallback
+}
+
+// ComposeProfileKey builds a composite key from role and project (public version).
+func (sm *StateManager) ComposeProfileKey(role, project, fallback string) string {
+	return sm.composeProfileKey(role, project, fallback)
+}
+
+// SetPendingRelaunch stores a command to execute when the agent becomes idle.
+func (sm *StateManager) SetPendingRelaunch(sessionID, cmd string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.pendingRelaunches == nil {
+		sm.pendingRelaunches = make(map[string]string)
+	}
+	sm.pendingRelaunches[sessionID] = cmd
+}
+
+// GetPendingRelaunch returns and clears the pending relaunch command for a session.
+func (sm *StateManager) GetPendingRelaunch(sessionID string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	cmd := sm.pendingRelaunches[sessionID]
+	delete(sm.pendingRelaunches, sessionID)
+	return cmd
 }
 
 // TransitionDoneToIdle transitions agents that have been "done" for more than
@@ -842,6 +915,8 @@ func (sm *StateManager) rebuildAgents() {
 			SessionID:      sid,
 			CCDSessionID:   rs.CCDSessionID,
 			ProfileName:    rs.Profile,
+			Role:           rs.Role,
+			Project:        rs.Project,
 			DisplayName:    rs.DisplayName,
 			PID:            rs.PID,
 			TTY:            rs.TTY,
@@ -849,10 +924,35 @@ func (sm *StateManager) rebuildAgents() {
 			State:          "idle",
 		}
 
-		// Enrich from profile
+		// Enrich from role config (emoji)
+		if rs.Role != "" && sm.store != nil {
+			if role, err := sm.store.Roles.Get(rs.Role); err == nil {
+				a.RoleEmoji = role.Emoji
+				if a.Emoji == "" {
+					a.Emoji = role.Emoji
+				}
+			}
+		}
+
+		// Enrich from project config (color)
+		if rs.Project != "" && sm.store != nil {
+			if proj, err := sm.store.Projects.Get(rs.Project); err == nil {
+				a.ProjectColor = proj.Color
+				a.Color = proj.Color
+				if a.DisplayName == "" {
+					a.DisplayName = proj.Title
+				}
+			}
+		}
+
+		// Enrich from legacy profile (fallback)
 		if p, ok := sm.profiles[rs.Profile]; ok {
-			a.Emoji = p.Emoji
-			a.Color = p.Color
+			if a.Emoji == "" {
+				a.Emoji = p.Emoji
+			}
+			if a.Color == [3]int{} {
+				a.Color = p.Color
+			}
 			if a.DisplayName == "" {
 				a.DisplayName = p.Title
 			}

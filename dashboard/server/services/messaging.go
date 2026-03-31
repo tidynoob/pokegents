@@ -18,6 +18,9 @@ type WriteTextFunc func(iTermSessionID, tty, text string) error
 // Injected by the server — keeps messaging free of state manager imports.
 type AgentLookupFunc func(sessionID string) *AgentInfo
 
+// IsSessionFocusedFunc checks if a terminal session is currently focused by the user.
+type IsSessionFocusedFunc func(iTermSessionID, tty string) bool
+
 // AgentInfo is the minimal agent state the nudger needs for its guards.
 type AgentInfo struct {
 	State          string
@@ -29,9 +32,10 @@ type AgentInfo struct {
 
 // MessagingService consolidates message routing, delivery, budget, and nudging.
 type MessagingService struct {
-	store     store.MessageStore
-	writeText WriteTextFunc
-	getAgent  AgentLookupFunc
+	store            store.MessageStore
+	writeText        WriteTextFunc
+	getAgent         AgentLookupFunc
+	isSessionFocused IsSessionFocusedFunc
 
 	// Nudger state
 	mu         sync.Mutex
@@ -43,11 +47,12 @@ type MessagingService struct {
 }
 
 // NewMessagingService creates a messaging service with injected dependencies.
-func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgent AgentLookupFunc) *MessagingService {
+func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgent AgentLookupFunc, isFocused IsSessionFocusedFunc) *MessagingService {
 	return &MessagingService{
-		store:      ms,
-		writeText:  writeText,
-		getAgent:   getAgent,
+		store:            ms,
+		writeText:        writeText,
+		getAgent:         getAgent,
+		isSessionFocused: isFocused,
 		pending:    make(map[string]*time.Timer),
 		lastNudge:  make(map[string]time.Time),
 		debounce:   10 * time.Second,
@@ -192,6 +197,17 @@ func (s *MessagingService) executeNudge(sessionID string) {
 
 	if agent.ITermSessionID == "" && agent.TTY == "" {
 		log.Printf("nudger: skip %s — no iTerm session or TTY", sessionID[:8])
+		return
+	}
+
+	// Don't nudge if user is actively typing in this terminal
+	if s.isSessionFocused != nil && s.isSessionFocused(agent.ITermSessionID, agent.TTY) {
+		log.Printf("nudger: defer %s — session is focused (user may be typing)", sessionID[:8])
+		s.mu.Lock()
+		s.pending[sessionID] = time.AfterFunc(5*time.Second, func() {
+			s.executeNudge(sessionID)
+		})
+		s.mu.Unlock()
 		return
 	}
 
