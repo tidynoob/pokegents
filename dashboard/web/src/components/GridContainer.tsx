@@ -232,7 +232,7 @@ function GridCell({
     // Play: animate to new position
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        el.style.transition = 'transform 250ms cubic-bezier(0.2, 0, 0, 1)'
+        el.style.transition = 'transform 500ms cubic-bezier(0.2, 0, 0, 1)'
         el.style.transform = 'translate(0, 0)'
       })
     })
@@ -299,14 +299,15 @@ function GridCell({
     >
       {children}
 
-      {/* Resize handle — bottom-right, visible on hover */}
-      {!isCompact && !isDragging && (
+      {/* Resize handle — bottom-right corner, large touch target */}
+      {!isDragging && (
         <div
           data-no-drag
-          className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+          className="absolute bottom-0 right-0 cursor-nwse-resize z-10 group/resize"
+          style={{ width: 28, height: 28 }}
           onPointerDown={onResizePointerDown}
         >
-          <svg viewBox="0 0 16 16" className="w-full h-full text-white/40">
+          <svg viewBox="0 0 16 16" className="absolute bottom-1 right-1 w-4 h-4 text-white/20 group-hover/resize:text-white/50 transition-colors">
             <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" />
             <line x1="8" y1="14" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
             <line x1="12" y1="14" x2="14" y2="12" stroke="currentColor" strokeWidth="1.5" />

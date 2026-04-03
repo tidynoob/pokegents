@@ -15,6 +15,8 @@ export interface PokeballAnim {
   // For recall: exact sprite center (so animation aligns with the sprite in the card)
   spriteCx?: number
   spriteCy?: number
+  // For deploy: mount the card before animation ends so white fades over it
+  onMountCard?: () => void
 }
 
 interface Props {
@@ -102,16 +104,19 @@ function RecallAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
 }
 
 // ── Deploy: pokéball flies → single bounce → pops open mid-air ─
-// Timeline: fly(800ms) → bounce+open(400ms) → done
-// Total: ~1200ms
+// Timeline: fly(800ms) → bounce+morph(800ms) → done
+// Total: ~1600ms
 
 function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete: () => void }) {
   const [phase, setPhase] = useState<'fly' | 'bounce' | 'done'>('fly')
 
   useEffect(() => {
     const t1 = setTimeout(() => setPhase('bounce'), 800)
-    const t2 = setTimeout(() => { setPhase('done'); onComplete() }, 1200)
-    return () => { clearTimeout(t1); clearTimeout(t2) }
+    // Mount card when white circle has fully expanded to rectangle (250ms into bounce)
+    const t2 = setTimeout(() => { anim.onMountCard?.() }, 800 + 250)
+    // Animation ends after circle expand (250ms) + rectangle fade (250ms)
+    const t3 = setTimeout(() => { setPhase('done'); onComplete() }, 800 + 500)
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3) }
   }, [])
 
   if (phase === 'done') return null
@@ -138,41 +143,40 @@ function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
         />
       )}
 
-      {/* Phase 2: Single bounce up → pops open mid-air with flash + card expand */}
+      {/* Phase 2: Bounce → white circle morphs into white card shape → fades */}
       {phase === 'bounce' && (
-        <div style={{ position: 'fixed', left: cx, top: cy, transform: 'translate(-50%, -50%)' }}>
+        <>
           {/* Pokéball bounces up once then fades */}
-          <img
-            src="/sprites/pokeball.png"
-            alt=""
-            style={{
-              width: 28, height: 28,
-              imageRendering: 'pixelated',
-              filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
-              animation: 'pokeballPopOpen 400ms ease-out forwards',
-            }}
-          />
-          {/* White flash at 150ms */}
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            width: 120, height: 120,
-            transform: 'translate(-50%, -50%)',
-            borderRadius: '50%',
-            background: 'radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 70%)',
-            animation: 'deployFlash 350ms ease-out 100ms both',
-          }} />
-          {/* Card box expanding */}
+          <div style={{ position: 'fixed', left: cx, top: cy, transform: 'translate(-50%, -50%)' }}>
+            <img
+              src="/sprites/pokeball.png"
+              alt=""
+              style={{
+                width: 28, height: 28,
+                imageRendering: 'pixelated',
+                filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+                animation: 'pokeballPopOpen 400ms ease-out forwards',
+              }}
+            />
+          </div>
+          {/* White shape: starts as circle at ball position, morphs to full card rect */}
           <div style={{
             position: 'fixed',
-            left: anim.cardX, top: anim.cardY,
-            width: anim.cardW, height: anim.cardH,
+            left: anim.cardX,
+            top: anim.cardY,
+            width: anim.cardW,
+            height: anim.cardH,
             borderRadius: 8,
-            border: '2px solid rgba(88,160,216,0.6)',
-            background: 'rgba(88,160,216,0.12)',
-            transformOrigin: `${cx - anim.cardX}px ${cy - anim.cardY}px`,
-            animation: 'cardExpand 400ms cubic-bezier(0.2, 0, 0, 1) 100ms both',
-          }} />
-        </div>
+            background: 'white',
+            WebkitMaskImage: 'linear-gradient(to right, transparent, white 30px, white calc(100% - 30px), transparent), linear-gradient(to bottom, transparent, white 30px, white calc(100% - 30px), transparent)',
+            WebkitMaskComposite: 'destination-in',
+            maskImage: 'linear-gradient(to right, transparent, white 30px, white calc(100% - 30px), transparent), linear-gradient(to bottom, transparent, white 30px, white calc(100% - 30px), transparent)',
+            maskComposite: 'intersect',
+            animation: 'deployCardMorph 500ms cubic-bezier(0.2, 0, 0, 1) forwards',
+            '--cx': `${cx - anim.cardX}px`,
+            '--cy': `${cy - anim.cardY}px`,
+          } as React.CSSProperties} />
+        </>
       )}
     </>
   )
@@ -209,6 +213,7 @@ export function usePokeballAnimations() {
     bubbleSource: { x: number; y: number },
     cardRect: DOMRect,
     onDone: () => void,
+    onMountCard?: () => void,
   ) => {
     const id = `deploy-${sessionId}-${Date.now()}`
     pendingCallbacks.current.set(id, onDone)
@@ -217,6 +222,7 @@ export function usePokeballAnimations() {
       cardX: cardRect.left, cardY: cardRect.top,
       cardW: cardRect.width, cardH: cardRect.height,
       bubbleX: bubbleSource.x, bubbleY: bubbleSource.y,
+      onMountCard,
     }])
   }, [])
 

@@ -137,10 +137,10 @@ HELP
     case "${2:-open}" in
       start)
         if [[ ! -f "$dashboard_bin" ]]; then
-          echo "Dashboard not built. Run: cd $POKEGENTS_ROOT/dashboard && make build"
+          echo "Dashboard not built. Run: pokegent dashboard build"
           return 1
         fi
-        "$dashboard_bin" serve &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &
         echo "Dashboard started at http://localhost:$POKEGENTS_PORT"
         ;;
       stop)
@@ -150,7 +150,7 @@ HELP
       restart)
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &>/dev/null &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &>/dev/null &
         disown
         echo "Dashboard restarted at http://localhost:$POKEGENTS_PORT"
         ;;
@@ -178,7 +178,7 @@ HELP
         echo "Restarting dashboard..."
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &>/dev/null &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &>/dev/null &
         disown
         echo "  ✓ Dashboard running at http://localhost:$POKEGENTS_PORT"
         echo ""

@@ -372,26 +372,28 @@ body::before {
   100% { transform: translateY(-16px) scale(2); opacity: 0; }
 }
 
-/* Deploy: white flash burst */
-@keyframes deployFlash {
-  0%   { transform: translate(-50%, -50%) scale(0.2); opacity: 1; }
-  20%  { transform: translate(-50%, -50%) scale(1.3); opacity: 1; }
-  100% { transform: translate(-50%, -50%) scale(2.5); opacity: 0; }
-}
-
-/* Deploy: sprite materializes from bright white */
-@keyframes deployAppear {
-  0%   { transform: translate(-50%, -50%) scale(0); opacity: 0; filter: brightness(4) saturate(0); }
-  30%  { transform: translate(-50%, -50%) scale(2.2); opacity: 1; filter: brightness(2) saturate(0.5); }
-  60%  { transform: translate(-50%, -50%) scale(1.8); filter: brightness(1.3) saturate(0.8); }
-  100% { transform: translate(-50%, -50%) scale(2); opacity: 1; filter: brightness(1) saturate(1); }
-}
-
-/* Deploy: card box scales up from pokéball landing point */
-@keyframes cardExpand {
-  0%   { transform: scale(0.03); opacity: 0; border-color: rgba(255,255,255,0.9); }
-  20%  { opacity: 0.7; }
-  100% { transform: scale(1); opacity: 0; border-color: rgba(88,160,216,0); }
+/* Deploy: white circle expands to card rect (250ms), then fades out (250ms) */
+@keyframes deployCardMorph {
+  0% {
+    clip-path: circle(16px at var(--cx) var(--cy));
+    opacity: 1;
+  }
+  35% {
+    clip-path: circle(80% at var(--cx) var(--cy));
+    opacity: 1;
+  }
+  50% {
+    clip-path: inset(0 0 0 0 round 8px);
+    opacity: 1;
+  }
+  75% {
+    clip-path: inset(0 0 0 0 round 8px);
+    opacity: 0.5;
+  }
+  100% {
+    clip-path: inset(0 0 0 0 round 8px);
+    opacity: 0;
+  }
 }
 
 /* ─── Scanline toggle ─────────────────────────────────── */
