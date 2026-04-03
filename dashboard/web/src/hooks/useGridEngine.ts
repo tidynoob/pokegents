@@ -493,9 +493,13 @@ export function useGridEngine(
   const lastDragCell = useRef('')
   const updateDrag = useCallback((pointerX: number, pointerY: number) => {
     if (!dragState) return
-    const cell = pointerToCell(pointerX, pointerY)
     const rect = layouts[dragState.id]
     if (!rect) return
+
+    // Subtract grab offset so the card's top-left tracks correctly
+    const adjustedX = pointerX - dragState.ghostOffset.x
+    const adjustedY = pointerY - dragState.ghostOffset.y
+    const cell = pointerToCell(adjustedX, adjustedY)
 
     // Clamp so card doesn't overflow grid columns
     const clampedCol = Math.max(1, Math.min(cell.col, settings.cols - rect.w + 1))

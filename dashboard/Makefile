@@ -4,7 +4,7 @@
 build: build-server build-web
 
 build-server:
-	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o ccd-dashboard .
+	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard .
 
 build-web:
 	cd web && npm ci --silent && npm run build
@@ -23,5 +23,5 @@ install: build
 	@echo "  Start:  ./ccd-dashboard serve"
 
 clean:
-	rm -f ccd-dashboard
+	rm -f pokegents-dashboard
 	rm -rf web/dist web/node_modules
