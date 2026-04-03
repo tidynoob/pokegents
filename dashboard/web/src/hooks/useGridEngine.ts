@@ -26,6 +26,7 @@ export type CardMode = 'standard' | 'compact' | 'compact-minimal'
 export interface DragState {
   id: string
   startCell: { col: number; row: number }
+  startPointer: { x: number; y: number }
   ghostOffset: { x: number; y: number }
 }
 
@@ -193,6 +194,56 @@ function findNextFree(
   return { col: 1, row: 200 }
 }
 
+/** Move all cards up as high as possible without overlapping.
+ *  Tries same column first, then any column. Process top-to-bottom
+ *  so upper cards stay put and lower cards slide up. */
+export function compactUp(
+  layouts: Record<string, GridRect>,
+  cols: number,
+): Record<string, GridRect> {
+  const result: Record<string, GridRect> = {}
+
+  // Process cards top-to-bottom, left-to-right
+  const sorted = Object.keys(layouts).sort((a, b) => {
+    const ra = layouts[a], rb = layouts[b]
+    return ra.row !== rb.row ? ra.row - rb.row : ra.col - rb.col
+  })
+
+  for (const id of sorted) {
+    const card = layouts[id]
+    if (!card) continue
+
+    let bestRow = card.row
+    let bestCol = card.col
+
+    // First: try to move up keeping same column
+    for (let row = 1; row < card.row; row++) {
+      if (canFit(result, null, card.col, row, card.w, card.h, cols)) {
+        bestRow = row
+        break
+      }
+    }
+
+    // If same-column didn't help, try any column at the earliest row
+    if (bestRow === card.row) {
+      outer:
+      for (let row = 1; row < card.row; row++) {
+        for (let col = 1; col <= cols - card.w + 1; col++) {
+          if (canFit(result, null, col, row, card.w, card.h, cols)) {
+            bestRow = row
+            bestCol = col
+            break outer
+          }
+        }
+      }
+    }
+
+    result[id] = { ...card, col: bestCol, row: bestRow }
+  }
+
+  return result
+}
+
 /** Reflow layouts when column count changes. Keeps positions when possible,
  *  only moves cards that overflow the new column count. */
 export function reflowLayouts(
@@ -283,6 +334,10 @@ export interface GridEngine {
 
   // Preview layouts during drag/resize (for animation)
   previewLayouts: Record<string, GridRect> | null
+
+  // Compact / reset
+  compactUp: () => void
+  resetSizes: () => void
 
   // Persistence
   saveProfile: (name: string) => Promise<void>
@@ -389,28 +444,41 @@ export function useGridEngine(
     }, 500)
   }, [])
 
-  // ── Ensure all agents have layouts (and no overlaps) ──
+  // ── Prune stale layouts + ensure all visible agents have layouts ──
+  const agentIdSet = useMemo(() => new Set(agentIds), [agentIds])
+
   useEffect(() => {
     if (!loadedRef.current) return
     setLayoutsState(prev => {
       let changed = false
-      const next = { ...prev }
+      const next: Record<string, GridRect> = {}
+
+      // Only keep layouts for agents that currently exist (prune ghosts)
+      for (const [id, rect] of Object.entries(prev)) {
+        if (agentIdSet.has(id)) {
+          next[id] = rect
+        } else {
+          changed = true // pruned a stale entry
+        }
+      }
+
+      // Ensure all visible agents have a layout
       for (const id of agentIds) {
         if (!next[id]) {
-          // New card — place at default size
           const pos = placeCard(next, settings.defaultCardW, settings.defaultCardH, settings.cols)
           next[id] = { ...pos, w: settings.defaultCardW, h: settings.defaultCardH }
           changed = true
         } else {
-          // Existing card — check if its saved position conflicts with others
+          // Check if saved position conflicts with another visible agent
           const saved = next[id]
           const hasConflict = Object.entries(next).some(([otherId, otherRect]) =>
             otherId !== id && overlaps(saved, otherRect)
           )
           if (hasConflict) {
-            // Shrink to 1×1 and find nearest free spot
-            const pos = placeCard(next, 1, 1, settings.cols)
-            next[id] = { ...pos, w: 1, h: 1 }
+            // Reposition but keep original size
+            const w = Math.min(saved.w, settings.cols)
+            const pos = placeCard(next, w, saved.h, settings.cols)
+            next[id] = { ...pos, w, h: saved.h }
             changed = true
           }
         }
@@ -418,7 +486,7 @@ export function useGridEngine(
       if (changed) persistLayouts(next, settings)
       return changed ? next : prev
     })
-  }, [agentIds, settings.cols, settings.defaultCardW, settings.defaultCardH, loadedRef.current])
+  }, [agentIds, agentIdSet, settings.cols, settings.defaultCardW, settings.defaultCardH, loadedRef.current])
 
   const ensureLayout = useCallback((id: string) => {
     setLayoutsState(prev => {
@@ -486,6 +554,7 @@ export function useGridEngine(
     setDragState({
       id,
       startCell: { col: layouts[id]?.col ?? 1, row: layouts[id]?.row ?? 1 },
+      startPointer: { x: pointerX, y: pointerY },
       ghostOffset: { x: pointerX - cardRect.left, y: pointerY - cardRect.top },
     })
   }, [layouts])
@@ -496,14 +565,19 @@ export function useGridEngine(
     const rect = layouts[dragState.id]
     if (!rect) return
 
-    // Subtract grab offset so the card's top-left tracks correctly
-    const adjustedX = pointerX - dragState.ghostOffset.x
-    const adjustedY = pointerY - dragState.ghostOffset.y
-    const cell = pointerToCell(adjustedX, adjustedY)
+    // Delta-based: how many cells has the pointer moved from where we started?
+    const colUnit = dims.cellW + GAP
+    const rowUnit = dims.cellH + GAP
+    const deltaX = pointerX - dragState.startPointer.x
+    const deltaY = pointerY - dragState.startPointer.y
+    const deltaCols = Math.round(deltaX / colUnit)
+    const deltaRows = Math.round(deltaY / rowUnit)
+    const targetCol = dragState.startCell.col + deltaCols
+    const targetRow = dragState.startCell.row + deltaRows
 
     // Clamp so card doesn't overflow grid columns
-    const clampedCol = Math.max(1, Math.min(cell.col, settings.cols - rect.w + 1))
-    const clampedRow = Math.max(1, cell.row)
+    const clampedCol = Math.max(1, Math.min(targetCol, settings.cols - rect.w + 1))
+    const clampedRow = Math.max(1, targetRow)
     const cellKey = `${clampedCol},${clampedRow}`
     if (cellKey === lastDragCell.current) return
     lastDragCell.current = cellKey
@@ -516,8 +590,10 @@ export function useGridEngine(
 
   const endDrag = useCallback(() => {
     if (previewLayouts) {
-      setLayoutsState(previewLayouts)
-      persistLayouts(previewLayouts, settings)
+      // Auto-compact after drag so displaced cards don't stay stranded
+      const compacted = compactUp(previewLayouts, settings.cols)
+      setLayoutsState(compacted)
+      persistLayouts(compacted, settings)
     }
     setPreviewLayouts(null)
     setDragState(null)
@@ -577,13 +653,39 @@ export function useGridEngine(
 
   const endResize = useCallback(() => {
     if (previewLayouts) {
-      setLayoutsState(previewLayouts)
-      persistLayouts(previewLayouts, settings)
+      // Auto-compact after resize so displaced cards don't stay stranded
+      const compacted = compactUp(previewLayouts, settings.cols)
+      setLayoutsState(compacted)
+      persistLayouts(compacted, settings)
     }
     setPreviewLayouts(null)
     setResizeState(null)
     lastResizeSize.current = ''
   }, [previewLayouts, settings, persistLayouts])
+
+  // ── Compact up ───────────────────────────────────────────
+
+  const compactUpAction = useCallback(() => {
+    setLayoutsState(prev => {
+      const compacted = compactUp(prev, settings.cols)
+      persistLayouts(compacted, settings)
+      return compacted
+    })
+  }, [settings, persistLayouts])
+
+  const resetSizesAction = useCallback(() => {
+    setLayoutsState(_prev => {
+      // Reset all cards to default size and repack from scratch
+      const result: Record<string, GridRect> = {}
+      const { defaultCardW: w, defaultCardH: h, cols } = settings
+      for (const id of agentIds) {
+        const pos = placeCard(result, w, h, cols)
+        result[id] = { ...pos, w, h }
+      }
+      persistLayouts(result, settings)
+      return result
+    })
+  }, [agentIds, settings, persistLayouts])
 
   // ── Profiles ─────────────────────────────────────────────
 
@@ -663,6 +765,8 @@ export function useGridEngine(
     endResize,
     gridRef,
     previewLayouts,
+    compactUp: compactUpAction,
+    resetSizes: resetSizesAction,
     saveProfile,
     loadProfile,
     deleteProfile,
