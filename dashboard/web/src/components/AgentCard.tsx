@@ -1,9 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
-import { StatusBadge } from './StatusBadge'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage } from '../api'
+import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage, assignRole, assignProject, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { POKEMON_SPRITES } from './sprites'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
@@ -18,13 +17,31 @@ function renderMiniMarkdown(text: string): string {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
 }
 
+function ProfilePill({ name, color }: { name: string; color?: [number, number, number] }) {
+  const [r, g, b] = color || [100, 100, 100]
+  return (
+    <span
+      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      style={{ background: `rgba(${r}, ${g}, ${b}, 0.6)`, border: `1px solid rgba(${r}, ${g}, ${b}, 0.8)` }}
+    >{name}</span>
+  )
+}
+
+function RolePill({ name }: { name: string }) {
+  return (
+    <span className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      style={{ background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.2)' }}
+    >{name}</span>
+  )
+}
+
 function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
       <div className="flex items-center gap-1.5 mt-1">
-        <span className="text-[8px] font-bold text-zinc-500 shrink-0">CTX</span>
-        <div className="flex-1 h-[6px] border border-zinc-700 rounded-sm bg-zinc-900" />
-        <span className="text-[8px] text-zinc-700 shrink-0">—</span>
+                <span className="text-[7px] font-pixel font-bold text-accent-yellow pixel-shadow shrink-0">HP</span>
+        <div className="flex-1 h-[6px] gba-hp-bar" />
+        <span className="text-[7px] font-pixel text-white/30 shrink-0">—</span>
       </div>
     )
   }
@@ -32,23 +49,23 @@ function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: numb
   const usage = tokens / (ctxWindow || 1000000)
   const hp = Math.max(0, Math.min(100, (1 - usage) * 100))
 
-  let color = '#4ade80'
-  if (hp < 20) color = '#f87171'
-  else if (hp < 50) color = '#facc15'
+  let color = '#58d898'  // GBA green
+  if (hp < 20) color = '#f85858'  // GBA red
+  else if (hp < 50) color = '#f8d830'  // GBA yellow
 
   const usedK = Math.round(tokens / 1000)
   const totalK = Math.round(ctxWindow / 1000)
 
   return (
     <div className="flex items-center gap-1.5 mt-1">
-      <span className="text-[8px] font-bold text-zinc-500 shrink-0">CTX</span>
-      <div className="flex-1 h-[6px] border border-zinc-700 rounded-sm bg-zinc-900 overflow-hidden">
+      <span className="text-[7px] font-pixel font-bold text-accent-yellow pixel-shadow shrink-0">HP</span>
+      <div className="flex-1 h-[6px] gba-hp-bar overflow-hidden">
         <div
           className="h-full transition-all duration-1000"
-          style={{ width: `${hp}%`, backgroundColor: color }}
+          style={{ width: `${hp}%`, background: `linear-gradient(180deg, ${color} 0%, ${color}cc 100%)` }}
         />
       </div>
-      <span className="text-[8px] text-zinc-600 shrink-0 tabular-nums">{usedK}k/{totalK}k</span>
+      <span className="text-[7px] font-mono text-white/60 pixel-shadow shrink-0 tabular-nums">{usedK}/{totalK}</span>
     </div>
   )
 }
@@ -66,7 +83,7 @@ function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus
     await sendPrompt(sessionId, value.trim())
     setValue('')
     setSending(false)
-    if (textareaRef.current) textareaRef.current.style.height = '28px'
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }
 
   const handlePaste = async (e: React.ClipboardEvent) => {
@@ -78,7 +95,7 @@ function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus
         if (!blob) continue
         const result = await uploadImage(sessionId, blob)
         if (result) {
-          setValue(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + result.path + ' ')
+          setValue(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + `[Image: ${result.path}]` + ' ')
         }
         return
       }
@@ -102,19 +119,19 @@ function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus
         }}
         onInput={(e) => {
           const t = e.currentTarget
-          t.style.height = '28px'
+          t.style.height = 'auto'
           t.style.height = Math.min(t.scrollHeight, 80) + 'px'
         }}
         rows={1}
-        placeholder="Send command..."
-        className="w-full bg-black/30 border border-zinc-800 rounded-md px-2.5 py-1.5 text-[10px] font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-zinc-600 transition-colors resize-none"
-        style={{ height: 28 }}
+        placeholder="What will you do?"
+        className="w-full gba-dialog text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 text-gba-dialog-border placeholder:text-gba-dialog-border/30 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border"
+        style={{ minHeight: 28 }}
       />
     </form>
   )
 }
 
-type LayoutMode = 'standard' | 'standard-short' | 'compact' | 'compact-minimal'
+type LayoutMode = 'standard' | 'compact' | 'compact-minimal'
 
 interface AgentCardProps {
   agent: AgentState
@@ -122,10 +139,13 @@ interface AgentCardProps {
   mode: LayoutMode
   connectedAgents?: { session_id: string; emoji: string; display_name: string }[]
   spriteOverride?: string
+  spriteSessionId?: string  // ccd_session_id for consistent sprite hashing (matches pokegent.sh)
   isReading?: boolean
   hideSprite?: boolean
   onCollapse?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
+  projects?: ProjectInfo[]
+  roles?: RoleInfo[]
 }
 
 const HIDE_DETAILS = new Set(['finished', 'session started', 'processing prompt'])
@@ -139,11 +159,11 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, cardRef }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, cardRef, projects, roles }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
-  const outputH = (mode === 'standard-short' || compact) ? 'h-[52px]' : 'h-[112px]'
+  const outputH = 'flex-1 min-h-[40px]'
   const title = agent.display_name || agent.profile_name || 'Agent'
   const showDetail = agent.detail && !HIDE_DETAILS.has(agent.detail)
   const [r, g, b] = agent.color
@@ -151,10 +171,9 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const isDone = agent.state === 'done'
   const isIdle = agent.state === 'idle'
   const isError = agent.state === 'error'
-  // After 30min of "done", treat as idle for display purposes
   const ageSeconds = agent.last_updated ? (Date.now() - new Date(agent.last_updated).getTime()) / 1000 : 0
-  const effectiveIdle = isIdle
-  const outputText = isBusy ? agent.last_trace : agent.last_summary
+  const isCompacting = agent.detail === 'compacting'
+  const outputText = isCompacting ? null : (isBusy ? agent.last_trace : agent.last_summary)
 
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState(title)
@@ -162,7 +181,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [showSpritePicker, setShowSpritePicker] = useState(false)
   const [flashDismissed, setFlashDismissed] = useState(false)
-  const [inputFocused, setInputFocused] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -204,39 +223,35 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
       <div
         ref={cardRef ? (el) => cardRef(el) : undefined}
         onContextMenu={handleContextMenu}
-        className={`text-left rounded-xl ${pad} border cursor-default overflow-hidden flex flex-col min-h-0 transition-all duration-300 relative group`}
-        style={{
-          background: `rgba(${r}, ${g}, ${b}, ${effectiveIdle && !inputFocused ? 0.03 : 0.06})`,
-          borderColor: `rgba(${r}, ${g}, ${b}, ${effectiveIdle && !inputFocused ? 0.08 : 0.15})`,
-          opacity: effectiveIdle && !inputFocused ? 0.6 : 1,
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.opacity = '1'
-          e.currentTarget.style.background = `rgba(${r}, ${g}, ${b}, 0.14)`
-          e.currentTarget.style.borderColor = `rgba(${r}, ${g}, ${b}, 0.3)`
+        className={`text-left ${pad} cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
+          isBusy ? 'gba-card-selected' : 'gba-card'
+        }`}
+        onMouseEnter={() => {
           if (isDone && !flashDismissed) setFlashDismissed(true)
-        }}
-        onMouseLeave={(e) => {
-          const dim = effectiveIdle && !inputFocused
-          e.currentTarget.style.opacity = dim ? '0.6' : '1'
-          e.currentTarget.style.background = `rgba(${r}, ${g}, ${b}, ${dim ? 0.03 : 0.06})`
-          e.currentTarget.style.borderColor = `rgba(${r}, ${g}, ${b}, ${dim ? 0.08 : 0.15})`
         }}
       >
         {/* Done flash — pulses for 1 minute after completion, dismissed on hover */}
-        {isDone && !effectiveIdle && ageSeconds < 60 && !flashDismissed && (
+        {isDone && !isIdle && ageSeconds < 60 && !flashDismissed && (
           <div
-            className="card-done-flash absolute inset-0 rounded-xl pointer-events-none group-hover:hidden"
-            style={{ background: `rgba(${r}, ${g}, ${b}, 0.08)` }}
+            className="card-done-flash absolute inset-0 rounded-lg pointer-events-none group-hover:hidden"
+            style={{ background: 'rgba(88, 216, 152, 0.15)' }}
           />
         )}
 
-        {/* Minimize button — red circle in top-right corner, visible only when hovering that corner */}
+        {/* Toast overlay */}
+        {toast && (
+          <div className="absolute inset-0 rounded-lg flex items-center justify-center pointer-events-none z-20" style={{ background: 'rgba(0,0,0,0.5)' }}>
+            <span className="text-[7px] font-pixel text-accent-yellow pixel-shadow">{toast}</span>
+          </div>
+        )}
+
+        {/* Minimize button — pokeball style in top-right corner */}
         {onCollapse && (
           <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
             <button
               onClick={(e) => { e.stopPropagation(); onCollapse() }}
-              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-red-500/70 hover:bg-red-400 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white/90 leading-none"
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-accent-red hover:bg-accent-red/80 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white leading-none"
+              style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
               title="Collapse"
             >
               −
@@ -253,11 +268,11 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             style={{ width: iconSize, height: iconSize }}
           >
             {/* Static background box */}
-            {!compact && <div className="absolute inset-0 bg-surface-2 rounded-lg" />}
+            {!compact && <div className="absolute inset-0 bg-black/20 rounded-lg" />}
             {/* Animated sprite + bubbles */}
-            <SpriteAnimWrapper state={isDone && !effectiveIdle && ageSeconds < 60 && !flashDismissed ? 'celebrating' : agent.state} compact={compact}>
+            <SpriteAnimWrapper state={isDone && !isIdle && ageSeconds < 60 && !flashDismissed ? 'celebrating' : agent.state} compact={compact}>
               <div style={{ opacity: hideSprite ? 0 : 1, transition: 'opacity 0.15s' }}>
-                <CreatureIcon sessionId={agent.session_id} size={iconSize} noGlow={compact} doneFlash={false} spriteOverride={spriteOverride} noBg />
+                <CreatureIcon sessionId={spriteSessionId || agent.session_id} size={iconSize} noGlow={compact} doneFlash={false} spriteOverride={spriteOverride} noBg />
               </div>
               {!compact && <BusyBubble isBusy={isBusy} />}
               {!compact && <DoneBubble isDone={isDone} />}
@@ -265,7 +280,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             </SpriteAnimWrapper>
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
                 {/* Click name → rename */}
                 {editing ? (
@@ -279,11 +294,11 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
                       if (e.key === 'Escape') setEditing(false)
                     }}
                     onClick={(e) => e.stopPropagation()}
-                    className={`${compact ? 'text-[11px]' : 'text-sm'} font-medium text-zinc-100 bg-transparent border-b border-zinc-500 outline-none w-full`}
+                    className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white bg-transparent border-b border-white/50 outline-none w-full pixel-shadow`}
                   />
                 ) : (
                   <h3
-                    className={`${compact ? 'text-[11px]' : 'text-sm'} font-medium text-zinc-100 truncate cursor-pointer hover:text-white`}
+                    className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white truncate cursor-pointer hover:text-accent-yellow pixel-shadow`}
                     onClick={(e) => { e.stopPropagation(); setEditValue(title); setEditing(true) }}
                   >
                     {title}
@@ -291,21 +306,26 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
                 )}
                 <HealthBar tokens={agent.context_tokens} window={agent.context_window} />
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <StatusBadge status={agent.state} lastUpdated={agent.last_updated} busySince={agent.busy_since} />
+              <div className="flex flex-col items-end gap-0.5 shrink-0">
+                {!compact && (
+                  <>
+                    {agent.role && <RolePill name={agent.role} />}
+                    <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />
+                  </>
+                )}
               </div>
             </div>
           </div>
         </div>
 
-        {/* Last prompt — shown in max and standard modes */}
+        {/* Last prompt — shown in standard modes */}
         {showPrompt && agent.user_prompt && (
           <div
             className="rounded-md px-3 py-1.5 mb-1 shrink-0 overflow-hidden"
-            style={{ background: 'rgba(0, 0, 0, 0.35)' }}
+            style={{ background: 'rgba(0, 0, 0, 0.40)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)' }}
           >
-            <div className="text-[9px] font-mono text-zinc-500 italic line-clamp-2 leading-none">
-              <span className="text-[8px] font-medium font-sans not-italic text-blue-400/70 bg-blue-400/10 px-1 py-0.5 rounded mr-1.5 inline-block align-middle">prompt</span>
+            <div className="text-[10px] font-mono text-white/50 italic line-clamp-2 leading-snug">
+              <span className="text-[7px] font-pixel not-italic text-accent-blue bg-accent-blue/20 px-1 py-0.5 rounded mr-1.5 inline-block align-middle pixel-shadow">CMD</span>
               {agent.user_prompt}
             </div>
           </div>
@@ -317,7 +337,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           isBusy={isBusy}
           isDone={isDone}
           isError={isError}
-          effectiveIdle={effectiveIdle}
+          isCompacting={isCompacting}
           outputText={outputText}
           compact={compact}
           outputH={outputH}
@@ -325,7 +345,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         />
         {/* Quick command input */}
         {showInput && (
-          <QuickInput sessionId={agent.session_id} onFocus={() => setInputFocused(true)} onBlur={() => setInputFocused(false)} />
+          <QuickInput sessionId={agent.session_id} />
         )}
       </div>
 
@@ -339,6 +359,9 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           onRename={() => { setMenuOpen(false); setEditValue(title); setEditing(true) }}
           onChangeSprite={() => { setMenuOpen(false); setShowSpritePicker(true) }}
           onCollapse={onCollapse}
+          projects={projects}
+          roles={roles}
+          onAssignStatus={(msg) => { setToast(msg); setTimeout(() => setToast(null), 2500) }}
         />,
         document.body
       )}
@@ -356,12 +379,21 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   )
 }
 
-function ActivityBox({ agent, isBusy, isDone, isError, effectiveIdle, outputText, compact, outputH, textSize }: {
-  agent: AgentState; isBusy: boolean; isDone: boolean; isError: boolean; effectiveIdle: boolean;
-  outputText: string; compact: boolean; outputH: string; textSize: string;
+function formatElapsed(lastUpdated?: string): string {
+  if (!lastUpdated) return ''
+  const secs = Math.max(0, (Date.now() - new Date(lastUpdated).getTime()) / 1000)
+  if (secs < 60) return `${Math.floor(secs)}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`
+  return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
+}
+
+function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText, compact, outputH, textSize }: {
+  agent: AgentState; isBusy: boolean; isDone: boolean; isError: boolean; isCompacting: boolean;
+  outputText: string | null; compact: boolean; outputH: string; textSize: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const feed = agent.activity_feed
+  const [, setTick] = useState(0)
 
   // Auto-scroll to bottom when feed updates
   useEffect(() => {
@@ -370,52 +402,74 @@ function ActivityBox({ agent, isBusy, isDone, isError, effectiveIdle, outputText
     }
   }, [feed?.length, isBusy])
 
+  // Tick timer every 1s for elapsed display
+  useEffect(() => {
+    if (isBusy) return
+    const iv = setInterval(() => setTick(n => n + 1), 1000)
+    return () => clearInterval(iv)
+  }, [isBusy])
+
+  const elapsed = !isBusy && agent.last_updated ? formatElapsed(agent.last_updated) + ' ago' : ''
+
   return (
-    <div
-      ref={scrollRef}
-      data-no-drag
-      className={`rounded-md ${compact ? 'px-2 py-1.5' : 'px-3 py-2'} ${outputH} overflow-y-auto overflow-x-hidden cursor-pointer hover:brightness-110`}
-      style={{ background: 'rgba(0, 0, 0, 0.35)' }}
-      onClick={(e) => { e.stopPropagation(); focusAgent(agent.session_id) }}
-    >
-      {isBusy && feed && feed.length > 0 ? (
+    <div className={`relative ${outputH}`}>
+      <div
+        ref={scrollRef}
+        data-no-drag
+        className={`rounded-md ${compact ? 'px-2 py-1.5' : 'px-3 py-2'} h-full overflow-y-auto overflow-x-hidden cursor-pointer hover:brightness-110`}
+        style={{ background: 'rgba(0, 0, 0, 0.45)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)' }}
+        onClick={(e) => { e.stopPropagation(); focusAgent(agent.session_id) }}
+      >
+      {isCompacting ? (
+        <div className="text-[10px] font-mono text-accent-yellow/80 animate-pulse">
+          Compacting conversation history...
+        </div>
+      ) : isBusy && feed && feed.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           {feed.map((item, i) => (
             <div key={i} className={`text-[10px] font-mono leading-snug truncate ${
               i === feed.length - 1 ? (
-                item.type === 'tool' ? 'text-amber-300/80' : 'text-zinc-300'
+                item.type === 'tool' ? 'text-accent-yellow' : 'text-white/90'
               ) : (
-                item.type === 'tool' ? 'text-zinc-600' : 'text-zinc-500'
+                item.type === 'tool' ? 'text-white/40' : 'text-white/30'
               )
             }`}>
-              <span className="text-zinc-700 mr-1 select-none">{item.time}</span>
-              {item.type === 'tool' && <span className="text-zinc-600 mr-0.5">▸</span>}
+              <span className="text-white/20 mr-1 select-none">{item.time}</span>
+              {item.type === 'tool' && <span className="text-white/40 mr-0.5">▸</span>}
               {item.type === 'thinking' ? <span className="italic">{item.text}</span> : item.text}
             </div>
           ))}
         </div>
       ) : outputText ? (
         <div
-          className={`${textSize} font-mono leading-relaxed whitespace-pre-wrap ${
-            effectiveIdle ? 'text-zinc-500' : isDone ? 'text-emerald-300/70' : 'text-zinc-400'
-          } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-white/5`}
+          className={`text-[10px] font-mono leading-relaxed whitespace-pre-wrap ${
+            isDone ? 'text-accent-green/80' : 'text-white/70'
+          } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-black/20`}
         >
           <span dangerouslySetInnerHTML={{ __html: renderMiniMarkdown(outputText) }} />
         </div>
       ) : isError ? (
-        <div className="text-[10px] font-mono text-orange-400">
-          ⚠ {agent.detail || 'API error — reprompt to retry'}
+        <div className="text-[10px] font-mono text-accent-orange">
+          ! {agent.detail || 'API error - reprompt to retry'}
         </div>
       ) : (
-        <div className="text-[10px] font-mono text-zinc-700">
+        <div className="text-[10px] font-mono text-white/20">
           {isBusy ? 'Working...' : 'No output yet'}
         </div>
+      )}
+      </div>
+      {/* Pinned elapsed timer — outside scroll area, shifts right when scrollbar visible */}
+      {elapsed && (
+        <div
+          className="absolute bottom-1.5 text-[8px] font-mono text-white/35 pointer-events-none"
+          style={{ right: scrollRef.current && scrollRef.current.scrollHeight > scrollRef.current.clientHeight ? 16 : 8 }}
+        >{elapsed}</div>
       )}
     </div>
   )
 }
 
-function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse }: {
+function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse, projects, roles, onAssignStatus }: {
   x: number
   y: number
   agent: AgentState
@@ -423,20 +477,31 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
   onRename: () => void
   onChangeSprite: () => void
   onCollapse?: () => void
+  onAssignStatus?: (msg: string) => void
+  projects?: ProjectInfo[]
+  roles?: RoleInfo[]
 }) {
+  const [submenu, setSubmenu] = useState<'role' | 'project' | null>(null)
+
+  const showStatus = (res: { status: string }, label: string) => {
+    if (!onAssignStatus) return
+    if (res.status === 'relaunching') onAssignStatus(`Relaunching as ${label}...`)
+    else if (res.status === 'queued') onAssignStatus(`Queued — ${label} on idle`)
+    else if (res.status === 'updated') onAssignStatus(`Set ${label}`)
+  }
+
   useEffect(() => {
     const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { if (submenu) setSubmenu(null); else onClose() }
     }
     document.addEventListener('keydown', keyHandler)
     return () => document.removeEventListener('keydown', keyHandler)
-  }, [onClose])
+  }, [onClose, submenu])
 
-  // Clamp menu position to viewport
   const menuStyle: React.CSSProperties = {
     position: 'fixed',
     left: Math.min(x, window.innerWidth - 200),
-    top: Math.min(y, window.innerHeight - 220),
+    top: Math.min(y, window.innerHeight - 300),
     zIndex: 10000,
   }
 
@@ -451,7 +516,6 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
 
   return (
     <>
-      {/* Invisible backdrop to catch clicks outside */}
       <div
         className="fixed inset-0"
         style={{ zIndex: 9999 }}
@@ -459,24 +523,100 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
         onContextMenu={(e) => { e.preventDefault(); onClose() }}
       />
       <div style={menuStyle}>
-        <div className="bg-surface-1 border border-zinc-700 rounded-lg shadow-2xl py-1 min-w-[180px]">
+        <div className="gba-panel py-1 min-w-[190px]">
         {items.map((item) => (
           <button
             key={item.label}
             onClick={(e) => { e.stopPropagation(); item.action() }}
-            className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 flex items-center gap-2 transition-colors"
+            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
           >
             <span className="w-4 text-center">{item.icon}</span>
             {item.label}
           </button>
         ))}
-        <div className="border-t border-zinc-700 my-1" />
+
+        {/* Role/Project assignment */}
+        {(roles && roles.length > 0 || projects && projects.length > 0) && (
+          <>
+            <div className="border-t border-white/10 my-1" />
+            {roles && roles.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'role' ? null : 'role') }}
+                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+                >
+                  <span className="w-4 text-center">🎭</span>
+                  {agent.role ? `Role: ${agent.role}` : 'Assign role'}
+                  <span className="ml-auto text-white/30">▸</span>
+                </button>
+                {submenu === 'role' && (
+                  <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+                    {agent.role && (
+                      <button
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, ''); showStatus(res, 'no role'); onClose() }}
+                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                      >
+                        None
+                      </button>
+                    )}
+                    {roles.map(r => (
+                      <button
+                        key={r.name}
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, r.name); showStatus(res, r.title); onClose() }}
+                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow' : 'text-white/90'}`}
+                      >
+                        <span>{r.emoji}</span>
+                        <span>{r.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {projects && projects.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'project' ? null : 'project') }}
+                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+                >
+                  <span className="w-4 text-center">📁</span>
+                  {agent.project ? `Project: ${agent.project}` : 'Assign project'}
+                  <span className="ml-auto text-white/30">▸</span>
+                </button>
+                {submenu === 'project' && (
+                  <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+                    {agent.project && (
+                      <button
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, ''); showStatus(res, 'no project'); onClose() }}
+                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                      >
+                        None
+                      </button>
+                    )}
+                    {projects.map(p => (
+                      <button
+                        key={p.name}
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, p.name); showStatus(res, p.title); onClose() }}
+                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow' : 'text-white/90'}`}
+                      >
+                        <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${p.color[0]},${p.color[1]},${p.color[2]})` }} />
+                        <span>{p.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="border-t border-white/10 my-1" />
         <button
           onClick={(e) => { e.stopPropagation(); shutdownAgent(agent.session_id); onClose() }}
-          className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-900/30 hover:text-red-300 flex items-center gap-2 transition-colors"
+          className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-accent-red hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
         >
           <span className="w-4 text-center">⏻</span>
-          Shut down
+          Release
         </button>
         </div>
       </div>

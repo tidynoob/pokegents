@@ -33,24 +33,26 @@ export function SpritePicker({ currentSprite, onSelect, onClose }: SpritePickerP
       onClick={onClose}
     >
       <div
-        className="bg-surface-1 border border-zinc-800 rounded-xl p-4 w-[360px] max-h-[420px] flex flex-col"
+        className="gba-panel p-4 w-[360px] max-h-[420px] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
-        <input
-          ref={inputRef}
-          type="text"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search pokemon..."
-          className="w-full bg-surface-2 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-600 mb-3"
-        />
+        <div className="gba-dialog rounded-lg mb-3">
+          <input
+            ref={inputRef}
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search POKeMON..."
+            className="w-full bg-transparent px-3 py-2 text-sm font-mono text-gba-dialog-border placeholder:text-gba-dialog-border/30 outline-none"
+          />
+        </div>
         <div className="flex-1 overflow-auto grid grid-cols-6 gap-1">
           {filtered.map(sprite => (
             <button
               key={sprite}
               onClick={() => { onSelect(sprite); onClose() }}
-              className={`p-1 rounded-lg hover:bg-surface-2 flex items-center justify-center ${
-                sprite === currentSprite ? 'bg-surface-2 ring-1 ring-accent-blue' : ''
+              className={`p-1 rounded-lg hover:bg-white/15 flex items-center justify-center transition-colors ${
+                sprite === currentSprite ? 'bg-white/20 ring-2 ring-accent-yellow' : ''
               }`}
               title={sprite}
             >

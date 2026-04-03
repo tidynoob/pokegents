@@ -82,13 +82,16 @@ extract_trace() {
   done | tail -1 | head -c 200 || echo "")
 }
 
+
 case "$EVENT" in
   "UserPromptSubmit")
     USER_PROMPT=$(echo "$INPUT" | jq -r '.prompt // ""' 2>/dev/null | head -c 200 || echo "")
     STATE="busy"
     BUSY_SINCE="$TIMESTAMP"
     # Slash commands like /compact don't produce assistant output — preserve previous output
-    if [ "$USER_PROMPT" = "compact" ] || [ "$USER_PROMPT" = "/compact" ]; then
+    # Use case-insensitive substring match since Claude Code may send "compact", "/compact",
+    # or similar variants in the hook payload.
+    if echo "$USER_PROMPT" | grep -qi "^/?compact$"; then
       DETAIL="compacting"
     else
       DETAIL="processing prompt"
@@ -125,18 +128,20 @@ case "$EVENT" in
     ;;
   "Stop")
     STATE="done"
-    SUMMARY=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null | head -c 2000 || echo "")
-    # If Stop fires after /compact with no assistant message, show "Compacted"
-    if [ -z "$SUMMARY" ]; then
-      STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"
-      if [ -f "$STATUS_FILE" ]; then
-        PREV_DETAIL=$(jq -r '.detail // ""' "$STATUS_FILE" 2>/dev/null || echo "")
-        if [ "$PREV_DETAIL" = "compacting" ]; then
-          SUMMARY="Compacted"
-        fi
+    DETAIL="finished"
+    # Check if this was a /compact FIRST — last_assistant_message often contains
+    # the previous turn's message, not the compaction summary, so PREV_DETAIL wins.
+    _STOP_STATUS="$STATUS_DIR/${SESSION_ID}.json"
+    if [ -f "$_STOP_STATUS" ]; then
+      PREV_DETAIL=$(jq -r '.detail // ""' "$_STOP_STATUS" 2>/dev/null || echo "")
+      if [ "$PREV_DETAIL" = "compacting" ]; then
+        SUMMARY="Compacted"
       fi
     fi
-    DETAIL="finished"
+    # Only fall back to last_assistant_message when not a compact
+    if [ -z "$SUMMARY" ]; then
+      SUMMARY=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null | head -c 2000 || echo "")
+    fi
     ;;
   "PermissionRequest")
     STATE="needs_input"
@@ -181,6 +186,17 @@ case "$EVENT" in
         STATE="SKIP"
       # If compacting/compacted, preserve it
       elif [ "$PREV_DETAIL" = "compacting" ] || [ "$PREV_SUMMARY" = "Compacted" ]; then
+        STATE="done"
+        DETAIL="finished"
+        SUMMARY="Compacted"
+      fi
+    fi
+    # Detect compaction via transcript: check if a compact_boundary marker appears
+    # near the end of the transcript (written by Claude Code on every /compact).
+    # This fires right after /compact completes regardless of whether UserPromptSubmit
+    # fired — it's the most reliable compact detection available.
+    if [ -z "$STATE" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+      if tail -c 65536 "$TRANSCRIPT" 2>/dev/null | grep -q '"compact_boundary"'; then
         STATE="done"
         DETAIL="finished"
         SUMMARY="Compacted"

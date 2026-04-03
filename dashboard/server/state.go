@@ -29,7 +29,8 @@ type StateManager struct {
 	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
-	agentOrder    []string                  // user-defined display order (session IDs), persisted
+	agentOrder         []string                  // user-defined display order (session IDs), persisted
+	pendingRelaunches  map[string]string         // session_id → pokegent command to run when idle
 
 	dataDir          string // ~/.ccsession — kept for paths not yet migrated to store
 	claudeProjectDir string // ~/.claude/projects
@@ -181,6 +182,78 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		sm.nameOverrides[rs.CCDSessionID] = newName
 	}
 	sm.saveNameOverrides()
+}
+
+// SetAgentRole updates the role field on a running agent and recalculates the profile composite key.
+func (sm *StateManager) SetAgentRole(sessionID, role string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if rs, ok := sm.running[sessionID]; ok {
+		rs.Role = role
+		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
+		sm.running[sessionID] = rs
+		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+			r.Role = role
+			r.Profile = rs.Profile
+		})
+	}
+	sm.rebuildAgents()
+}
+
+// SetAgentProject updates the project field on a running agent and recalculates the profile composite key.
+func (sm *StateManager) SetAgentProject(sessionID, project string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if rs, ok := sm.running[sessionID]; ok {
+		rs.Project = project
+		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
+		sm.running[sessionID] = rs
+		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+			r.Project = project
+			r.Profile = rs.Profile
+		})
+	}
+	sm.rebuildAgents()
+}
+
+// composeProfileKey builds the composite profile key from role and project.
+func (sm *StateManager) composeProfileKey(role, project, fallback string) string {
+	if role != "" && project != "" {
+		return role + "@" + project
+	}
+	if project != "" {
+		return "@" + project
+	}
+	if role != "" {
+		return role + "@"
+	}
+	return fallback
+}
+
+// ComposeProfileKey builds a composite key from role and project (public version).
+func (sm *StateManager) ComposeProfileKey(role, project, fallback string) string {
+	return sm.composeProfileKey(role, project, fallback)
+}
+
+// SetPendingRelaunch stores a command to execute when the agent becomes idle.
+func (sm *StateManager) SetPendingRelaunch(sessionID, cmd string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.pendingRelaunches == nil {
+		sm.pendingRelaunches = make(map[string]string)
+	}
+	sm.pendingRelaunches[sessionID] = cmd
+}
+
+// GetPendingRelaunch returns and clears the pending relaunch command for a session.
+func (sm *StateManager) GetPendingRelaunch(sessionID string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	cmd := sm.pendingRelaunches[sessionID]
+	delete(sm.pendingRelaunches, sessionID)
+	return cmd
 }
 
 // TransitionDoneToIdle transitions agents that have been "done" for more than
@@ -842,6 +915,8 @@ func (sm *StateManager) rebuildAgents() {
 			SessionID:      sid,
 			CCDSessionID:   rs.CCDSessionID,
 			ProfileName:    rs.Profile,
+			Role:           rs.Role,
+			Project:        rs.Project,
 			DisplayName:    rs.DisplayName,
 			PID:            rs.PID,
 			TTY:            rs.TTY,
@@ -849,10 +924,35 @@ func (sm *StateManager) rebuildAgents() {
 			State:          "idle",
 		}
 
-		// Enrich from profile
+		// Enrich from role config (emoji)
+		if rs.Role != "" && sm.store != nil {
+			if role, err := sm.store.Roles.Get(rs.Role); err == nil {
+				a.RoleEmoji = role.Emoji
+				if a.Emoji == "" {
+					a.Emoji = role.Emoji
+				}
+			}
+		}
+
+		// Enrich from project config (color)
+		if rs.Project != "" && sm.store != nil {
+			if proj, err := sm.store.Projects.Get(rs.Project); err == nil {
+				a.ProjectColor = proj.Color
+				a.Color = proj.Color
+				if a.DisplayName == "" {
+					a.DisplayName = proj.Title
+				}
+			}
+		}
+
+		// Enrich from legacy profile (fallback)
 		if p, ok := sm.profiles[rs.Profile]; ok {
-			a.Emoji = p.Emoji
-			a.Color = p.Color
+			if a.Emoji == "" {
+				a.Emoji = p.Emoji
+			}
+			if a.Color == [3]int{} {
+				a.Color = p.Color
+			}
 			if a.DisplayName == "" {
 				a.DisplayName = p.Title
 			}
@@ -995,6 +1095,8 @@ type ContextUsage struct {
 }
 
 // extractContextUsage reads the last assistant message's usage from the transcript.
+// It only considers entries after the most recent compact_boundary marker, so that
+// post-compaction usage reflects the compacted context size rather than pre-compact size.
 func extractContextUsage(path string) ContextUsage {
 	if path == "" {
 		return ContextUsage{}
@@ -1018,6 +1120,13 @@ func extractContextUsage(path string) ContextUsage {
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return ContextUsage{}
+	}
+
+	// Trim to data after the last compact_boundary marker.
+	// This ensures we only measure context usage from the current compacted session,
+	// not accumulated tokens from before the most recent /compact.
+	if idx := strings.LastIndex(string(data), `"compact_boundary"`); idx >= 0 {
+		data = data[idx:]
 	}
 
 	var lastTokens int
@@ -1138,6 +1247,160 @@ func extractTraceFromTranscript(path string) string {
 	return lastText
 }
 
+// extractLastMessages reads the tail of a transcript JSONL and returns
+// the last user message (user_prompt) and last assistant text (last_summary).
+// Reuses the same tail-read + compact_boundary approach as extractTraceFromTranscript.
+func extractLastMessages(path string) (userPrompt, lastSummary string) {
+	if path == "" {
+		return "", ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", ""
+	}
+	// Use 1MB tail — large sessions have many tool_result "user" entries
+	// between actual text prompts, and 256KB may miss the last real prompt.
+	offset := info.Size() - 1024*1024
+	if offset < 0 {
+		offset = 0
+	}
+	f.Seek(offset, 0)
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return "", ""
+	}
+
+	// Skip past compact_boundary if present
+	tail := string(data)
+	if idx := strings.LastIndex(tail, `"compact_boundary"`); idx >= 0 {
+		if nl := strings.Index(tail[idx:], "\n"); nl >= 0 {
+			tail = tail[idx+nl+1:]
+		}
+	}
+
+	// Track both the last substantive and absolute last message.
+	// Prefer substantive to skip farewell messages like "Bye!" / "Catch you later!".
+	// stripTags removes XML/HTML tags for length measurement — Claude Code wraps
+	// user input in tags like <local-command-stdout> which inflate raw length.
+	stripTags := func(s string) string {
+		out := s
+		for {
+			start := strings.Index(out, "<")
+			if start < 0 {
+				break
+			}
+			end := strings.Index(out[start:], ">")
+			if end < 0 {
+				break
+			}
+			out = out[:start] + out[start+end+1:]
+		}
+		return strings.Join(strings.Fields(out), " ")
+	}
+	var lastSubstantivePrompt, lastAnyPrompt string
+	var lastSubstantiveSummary, lastAnySummary string
+
+	for _, line := range strings.Split(tail, "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		entryType, _ := entry["type"].(string)
+		switch entryType {
+		case "user":
+			msg, ok := entry["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			var text string
+			switch c := msg["content"].(type) {
+			case string:
+				text = c
+			case []any:
+				for _, block := range c {
+					m, ok := block.(map[string]any)
+					if !ok {
+						continue
+					}
+					blockType, _ := m["type"].(string)
+					if blockType == "text" {
+						if t, ok := m["text"].(string); ok && t != "" {
+							text = t
+						}
+					}
+				}
+			}
+			if text != "" {
+				stripped := stripTags(text)
+				trimmed := strings.TrimSpace(text)
+				// Skip system-injected messages and non-user content:
+				// - XML-wrapped messages (tool results, caveats, commands)
+				// - Context continuation summaries
+				// - Image-only messages
+				isSystem := strings.HasPrefix(trimmed, "<") ||
+					strings.HasPrefix(trimmed, "This session is being continued") ||
+					strings.HasPrefix(trimmed, "[Image:")
+				lastAnyPrompt = text
+				if !isSystem && len(stripped) > 20 {
+					lastSubstantivePrompt = text
+				}
+			}
+		case "assistant":
+			msg, ok := entry["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			content, ok := msg["content"].([]any)
+			if !ok {
+				continue
+			}
+			for _, block := range content {
+				m, ok := block.(map[string]any)
+				if !ok {
+					continue
+				}
+				if m["type"] == "text" {
+					if t, ok := m["text"].(string); ok && t != "" {
+						lastAnySummary = t
+						if len(stripTags(t)) > 30 {
+							lastSubstantiveSummary = t
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Prefer substantive messages over farewell one-liners
+	userPrompt = lastSubstantivePrompt
+	if userPrompt == "" {
+		userPrompt = lastAnyPrompt
+	}
+	lastSummary = lastSubstantiveSummary
+	if lastSummary == "" {
+		lastSummary = lastAnySummary
+	}
+
+	// Truncate to reasonable lengths
+	if len(userPrompt) > 500 {
+		userPrompt = userPrompt[:500]
+	}
+	if len(lastSummary) > 500 {
+		lastSummary = lastSummary[:500]
+	}
+	return userPrompt, lastSummary
+}
+
 // extractActivityFeed reads the transcript and builds a unified timeline of
 // tool calls and text/thinking output from the last user turn.
 func extractActivityFeed(path string) []ActivityItem {
@@ -1230,11 +1493,17 @@ func extractActivityFeed(path string) []ActivityItem {
 				}
 			case "text":
 				if t, ok := block["text"].(string); ok && t != "" {
-					text := t
-					if len(text) > 150 {
-						text = text[len(text)-150:]
+					// Split multi-line text into separate feed items so each line is visible
+					for _, line := range strings.Split(t, "\n") {
+						line = strings.TrimSpace(line)
+						if line == "" {
+							continue
+						}
+						if len(line) > 200 {
+							line = line[:200]
+						}
+						feed = append(feed, ActivityItem{Time: ts, Type: "text", Text: line})
 					}
-					feed = append(feed, ActivityItem{Time: ts, Type: "text", Text: text})
 				}
 			case "tool_use":
 				name, _ := block["name"].(string)
@@ -1252,9 +1521,9 @@ func extractActivityFeed(path string) []ActivityItem {
 		}
 	}
 
-	// Keep last 12 items
-	if len(feed) > 20 {
-		feed = feed[len(feed)-20:]
+	// Keep last 30 items
+	if len(feed) > 30 {
+		feed = feed[len(feed)-30:]
 	}
 	return feed
 }

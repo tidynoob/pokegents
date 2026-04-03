@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pokegents/dashboard/server/services"
@@ -29,6 +30,9 @@ type Server struct {
 	mux       *http.ServeMux
 	port      int
 	webDir    string
+
+	pendingResumeSprites   map[string]string // old session_id → sprite name
+	pendingResumeSpriteMu  sync.Mutex
 }
 
 // Config holds server configuration.
@@ -87,6 +91,7 @@ func NewServer(cfg Config) (*Server, error) {
 				ITermSessionID: a.ITermSessionID,
 			}
 		},
+		terminal.IsSessionFocused,
 	)
 
 	// Search service
@@ -111,9 +116,10 @@ func NewServer(cfg Config) (*Server, error) {
 		searchSvc:    searchSvc,
 		terminal:     terminal,
 		fileStore:    fileStore,
-		mux:          http.NewServeMux(),
-		port:         cfg.Port,
-		webDir:       cfg.WebDir,
+		mux:                  http.NewServeMux(),
+		port:                 cfg.Port,
+		webDir:               cfg.WebDir,
+		pendingResumeSprites: make(map[string]string),
 	}
 
 	s.routes()
@@ -128,15 +134,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/focus", s.handleFocusSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/rename", s.handleRenameSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/sprite", s.handleSetSprite)
+	s.mux.HandleFunc("POST /api/sessions/{id}/role", s.handleSetRole)
+	s.mux.HandleFunc("POST /api/sessions/{id}/project", s.handleSetProject)
 	s.mux.HandleFunc("POST /api/sessions/{id}/prompt", s.handleSendPrompt)
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
 	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
+	s.mux.HandleFunc("GET /api/sessions/{id}/preview", s.handleSessionPreview)
 	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
 	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
+	s.mux.HandleFunc("GET /api/projects", s.handleGetProjects)
+	s.mux.HandleFunc("GET /api/roles", s.handleGetRoles)
 	s.mux.HandleFunc("POST /api/profiles/{name}/launch", s.handleLaunchProfile)
+	s.mux.HandleFunc("POST /api/launch", s.handleLaunch)
 	s.mux.HandleFunc("GET /api/agent-order", s.handleGetAgentOrder)
 	s.mux.HandleFunc("PUT /api/agent-order", s.handleSetAgentOrder)
 	s.mux.HandleFunc("GET /api/events", s.eventBus.ServeSSE)
@@ -145,12 +157,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/search/recent", s.handleSearchRecent)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/messages", s.handleSendMessage)
+	s.mux.HandleFunc("POST /api/messages/send", s.handleSendMessageResolved)
 	s.mux.HandleFunc("GET /api/messages", s.handleGetMessages)
 	s.mux.HandleFunc("GET /api/messages/connections", s.handleGetConnections)
 	s.mux.HandleFunc("GET /api/messages/pending/{id}", s.handleGetPending)
 	s.mux.HandleFunc("POST /api/messages/deliver/{id}", s.handleDeliverPending)
 	s.mux.HandleFunc("POST /api/messages/consume/{id}", s.handleConsumePending)
 	s.mux.HandleFunc("GET /api/activity", s.handleGetActivity)
+	s.mux.HandleFunc("GET /api/grid-layout", s.handleGetGridLayout)
+	s.mux.HandleFunc("PUT /api/grid-layout", s.handleSetGridLayout)
+	s.mux.HandleFunc("GET /api/grid-profiles", s.handleListGridProfiles)
+	s.mux.HandleFunc("GET /api/grid-profiles/{name}", s.handleGetGridProfile)
+	s.mux.HandleFunc("PUT /api/grid-profiles/{name}", s.handleSetGridProfile)
+	s.mux.HandleFunc("DELETE /api/grid-profiles/{name}", s.handleDeleteGridProfile)
 
 	// Serve frontend static files
 	if s.webDir != "" {
@@ -248,12 +267,20 @@ func (s *Server) startTracePoller() {
 				}
 				// Update context usage — detect compaction (tokens decrease)
 				ctx := extractContextUsage(transcriptPath)
-				if ctx.Tokens > 0 && ctx.Tokens != a.ContextTokens {
+				if ctx.Tokens > 0 && (ctx.Tokens != a.ContextTokens || ctx.Window != a.ContextWindow) {
 					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && (a.State == "done" || a.State == "idle") {
 						// Context shrunk on a done agent — compaction detected
 						s.state.UpdateSummary(a.SessionID, "Compacted")
 					}
 					s.state.UpdateContext(a.SessionID, ctx.Tokens, ctx.Window)
+					changed = true
+				} else if ctx.Tokens == 0 && a.ContextTokens > 0 {
+					// extractContextUsage returned 0 — the compact_boundary trimming found
+					// no assistant entries after the last compact. Reset HP bar immediately.
+					s.state.UpdateContext(a.SessionID, 0, a.ContextWindow)
+					if a.LastSummary != "Compacted" {
+						s.state.UpdateSummary(a.SessionID, "Compacted")
+					}
 					changed = true
 				}
 				// Update trace and activity feed for busy agents
@@ -288,11 +315,50 @@ func (s *Server) watcherLoop() {
 		case evt.SessionID == "*":
 			// Running directory changed — full reload
 			s.state.ReloadRunning()
+			s.applyPendingResumeSprites()
 		case strings.HasPrefix(evt.Path, "status") || strings.HasSuffix(evt.Path, ".json"):
 			// Status file changed
 			s.state.ReloadStatus(evt.Path)
 		}
 		s.eventBus.Publish("state_update", s.state.GetAgents())
+	}
+}
+
+// applyPendingResumeSprites checks if any active agent matches a pending
+// resume sprite (stored when PC BOX resumes a session) and saves the override.
+func (s *Server) applyPendingResumeSprites() {
+	s.pendingResumeSpriteMu.Lock()
+	if len(s.pendingResumeSprites) == 0 {
+		s.pendingResumeSpriteMu.Unlock()
+		return
+	}
+	pending := make(map[string]string, len(s.pendingResumeSprites))
+	for k, v := range s.pendingResumeSprites {
+		pending[k] = v
+	}
+	s.pendingResumeSpriteMu.Unlock()
+
+	agents := s.state.GetAgents()
+	overrides := s.loadSpriteOverrides()
+	changed := false
+	for oldSID, sprite := range pending {
+		for _, a := range agents {
+			if a.SessionID == oldSID || a.CCDSessionID == oldSID {
+				overrides[a.SessionID] = sprite
+				if a.CCDSessionID != "" {
+					overrides[a.CCDSessionID] = sprite
+				}
+				changed = true
+				s.pendingResumeSpriteMu.Lock()
+				delete(s.pendingResumeSprites, oldSID)
+				s.pendingResumeSpriteMu.Unlock()
+				break
+			}
+		}
+	}
+	if changed {
+		data, _ := json.Marshal(overrides)
+		os.WriteFile(s.spriteOverridesPath(), data, 0644)
 	}
 }
 
@@ -341,6 +407,24 @@ func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, profiles)
 }
 
+func (s *Server) handleGetProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.fileStore.Projects.List()
+	if err != nil {
+		writeJSON(w, []any{})
+		return
+	}
+	writeJSON(w, projects)
+}
+
+func (s *Server) handleGetRoles(w http.ResponseWriter, r *http.Request) {
+	roles, err := s.fileStore.Roles.List()
+	if err != nil {
+		writeJSON(w, []any{})
+		return
+	}
+	writeJSON(w, roles)
+}
+
 func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	profile := s.state.GetProfile(name)
@@ -349,6 +433,29 @@ func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.terminal.LaunchProfile(name, profile.ITermProfile); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleLaunch accepts any profile string including role@project syntax.
+// Unlike handleLaunchProfile, it does not validate against known profiles —
+// the shell handles resolution.
+func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Profile string `json:"profile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Profile == "" {
+		http.Error(w, "missing profile", http.StatusBadRequest)
+		return
+	}
+	// Try to look up iTerm profile for tab coloring
+	itermProfile := ""
+	if p := s.state.GetProfile(body.Profile); p != nil {
+		itermProfile = p.ITermProfile
+	}
+	if err := s.terminal.LaunchProfile(body.Profile, itermProfile); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -368,6 +475,89 @@ func (s *Server) handleSetAgentOrder(w http.ResponseWriter, r *http.Request) {
 	s.state.SetAgentOrder(order)
 	// Broadcast reordered state
 	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ── Grid Layout Persistence ────────────────────────────────
+
+func (s *Server) gridLayoutPath() string {
+	return filepath.Join(s.state.dataDir, "grid-layout.json")
+}
+
+func (s *Server) gridProfilesDir() string {
+	return filepath.Join(s.state.dataDir, "grid-profiles")
+}
+
+func (s *Server) handleGetGridLayout(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(s.gridLayoutPath())
+	if err != nil {
+		writeJSON(w, map[string]any{"settings": nil, "layouts": map[string]any{}})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) handleSetGridLayout(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := os.WriteFile(s.gridLayoutPath(), data, 0644); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleListGridProfiles(w http.ResponseWriter, r *http.Request) {
+	dir := s.gridProfilesDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		writeJSON(w, map[string]any{"profiles": []string{}})
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+		}
+	}
+	writeJSON(w, map[string]any{"profiles": names})
+}
+
+func (s *Server) handleGetGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path := filepath.Join(s.gridProfilesDir(), name+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) handleSetGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	dir := s.gridProfilesDir()
+	os.MkdirAll(dir, 0755)
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0644); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDeleteGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	os.Remove(filepath.Join(s.gridProfilesDir(), name+".json"))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -450,6 +640,8 @@ func convertSearchResults(svc []services.SearchResult) []SearchResult {
 			ProjectDir:  r.ProjectDir,
 			CustomTitle: r.CustomTitle,
 			ProfileName: r.ProfileName,
+			Role:        r.Role,
+			Project:     r.Project,
 			Snippet:     r.Snippet,
 			CWD:         r.CWD,
 			GitBranch:   r.GitBranch,
@@ -498,6 +690,16 @@ func (s *Server) enrichDisplayNames(results []SearchResult) {
 		}
 		if sprite, ok := spriteOverrides[sid]; ok {
 			results[i].SpriteOverride = sprite
+		} else {
+			// Check by CCD session ID (overrides may be keyed by either)
+			for ccdSID, claudeSID := range sessionIDMap {
+				if claudeSID == sid {
+					if sprite, ok := spriteOverrides[ccdSID]; ok {
+						results[i].SpriteOverride = sprite
+						break
+					}
+				}
+			}
 		}
 	}
 }
@@ -512,16 +714,54 @@ func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 		profileName = agent.ProfileName
 	}
 
+	if profileName == "" && s.searchSvc != nil {
+		profileName = s.searchSvc.GetProfileName(sessionID)
+	}
+
+	// Fallback: try to match profile from the session's CWD in the search index
 	if profileName == "" {
-		// Try to find from search index
+		// Use the search results which have profile_name populated
 		if s.searchSvc != nil {
-			profileName = s.searchSvc.GetProfileName(sessionID)
+			results, err := s.searchSvc.RecentSessions(200)
+			if err == nil {
+				for _, r := range results {
+					if r.SessionID == sessionID {
+						profileName = r.ProfileName
+						break
+					}
+				}
+			}
 		}
 	}
 
 	if profileName == "" {
+		log.Printf("resume: cannot determine profile for session %s", sessionID)
 		http.Error(w, "cannot determine profile for session", http.StatusBadRequest)
 		return
+	}
+
+	// Preserve sprite override: the resumed session will get a new ccd_session_id
+	// but the same claude session_id after reconciliation. Store a pending sprite
+	// so we can apply it to the new ccd_session_id when it appears.
+	overrides := s.loadSpriteOverrides()
+	if sprite, ok := overrides[sessionID]; ok {
+		s.pendingResumeSpriteMu.Lock()
+		s.pendingResumeSprites[sessionID] = sprite
+		s.pendingResumeSpriteMu.Unlock()
+	} else {
+		// Check if override exists under a ccd_session_id that maps to this session
+		sessionIDMap := make(map[string]string)
+		s.fileStore.Metadata.LoadJSON("session-id-map.json", &sessionIDMap)
+		for ccdID, claudeID := range sessionIDMap {
+			if claudeID == sessionID {
+				if sprite, ok := overrides[ccdID]; ok {
+					s.pendingResumeSpriteMu.Lock()
+					s.pendingResumeSprites[sessionID] = sprite
+					s.pendingResumeSpriteMu.Unlock()
+					break
+				}
+			}
+		}
 	}
 
 	if err := s.terminal.ResumeSession(profileName, sessionID); err != nil {
@@ -659,6 +899,55 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, msg)
+}
+
+// handleSendMessageResolved combines agent resolution + message send in one round-trip.
+// Accepts from_hint/to_hint (8-char prefixes or full IDs) and resolves server-side.
+func (s *Server) handleSendMessageResolved(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		FromHint string `json:"from_hint"`
+		ToHint   string `json:"to_hint"`
+		Content  string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Content == "" || body.ToHint == "" {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+
+	fromCCD := s.resolveToCCDSessionID(body.FromHint)
+	toCCD := s.resolveToCCDSessionID(body.ToHint)
+
+	// Verify the recipient actually exists as a known agent
+	toAgent := s.state.GetAgent(toCCD)
+	if toAgent == nil {
+		http.Error(w, "no agent found matching \""+body.ToHint+"\"", http.StatusNotFound)
+		return
+	}
+
+	fromName := s.resolveDisplayName(body.FromHint, fromCCD)
+	toName := s.resolveDisplayName(body.ToHint, toCCD)
+
+	msg, needsNudge, err := s.msgSvc.Send(fromCCD, fromName, toCCD, toName, body.Content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.eventBus.Publish("new_message", msg)
+	if conns, err := s.msgSvc.GetConnections(); err == nil {
+		s.eventBus.Publish("connections_update", conns)
+	}
+	if needsNudge {
+		s.msgSvc.QueueNudge(toCCD)
+	}
+
+	writeJSON(w, map[string]any{
+		"message":   msg,
+		"to_name":   toName,
+		"from_name": fromName,
+		"to_id":     toCCD,
+		"from_id":   fromCCD,
+	})
 }
 
 // resolveDisplayName returns the display name for a session ID, trying multiple IDs.
@@ -989,6 +1278,20 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, page)
 }
 
+func (s *Server) handleSessionPreview(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	path := s.state.FindTranscriptPath(sessionID)
+	if path == "" {
+		writeJSON(w, map[string]string{"user_prompt": "", "last_summary": ""})
+		return
+	}
+	userPrompt, lastSummary := extractLastMessages(path)
+	writeJSON(w, map[string]string{
+		"user_prompt":  userPrompt,
+		"last_summary": lastSummary,
+	})
+}
+
 func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	agent := s.state.GetAgent(sessionID)
@@ -1038,11 +1341,104 @@ func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	overrides := s.loadSpriteOverrides()
+	// Store under session_id
 	overrides[sessionID] = body.Sprite
+	// Also store under ccd_session_id so pokegent.sh can find it
+	if agent := s.state.GetAgent(sessionID); agent != nil && agent.CCDSessionID != "" && agent.CCDSessionID != sessionID {
+		overrides[agent.CCDSessionID] = body.Sprite
+	}
 	data, _ := json.Marshal(overrides)
 	os.WriteFile(s.spriteOverridesPath(), data, 0644)
 
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var body struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Role != "" {
+		if _, err := s.fileStore.Roles.Get(body.Role); err != nil {
+			http.Error(w, "unknown role: "+body.Role, http.StatusBadRequest)
+			return
+		}
+	}
+	s.state.SetAgentRole(sessionID, body.Role)
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	status := s.relaunchIfIdle(sessionID)
+	writeJSON(w, map[string]string{"status": status, "role": body.Role})
+}
+
+func (s *Server) handleSetProject(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var body struct {
+		Project string `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Project != "" {
+		if _, err := s.fileStore.Projects.Get(body.Project); err != nil {
+			http.Error(w, "unknown project: "+body.Project, http.StatusBadRequest)
+			return
+		}
+	}
+	s.state.SetAgentProject(sessionID, body.Project)
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	status := s.relaunchIfIdle(sessionID)
+	writeJSON(w, map[string]string{"status": status, "project": body.Project})
+}
+
+// relaunchIfIdle stops and relaunches an agent with its current role@project.
+// Returns "relaunching" (immediate), "queued" (busy), or "updated" (no relaunch needed).
+func (s *Server) relaunchIfIdle(sessionID string) string {
+	agent := s.state.GetAgent(sessionID)
+	if agent == nil || (agent.Role == "" && agent.Project == "") {
+		return "updated"
+	}
+
+	// If project is empty, use the agent's legacy profile name as project fallback
+	// (e.g. assigning role "pm" to a legacy "personal" agent → pm@personal)
+	project := agent.Project
+	if project == "" {
+		project = agent.ProfileName
+	}
+	target := composeTarget(agent.Role, project, agent.ProfileName)
+	cmd := fmt.Sprintf("pokegent %s -r %s", target, sessionID)
+
+	if agent.State == "done" || agent.State == "idle" {
+		if agent.ITermSessionID != "" || agent.TTY != "" {
+			go func() {
+				s.terminal.WriteText(agent.ITermSessionID, agent.TTY, "/exit")
+				time.Sleep(2 * time.Second)
+				s.terminal.WriteText(agent.ITermSessionID, agent.TTY, cmd)
+			}()
+		}
+		return "relaunching"
+	}
+
+	// Busy — queue for later
+	s.state.SetPendingRelaunch(sessionID, cmd)
+	return "queued"
+}
+
+func composeTarget(role, project, fallback string) string {
+	if role != "" && project != "" {
+		return role + "@" + project
+	}
+	if project != "" {
+		return "@" + project
+	}
+	if role != "" {
+		return role + "@"
+	}
+	return fallback
 }
 
 func (s *Server) handleGetSpriteOverrides(w http.ResponseWriter, r *http.Request) {

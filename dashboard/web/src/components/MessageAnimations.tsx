@@ -22,7 +22,8 @@ const DELIVERY_DURATION = 2000 // total ms for out + back
 export function useMessageAnimations(
   messages: AgentMessage[],
   cardRefs: React.MutableRefObject<Map<string, HTMLDivElement>>,
-  spriteOverrides: Record<string, string>
+  spriteOverrides: Record<string, string>,
+  getSpriteForId?: (id: string) => string
 ) {
   const [deliveries, setDeliveries] = useState<DeliveryAnim[]>([])
   const [hiddenSprites, setHiddenSprites] = useState<Set<string>>(new Set())
@@ -33,8 +34,9 @@ export function useMessageAnimations(
   const initialLoadDone = useRef(false)
 
   const getSpriteForSession = useCallback((sessionId: string) => {
+    if (getSpriteForId) return getSpriteForId(sessionId)
     return spriteOverrides[sessionId] || POKEMON_SPRITES[hashString(sessionId) % POKEMON_SPRITES.length]
-  }, [spriteOverrides])
+  }, [spriteOverrides, getSpriteForId])
 
   // Seed on first non-empty messages load — mark all existing as seen
   useEffect(() => {
@@ -135,26 +137,31 @@ export function useMessageAnimations(
     return () => clearInterval(timer)
   }, [deliveries.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Inject a fake delivery for testing — picks two random agents
+  // Inject fake deliveries — every agent sends to a random other agent
   const triggerTestDelivery = useCallback(() => {
     const entries = Array.from(cardRefs.current.entries())
     if (entries.length < 2) return
-    const fromIdx = Math.floor(Math.random() * entries.length)
-    let toIdx = Math.floor(Math.random() * entries.length)
-    while (toIdx === fromIdx) toIdx = Math.floor(Math.random() * entries.length)
-    const [fromSid, fromEl] = entries[fromIdx]
-    const [, toEl] = entries[toIdx]
-    const fromRect = fromEl.getBoundingClientRect()
-    const toRect = toEl.getBoundingClientRect()
-    setDeliveries(prev => [...prev, {
-      id: `test-${Date.now()}`,
-      fromSessionId: fromSid,
-      sprite: getSpriteForSession(fromSid),
-      fromX: fromRect.x + 24, fromY: fromRect.y + 24,
-      toX: toRect.x + 24, toY: toRect.y + 24,
-      startTime: Date.now(),
-    }])
-    setHiddenSprites(prev => new Set([...prev, fromSid]))
+    const anims: DeliveryAnim[] = []
+    const toHide = new Set<string>()
+    for (let i = 0; i < entries.length; i++) {
+      const [fromSid, fromEl] = entries[i]
+      let toIdx = Math.floor(Math.random() * entries.length)
+      while (toIdx === i) toIdx = Math.floor(Math.random() * entries.length)
+      const [, toEl] = entries[toIdx]
+      const fromRect = fromEl.getBoundingClientRect()
+      const toRect = toEl.getBoundingClientRect()
+      anims.push({
+        id: `test-${Date.now()}-${i}`,
+        fromSessionId: fromSid,
+        sprite: getSpriteForSession(fromSid),
+        fromX: fromRect.x + 24, fromY: fromRect.y + 24,
+        toX: toRect.x + 24, toY: toRect.y + 24,
+        startTime: Date.now() + i * 150,
+      })
+      toHide.add(fromSid)
+    }
+    setDeliveries(prev => [...prev, ...anims])
+    setHiddenSprites(prev => new Set([...prev, ...toHide]))
   }, [cardRefs, getSpriteForSession])
 
   return { deliveries, hiddenSprites, readingAgents, triggerTestDelivery }
@@ -275,9 +282,9 @@ function BubbleShell({ children, phase, top = -16 }: {
       }`}
       style={{ top, left: 0, right: 0, transition: 'opacity 0.3s ease-out' }}
     >
-      <div className="relative bg-zinc-700/90 rounded-full px-1.5 py-0.5">
+      <div className="relative bg-gba-dialog rounded-full px-1.5 py-0.5" style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}>
         <span className="flex items-center justify-center h-[12px] text-[11px] leading-none">{children}</span>
-        <div className="absolute -bottom-[4px] left-1/2 -translate-x-1/2 w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px] border-t-zinc-700/90" />
+        <div className="absolute -bottom-[4px] left-1/2 -translate-x-1/2 w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px] border-t-gba-dialog" />
       </div>
     </div>
   )

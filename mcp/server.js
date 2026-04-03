@@ -47,6 +47,53 @@ async function apiCall(path, options = {}) {
   }
 }
 
+// ── Caching ────────────────────────────────────────────────────────────
+
+let agentCache = null;
+let agentCacheTime = 0;
+const AGENT_CACHE_TTL = 3000; // 3s TTL
+
+async function getCachedAgents() {
+  if (agentCache && Date.now() - agentCacheTime < AGENT_CACHE_TTL) {
+    return agentCache;
+  }
+  let agents;
+  try {
+    agents = await apiCall("/api/sessions");
+  } catch {
+    agents = fileListAgents();
+  }
+  agentCache = agents;
+  agentCacheTime = Date.now();
+  return agents;
+}
+
+// Invalidate cache after sends (new agent state possible)
+function invalidateAgentCache() {
+  agentCache = null;
+  agentCacheTime = 0;
+}
+
+// Cache own CCD session ID (stable for lifetime of MCP process).
+// We only cache the ID, not the full agent object, since display_name can change.
+let selfCCDSessionId = null;
+
+function getSelfId() {
+  if (selfCCDSessionId) return selfCCDSessionId;
+  const sessionIdEnv = getMySessionId();
+  return sessionIdEnv || null;
+}
+
+function resolveSelf(agents) {
+  const hint = getSelfId();
+  if (!hint) return null;
+  const me = resolveAgent(agents, hint.slice(0, 8));
+  if (me) {
+    selfCCDSessionId = me.ccd_session_id || me.session_id;
+  }
+  return me;
+}
+
 // ── File-based fallback operations ──────────────────────────────────────
 
 function fileListAgents() {
@@ -204,12 +251,7 @@ server.tool(
   "List all active Claude Code agents and their status. Use this to find agent session IDs before sending messages.",
   {},
   async () => {
-    let agents;
-    try {
-      agents = await apiCall("/api/sessions");
-    } catch {
-      agents = fileListAgents();
-    }
+    const agents = await getCachedAgents();
     const lines = agents.map(
       (a) =>
         `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
@@ -247,17 +289,10 @@ server.tool(
     const sessionIdEnv = getMySessionId();
     const fromHint = from || sessionIdEnv.slice(0, 8);
 
-    // Get agents (API or file fallback)
-    let agents;
-    try {
-      agents = await apiCall("/api/sessions");
-    } catch {
-      agents = fileListAgents();
-    }
-
-    const fromAgent = resolveAgent(agents, fromHint);
+    // Budget check (local, no network)
+    const agents = await getCachedAgents();
+    const fromAgent = resolveSelf(agents) || resolveAgent(agents, fromHint);
     const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
-    const fromName = fromAgent ? (fromAgent.display_name || fromAgent.profile_name) : fromId;
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
@@ -269,27 +304,55 @@ server.tool(
       };
     }
 
-    const toAgent = resolveAgent(agents, to);
-    if (!toAgent) {
-      return {
-        content: [{
-          type: "text",
-          text: `No agent found matching "${to}". Use list_agents to see available agents.`,
-        }],
-      };
-    }
-
-    const toId = toAgent.ccd_session_id || toAgent.session_id;
-    const toName = toAgent.display_name || toAgent.profile_name;
-
-    // Send via API, fall back to file
+    // Fast path: combined resolve+send in one API call
+    let toName, toId;
+    let apiSent = false;
     try {
-      await apiCall("/api/messages", {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+      const res = await fetch(`${DASHBOARD_URL}/api/messages/send`, {
         method: "POST",
-        body: JSON.stringify({ from: fromId, to: toId, content }),
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ from_hint: fromHint, to_hint: to, content }),
       });
-    } catch {
-      fileSendMessage(fromId, fromName, toId, toName, content);
+      clearTimeout(timer);
+
+      if (res.status === 404) {
+        // Server resolved the ID but no agent matched — real "not found", don't fallback
+        return {
+          content: [{
+            type: "text",
+            text: `No agent found matching "${to}". Use list_agents to see available agents.`,
+          }],
+        };
+      }
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+
+      const result = await res.json();
+      toName = result.to_name;
+      toId = result.to_id;
+      lastApiSuccess = Date.now();
+      invalidateAgentCache();
+      apiSent = true;
+    } catch (apiErr) {
+      // Connection/timeout error — fallback to local resolve + file send
+      if (!apiSent) {
+        lastApiSuccess = -Date.now();
+        const toAgent = resolveAgent(agents, to);
+        if (!toAgent) {
+          return {
+            content: [{
+              type: "text",
+              text: `No agent found matching "${to}". Use list_agents to see available agents.`,
+            }],
+          };
+        }
+        toId = toAgent.ccd_session_id || toAgent.session_id;
+        toName = toAgent.display_name || toAgent.profile_name;
+        const fromName = fromAgent ? (fromAgent.display_name || fromAgent.profile_name) : fromId;
+        fileSendMessage(fromId, fromName, toId, toName, content);
+      }
     }
 
     const newCount = incrementMessageCount(fromId);
@@ -316,19 +379,13 @@ server.tool(
   },
   async ({ my_session_id }) => {
     const sessionIdEnv = getMySessionId();
-    const idHint = my_session_id || sessionIdEnv.slice(0, 8);
 
-    // Resolve session ID (API or file fallback)
-    let agents;
-    try {
-      agents = await apiCall("/api/sessions");
-    } catch {
-      agents = fileListAgents();
-    }
-    const me = resolveAgent(agents, idHint);
+    // Resolve own ID (cached after first call)
+    const agents = await getCachedAgents();
+    const me = resolveSelf(agents) || resolveAgent(agents, my_session_id || sessionIdEnv.slice(0, 8));
     const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
 
-    // Consume messages (API or file fallback)
+    // Consume messages (API or file fallback) — single round-trip
     let messages;
     try {
       messages = await apiCall(`/api/messages/consume/${sessionId}`, { method: "POST" });

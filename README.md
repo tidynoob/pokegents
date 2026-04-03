@@ -44,11 +44,15 @@ Verify your installation: `pokegent doctor`
 ### Launching sessions
 
 ```bash
-pokegent                     # Launch default (personal) profile
-pokegent my-project          # Launch a named profile
-pokegent my-project -r       # Resume a session (interactive picker)
-pokegent my-project -r abc123 # Resume a specific session by ID prefix
-pokegent ls                  # List all profiles
+pokegent                         # Launch default profile
+pokegent my-project              # Launch a project (or legacy profile)
+pokegent dev@my-project          # Launch with a role + project
+pokegent @my-project             # Project only (no role)
+pokegent dev@                    # Role only (uses default project)
+pokegent my-project -r           # Resume a session (interactive picker)
+pokegent my-project -r abc123    # Resume a specific session by ID prefix
+pokegent my-project -w feature   # Launch in a git worktree
+pokegent ls                      # List all projects, roles, and profiles
 ```
 
 ### Managing profiles
@@ -86,13 +90,17 @@ See `defaults/profiles/example-project.json` for a template.
 ### Dashboard
 
 ```bash
-pokegent dashboard start     # Start the dashboard server (background)
 pokegent dashboard           # Open http://localhost:7834 in browser
+pokegent dashboard start     # Start the dashboard server (background)
 pokegent dashboard stop      # Stop the dashboard server
+pokegent dashboard build     # Build server + frontend, restart (no session restart)
+pokegent dashboard restart   # Restart server without rebuilding
 ```
 
 The dashboard shows:
-- All active agents in a flat grid with colored cards
+- **Configurable grid** — set rows and columns in settings, cards snap to grid positions
+- **Drag and drop** cards to reorder — other cards smoothly animate out of the way (iOS-style)
+- **Resize cards** by dragging the bottom-right handle — snaps to grid cells
 - **Status**: idle (grey/dimmed), busy (yellow), done (green), needs input (red)
 - **Your last prompt** to each agent for context
 - **Live thinking traces** while agents are busy
@@ -101,12 +109,15 @@ The dashboard shows:
 - **Context health bar** (green/yellow/red) showing token usage per agent
 - **Click** an agent to switch to its iTerm2 tab
 - **Double-click** the name to rename an agent
-- **Drag and drop** cards to reorder agents (persisted across sessions)
-- **Collapse** agents to sprite bubbles via the red dot in the top-right corner
+- **Collapse** agents to pokeball sprites — click to expand with throw animation
+- **Pokeball animations** — collapse plays a recall beam, expand throws the ball with bounce + flash
+- **Hover pokeballs** to preview collapsed agent status
 - **Paste images** (Cmd+V) into agent input boxes — uploads to Claude's image cache
-- **Spawn new agents** from the "+ New" dropdown (top-left)
-- **Press `/`** to search past sessions with full-text search (with Pokemon sprites)
-- **Resume** past sessions directly from search results
+- **Spawn new agents** from the "NEW AGENT" button
+- **PC Box** (`/` or PC BOX button) — Fire Red-style grid browser for past sessions with sprite icons, last prompt/message preview
+- **Resume** past sessions directly from the PC Box
+- **Grid layout persistence** — card positions saved to server, survive refresh
+- **Layout profiles** — save/load named grid layouts via API
 - **Idle dimming** — agents idle for 10+ minutes fade to 60% opacity
 - **Message delivery animations** — sender sprite flies to recipient
 - **Configurable sprite animations** — busy (hop/shake/wiggle), idle (blink/doze), done (sway)
@@ -267,7 +278,8 @@ pokegent edit <profile>          # Create or edit a profile in $EDITOR
 pokegent dashboard               # Open dashboard in browser
 pokegent dashboard start         # Start dashboard server (background)
 pokegent dashboard stop          # Stop dashboard server
-pokegent dashboard restart       # Rebuild and restart
+pokegent dashboard build         # Build server + frontend, restart dashboard
+pokegent dashboard restart       # Restart server (no rebuild)
 
 # Operations
 pokegent reload                  # Stop all sessions, rebuild, relaunch everything

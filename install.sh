@@ -48,7 +48,7 @@ echo "✓ Dependencies checked"
 echo ""
 
 # ── 1. Create data directories ──────────────────────────────────────────
-mkdir -p "$POKEGENTS_DATA"/{profiles,history,running,status,messages}
+mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages}
 echo "✓ Data directories ready"
 
 # ── 2. Copy default config (if not present) ──────────────────────────────
@@ -66,11 +66,33 @@ POKEGENTS_PORT=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null
 if [ -z "$(ls -A "$POKEGENTS_DATA/profiles" 2>/dev/null)" ]; then
   cp "$POKEGENTS_ROOT"/defaults/profiles/personal.json "$POKEGENTS_DATA/profiles/"
   echo "✓ Default personal profile installed"
-  echo "  Create more profiles: pokegent edit <name>"
-  echo "  See example: $POKEGENTS_ROOT/defaults/profiles/example-project.json"
 else
   echo "· Profiles already exist, skipping defaults"
 fi
+
+# ── Copy default projects and roles (only missing files) ─────────────
+_installed_projects=0
+for f in "$POKEGENTS_ROOT"/defaults/projects/*.json; do
+  [ -f "$f" ] || continue
+  target="$POKEGENTS_DATA/projects/$(basename "$f")"
+  if [ ! -f "$target" ]; then
+    cp "$f" "$target"
+    _installed_projects=$((_installed_projects + 1))
+  fi
+done
+[ $_installed_projects -gt 0 ] && echo "✓ Installed $_installed_projects default project(s)" || echo "· Projects already exist, skipping defaults"
+
+_installed_roles=0
+for f in "$POKEGENTS_ROOT"/defaults/roles/*.json; do
+  [ -f "$f" ] || continue
+  target="$POKEGENTS_DATA/roles/$(basename "$f")"
+  if [ ! -f "$target" ]; then
+    cp "$f" "$target"
+    _installed_roles=$((_installed_roles + 1))
+  fi
+done
+[ $_installed_roles -gt 0 ] && echo "✓ Installed $_installed_roles default role(s)" || echo "· Roles already exist, skipping defaults"
+echo "  Compose with: pokegent dev@personal, pokegent pm@<project>"
 
 # ── 3. Make hooks executable ─────────────────────────────────────────────
 chmod +x "$POKEGENTS_ROOT"/hooks/*.sh

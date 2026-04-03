@@ -36,11 +36,12 @@ export function CreatureIcon({ sessionId, size = 40, noGlow, doneFlash, spriteOv
   return (
     <>
       <div
-        className={`shrink-0 flex items-center justify-center overflow-visible ${!noGlow && !noBg ? 'bg-surface-2 rounded-lg' : ''} ${editable ? 'cursor-pointer hover:brightness-125' : ''}`}
+        className={`shrink-0 flex items-center justify-center overflow-visible ${!noGlow && !noBg ? 'bg-black/20 rounded-lg' : ''} ${editable ? 'cursor-pointer hover:brightness-125' : ''}`}
         style={{ width: size, height: size }}
         onClick={editable ? (e) => { e.stopPropagation(); setShowPicker(true) } : undefined}
       >
         <img
+          className="creature-sprite"
           src={`/sprites/${sprite}.png`}
           alt={sprite}
           style={{

@@ -1,0 +1,233 @@
+import { useState, useEffect, useRef, useCallback } from 'react'
+
+// ── Types ──────────────────────────────────────────────────
+
+export interface PokeballAnim {
+  id: string
+  type: 'recall' | 'deploy'
+  sprite: string
+  cardX: number
+  cardY: number
+  cardW: number
+  cardH: number
+  bubbleX: number
+  bubbleY: number
+  // For recall: exact sprite center (so animation aligns with the sprite in the card)
+  spriteCx?: number
+  spriteCy?: number
+}
+
+interface Props {
+  animations: PokeballAnim[]
+  onComplete: (id: string) => void
+}
+
+// ── Animation Layer ────────────────────────────────────────
+
+export function PokeballAnimationLayer({ animations, onComplete }: Props) {
+  return (
+    <div className="fixed inset-0 pointer-events-none z-[100]">
+      {animations.map(anim => (
+        <SingleAnimation key={anim.id} anim={anim} onComplete={() => onComplete(anim.id)} />
+      ))}
+    </div>
+  )
+}
+
+function SingleAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete: () => void }) {
+  if (anim.type === 'recall') return <RecallAnimation anim={anim} onComplete={onComplete} />
+  return <DeployAnimation anim={anim} onComplete={onComplete} />
+}
+
+// ── Recall: card → red beam → pokéball flies to bubble ─────
+// Timeline: beam(400ms) → fly(800ms) → done
+// Total: ~1200ms
+
+function RecallAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete: () => void }) {
+  const [phase, setPhase] = useState<'beam' | 'fly' | 'done'>('beam')
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase('fly'), 400)
+    const t2 = setTimeout(() => { setPhase('done'); onComplete() }, 1200)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [])
+
+  if (phase === 'done') return null
+
+  // Use actual sprite center if provided, otherwise estimate
+  const cx = anim.spriteCx ?? (anim.cardX + anim.cardW - 40)
+  const cy = anim.spriteCy ?? (anim.cardY + 32)
+
+  return (
+    <>
+      {phase === 'beam' && (
+        <div style={{ position: 'fixed', left: cx, top: cy, transform: 'translate(-50%, -50%)' }}>
+          {/* Red energy glow */}
+          <div style={{
+            width: 80, height: 80,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(255,50,50,0.7) 0%, transparent 70%)',
+            animation: 'recallPulse 400ms ease-in forwards',
+          }} />
+          {/* Sprite shrinking into beam */}
+          <img
+            src={`/sprites/${anim.sprite}.png`}
+            alt=""
+            style={{
+              position: 'absolute', top: '50%', left: '50%',
+              imageRendering: 'pixelated',
+              animation: 'recallShrink 400ms ease-in forwards',
+            }}
+          />
+        </div>
+      )}
+
+      {phase === 'fly' && (
+        <img
+          src="/sprites/pokeball.png"
+          alt=""
+          style={{
+            position: 'fixed', width: 28, height: 28,
+            imageRendering: 'pixelated',
+            filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+            '--sx': `${cx - 14}px`, '--sy': `${cy - 14}px`,
+            '--ex': `${anim.bubbleX - 14}px`, '--ey': `${anim.bubbleY - 14}px`,
+            '--my': `${Math.min(cy, anim.bubbleY) - 60}px`,
+            animation: 'pokeballFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
+          } as React.CSSProperties}
+        />
+      )}
+    </>
+  )
+}
+
+// ── Deploy: pokéball flies → single bounce → pops open mid-air ─
+// Timeline: fly(800ms) → bounce+open(400ms) → done
+// Total: ~1200ms
+
+function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete: () => void }) {
+  const [phase, setPhase] = useState<'fly' | 'bounce' | 'done'>('fly')
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase('bounce'), 800)
+    const t2 = setTimeout(() => { setPhase('done'); onComplete() }, 1200)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [])
+
+  if (phase === 'done') return null
+
+  const cx = anim.cardX + anim.cardW / 2
+  const cy = anim.cardY + anim.cardH / 2
+
+  return (
+    <>
+      {/* Phase 1: Pokéball flies from bubble to card center */}
+      {phase === 'fly' && (
+        <img
+          src="/sprites/pokeball.png"
+          alt=""
+          style={{
+            position: 'fixed', width: 28, height: 28,
+            imageRendering: 'pixelated',
+            filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+            '--sx': `${anim.bubbleX - 14}px`, '--sy': `${anim.bubbleY - 14}px`,
+            '--ex': `${cx - 14}px`, '--ey': `${cy - 14}px`,
+            '--my': `${Math.min(cy, anim.bubbleY) - 80}px`,
+            animation: 'pokeballFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
+          } as React.CSSProperties}
+        />
+      )}
+
+      {/* Phase 2: Single bounce up → pops open mid-air with flash + card expand */}
+      {phase === 'bounce' && (
+        <div style={{ position: 'fixed', left: cx, top: cy, transform: 'translate(-50%, -50%)' }}>
+          {/* Pokéball bounces up once then fades */}
+          <img
+            src="/sprites/pokeball.png"
+            alt=""
+            style={{
+              width: 28, height: 28,
+              imageRendering: 'pixelated',
+              filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+              animation: 'pokeballPopOpen 400ms ease-out forwards',
+            }}
+          />
+          {/* White flash at 150ms */}
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            width: 120, height: 120,
+            transform: 'translate(-50%, -50%)',
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 70%)',
+            animation: 'deployFlash 350ms ease-out 100ms both',
+          }} />
+          {/* Card box expanding */}
+          <div style={{
+            position: 'fixed',
+            left: anim.cardX, top: anim.cardY,
+            width: anim.cardW, height: anim.cardH,
+            borderRadius: 8,
+            border: '2px solid rgba(88,160,216,0.6)',
+            background: 'rgba(88,160,216,0.12)',
+            transformOrigin: `${cx - anim.cardX}px ${cy - anim.cardY}px`,
+            animation: 'cardExpand 400ms cubic-bezier(0.2, 0, 0, 1) 100ms both',
+          }} />
+        </div>
+      )}
+    </>
+  )
+}
+
+// ── Hook ───────────────────────────────────────────────────
+
+export function usePokeballAnimations() {
+  const [animations, setAnimations] = useState<PokeballAnim[]>([])
+  const pendingCallbacks = useRef<Map<string, () => void>>(new Map())
+
+  const triggerRecall = useCallback((
+    sessionId: string,
+    sprite: string,
+    cardRect: DOMRect,
+    bubbleTarget: { x: number; y: number },
+    onDone: () => void,
+    spritePos?: { spriteCx: number; spriteCy: number },
+  ) => {
+    const id = `recall-${sessionId}-${Date.now()}`
+    pendingCallbacks.current.set(id, onDone)
+    setAnimations(prev => [...prev, {
+      id, type: 'recall', sprite,
+      cardX: cardRect.left, cardY: cardRect.top,
+      cardW: cardRect.width, cardH: cardRect.height,
+      bubbleX: bubbleTarget.x, bubbleY: bubbleTarget.y,
+      spriteCx: spritePos?.spriteCx, spriteCy: spritePos?.spriteCy,
+    }])
+  }, [])
+
+  const triggerDeploy = useCallback((
+    sessionId: string,
+    sprite: string,
+    bubbleSource: { x: number; y: number },
+    cardRect: DOMRect,
+    onDone: () => void,
+  ) => {
+    const id = `deploy-${sessionId}-${Date.now()}`
+    pendingCallbacks.current.set(id, onDone)
+    setAnimations(prev => [...prev, {
+      id, type: 'deploy', sprite,
+      cardX: cardRect.left, cardY: cardRect.top,
+      cardW: cardRect.width, cardH: cardRect.height,
+      bubbleX: bubbleSource.x, bubbleY: bubbleSource.y,
+    }])
+  }, [])
+
+  const onComplete = useCallback((animId: string) => {
+    setAnimations(prev => prev.filter(a => a.id !== animId))
+    const cb = pendingCallbacks.current.get(animId)
+    if (cb) {
+      pendingCallbacks.current.delete(animId)
+      cb()
+    }
+  }, [])
+
+  return { animations, triggerRecall, triggerDeploy, onComplete }
+}

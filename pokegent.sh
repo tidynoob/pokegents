@@ -19,6 +19,8 @@ done
 
 pokegent() {
   local PROFILES_DIR="$POKEGENTS_DATA/profiles"
+  local PROJECTS_DIR="$POKEGENTS_DATA/projects"
+  local ROLES_DIR="$POKEGENTS_DATA/roles"
   local HISTORY_DIR="$POKEGENTS_DATA/history"
   local RUNNING_DIR="$POKEGENTS_DATA/running"
   local POKEGENTS_CONFIG="$POKEGENTS_DATA/config.json"
@@ -66,44 +68,66 @@ pokegent() {
   # -h / --help
   if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     cat <<'HELP'
-Usage: pokegent [command|profile] [options]
+Usage: pokegent [command|role@project|profile] [options]
 
 Commands:
-  (none)              Launch default profile (personal)
-  ls                  List all available profiles
-  edit <profile>      Open a profile's JSON config in $EDITOR
+  (none)              Launch default project
+  ls                  List all projects, roles, and legacy profiles
+  projects            List available projects
+  roles               List available roles
+  edit project <name> Edit a project config
+  edit role <name>    Edit a role config
+  edit <profile>      Edit a legacy profile config
+  dashboard           Open the dashboard (default)
+  dashboard build     Build server + frontend, restart dashboard (no session restart)
+  dashboard start     Start the dashboard server
+  dashboard stop      Stop the dashboard server
+  dashboard restart   Restart the dashboard server (no rebuild)
   reload              Stop all sessions, rebuild dashboard, relaunch everything
   doctor              Verify installation health (deps, hooks, MCP, dashboard)
   -h, --help          Show this help message
 
-Launching a profile:
-  pokegent <profile>       Start a new Claude Code session with the given profile
-  pokegent <profile> -r              Resume a session (opens Claude's resume picker)
-  pokegent <profile> -r <id>        Resume a specific session by ID (prefix match)
-  pokegent <profile> -c             Same as -r
-  pokegent <profile> --resume       Same as -r
-  pokegent <profile> -w <name>    Launch in an isolated git worktree
-  pokegent <profile> --worktree <name>   Same as -w
+Launching:
+  pokegent dev@client            Compose a role with a project
+  pokegent @client               Project only (no role)
+  pokegent dev@                  Role only (uses default project)
+  pokegent client                Project, legacy profile, or role (in that order)
+  pokegent --legacy client       Force legacy profile resolution
+  pokegent <target> -r           Resume a session (opens Claude's resume picker)
+  pokegent <target> -r <id>     Resume a specific session by ID (prefix match)
+  pokegent <target> -c           Same as -r
+  pokegent <target> -w <name>   Launch in an isolated git worktree
 
 Options (passed through to claude):
-  Any extra arguments after the profile name are forwarded to claude.
+  Any extra arguments after the target are forwarded to claude.
 
 Examples:
-  pokegent                 Launch personal profile
-  pokegent client          Launch client profile
-  pokegent platform -c     Resume a recent platform session
-  pokegent platform -w pinecone   Launch platform in worktree "pinecone"
-  pokegent edit client     Edit the client profile config
-  pokegent ls              List all profiles
+  pokegent                       Launch default project
+  pokegent dev@client            Developer role on client project
+  pokegent pm@platform           PM role on platform project
+  pokegent @client               Client project, no role
+  pokegent client                Client project (or legacy profile)
+  pokegent platform -c           Resume a recent platform session
+  pokegent edit project client   Edit the client project config
+  pokegent edit role pm          Edit the PM role config
+  pokegent ls                    List everything
 
 HELP
-    _pokegent_list_profiles
+    _pokegent_list_all
     return 0
   fi
 
-  # ls
+  # ls / projects / roles
   if [[ "$1" == "ls" ]]; then
-    _pokegent_list_profiles
+    _pokegent_list_all
+    return 0
+  fi
+  if [[ "$1" == "projects" ]]; then
+    _pokegent_list_projects
+    return 0
+  fi
+  if [[ "$1" == "roles" ]]; then
+    _pokegent_list_roles
     return 0
   fi
 
@@ -126,8 +150,39 @@ HELP
       restart)
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &
+        "$dashboard_bin" serve &>/dev/null &
+        disown
         echo "Dashboard restarted at http://localhost:$POKEGENTS_PORT"
+        ;;
+      build)
+        echo "=== Dashboard Build ==="
+        echo ""
+        # Build Go server
+        echo "Building server..."
+        if (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard . 2>&1); then
+          echo "  ✓ Server built"
+        else
+          echo "  ✗ Server build FAILED"
+          return 1
+        fi
+        # Build frontend
+        echo "Building frontend..."
+        if (cd "$POKEGENTS_ROOT/dashboard/web" && npm run build 2>&1 | tail -3); then
+          echo "  ✓ Frontend built"
+        else
+          echo "  ✗ Frontend build FAILED"
+          return 1
+        fi
+        # Restart server
+        echo ""
+        echo "Restarting dashboard..."
+        _pokegent_kill_dashboard
+        sleep 0.5
+        "$dashboard_bin" serve &>/dev/null &
+        disown
+        echo "  ✓ Dashboard running at http://localhost:$POKEGENTS_PORT"
+        echo ""
+        echo "=== Build complete ==="
         ;;
       open|"")
         # Open as standalone app window (separate Dock/Cmd+Tab entry)
@@ -164,37 +219,183 @@ HELP
     return $?
   fi
 
-  # No args → default profile from config
+  # No args → default project (or default_role@default_project, or legacy default_profile)
   if [[ -z "$1" ]]; then
-    set -- "$POKEGENTS_DEFAULT_PROFILE"
+    local _default_project=$(jq -r '.default_project // empty' "$POKEGENTS_CONFIG" 2>/dev/null)
+    local _default_role=$(jq -r '.default_role // empty' "$POKEGENTS_CONFIG" 2>/dev/null)
+    if [[ -n "$_default_project" && -f "$PROJECTS_DIR/${_default_project}.json" ]]; then
+      if [[ -n "$_default_role" && "$_default_role" != "null" && -f "$ROLES_DIR/${_default_role}.json" ]]; then
+        set -- "${_default_role}@${_default_project}"
+      else
+        set -- "@${_default_project}"
+      fi
+    else
+      set -- "$POKEGENTS_DEFAULT_PROFILE"
+    fi
   fi
 
-  # edit <profile>
+  # edit [project|role] <name>
   if [[ "$1" == "edit" ]]; then
-    ${EDITOR:-nano} "$PROFILES_DIR/${2}.json"
+    if [[ "$2" == "project" && -n "$3" ]]; then
+      ${EDITOR:-nano} "$PROJECTS_DIR/${3}.json"
+    elif [[ "$2" == "role" && -n "$3" ]]; then
+      ${EDITOR:-nano} "$ROLES_DIR/${3}.json"
+    elif [[ -n "$2" ]]; then
+      ${EDITOR:-nano} "$PROFILES_DIR/${2}.json"
+    else
+      echo "Usage: pokegent edit [project|role] <name>"
+    fi
     return $?
   fi
 
-  local profile_name="$1"
-  local profile_file="$PROFILES_DIR/${profile_name}.json"
-  shift
-
-  if [[ ! -f "$profile_file" ]]; then
-    echo "Unknown profile: $profile_name"
-    echo "Run 'pokegent ls' to see available profiles."
-    return 1
+  # ── Resolution: role@project, project, legacy profile, or role ──────────
+  local _arg="$1"
+  local _force_legacy=false
+  if [[ "$_arg" == "--legacy" ]]; then
+    _force_legacy=true
+    _arg="$2"
+    shift 2
+  else
+    shift
   fi
 
-  # Read profile fields
-  local title=$(jq -r '.title' "$profile_file")
-  local emoji=$(jq -r '.emoji' "$profile_file")
-  local r=$(jq -r '.color[0]' "$profile_file")
-  local g=$(jq -r '.color[1]' "$profile_file")
-  local b=$(jq -r '.color[2]' "$profile_file")
-  local cwd=$(jq -r '.cwd' "$profile_file")
+  local _role_name="" _project_name="" _profile_name=""
+  local _role_file="" _project_file="" _profile_file=""
+  local _resolved_mode=""  # "composed", "project", "legacy", "role"
+
+  if [[ "$_arg" == *"@"* ]]; then
+    # Explicit role@project syntax
+    _role_name="${_arg%%@*}"
+    _project_name="${_arg#*@}"
+    if [[ -n "$_role_name" ]]; then
+      _role_file="$ROLES_DIR/${_role_name}.json"
+      if [[ ! -f "$_role_file" ]]; then
+        echo "Unknown role: $_role_name"
+        echo "Run 'pokegent roles' to see available roles."
+        return 1
+      fi
+    fi
+    if [[ -n "$_project_name" ]]; then
+      _project_file="$PROJECTS_DIR/${_project_name}.json"
+      if [[ ! -f "$_project_file" ]]; then
+        echo "Unknown project: $_project_name"
+        echo "Run 'pokegent projects' to see available projects."
+        return 1
+      fi
+    else
+      # role@ with no project — use default
+      local _default_project=$(jq -r '.default_project // "personal"' "$POKEGENTS_CONFIG" 2>/dev/null || echo "personal")
+      _project_name="$_default_project"
+      _project_file="$PROJECTS_DIR/${_project_name}.json"
+      if [[ ! -f "$_project_file" ]]; then
+        echo "Error: default project '$_project_name' not found in $PROJECTS_DIR/"
+        return 1
+      fi
+    fi
+    _resolved_mode="composed"
+  elif [[ "$_force_legacy" == "true" ]]; then
+    # --legacy forces legacy profile
+    _profile_name="$_arg"
+    _profile_file="$PROFILES_DIR/${_profile_name}.json"
+    if [[ ! -f "$_profile_file" ]]; then
+      echo "Unknown legacy profile: $_profile_name"
+      return 1
+    fi
+    _resolved_mode="legacy"
+  else
+    # Resolution order: project > legacy profile > role
+    if [[ -f "$PROJECTS_DIR/${_arg}.json" ]]; then
+      _project_name="$_arg"
+      _project_file="$PROJECTS_DIR/${_project_name}.json"
+      _resolved_mode="project"
+      # Warn if a legacy profile with the same name exists
+      if [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
+        echo "Note: Using project '$_arg'. To use legacy profile: pokegent --legacy $_arg"
+      fi
+    elif [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
+      _profile_name="$_arg"
+      _profile_file="$PROFILES_DIR/${_profile_name}.json"
+      _resolved_mode="legacy"
+    elif [[ -f "$ROLES_DIR/${_arg}.json" ]]; then
+      _role_name="$_arg"
+      _role_file="$ROLES_DIR/${_role_name}.json"
+      # Role-only: use default project
+      local _default_project=$(jq -r '.default_project // "personal"' "$POKEGENTS_CONFIG" 2>/dev/null || echo "personal")
+      _project_name="$_default_project"
+      _project_file="$PROJECTS_DIR/${_project_name}.json"
+      if [[ ! -f "$_project_file" ]]; then
+        echo "Error: default project '$_project_name' not found in $PROJECTS_DIR/"
+        return 1
+      fi
+      _resolved_mode="composed"
+    else
+      echo "Unknown project, profile, or role: $_arg"
+      echo "Run 'pokegent ls' to see available options."
+      return 1
+    fi
+  fi
+
+  # ── Read resolved fields ──────────────────────────────────────────────
+  local profile_name="" title="" emoji="" r="" g="" b="" cwd="" system_prompt=""
+  local _iterm2_profile="" _add_dirs_file="" _skip_perms_override=""
+
+  case "$_resolved_mode" in
+    composed|project)
+      # Read project fields
+      title=$(jq -r '.title' "$_project_file")
+      r=$(jq -r '.color[0]' "$_project_file")
+      g=$(jq -r '.color[1]' "$_project_file")
+      b=$(jq -r '.color[2]' "$_project_file")
+      cwd=$(jq -r '.cwd' "$_project_file")
+      _iterm2_profile=$(jq -r '.iterm2_profile // empty' "$_project_file")
+      _add_dirs_file="$_project_file"
+      local _context_prompt=$(jq -r '.context_prompt // empty' "$_project_file")
+
+      if [[ -n "$_role_file" && -f "$_role_file" ]]; then
+        # Composed: role + project
+        local _role_title=$(jq -r '.title' "$_role_file")
+        emoji=$(jq -r '.emoji' "$_role_file")
+        local _role_prompt=$(jq -r '.system_prompt // empty' "$_role_file")
+        _skip_perms_override=$(jq -r '.skip_permissions // "unset"' "$_role_file" 2>/dev/null)
+
+        # Compose display name and system prompt
+        title="${_role_title} — ${title}"
+        profile_name="${_role_name}@${_project_name}"
+
+        # Prompt order: project context first, role instructions second
+        if [[ -n "$_context_prompt" && -n "$_role_prompt" ]]; then
+          system_prompt="${_context_prompt}
+
+${_role_prompt}"
+        elif [[ -n "$_role_prompt" ]]; then
+          system_prompt="$_role_prompt"
+        elif [[ -n "$_context_prompt" ]]; then
+          system_prompt="$_context_prompt"
+        fi
+      else
+        # Project-only (no role)
+        emoji=$(jq -r '.emoji // "📁"' "$_project_file")
+        profile_name="$_project_name"
+        system_prompt="$_context_prompt"
+      fi
+      ;;
+    legacy)
+      # Read legacy profile (unchanged from original behavior)
+      title=$(jq -r '.title' "$_profile_file")
+      emoji=$(jq -r '.emoji' "$_profile_file")
+      r=$(jq -r '.color[0]' "$_profile_file")
+      g=$(jq -r '.color[1]' "$_profile_file")
+      b=$(jq -r '.color[2]' "$_profile_file")
+      cwd=$(jq -r '.cwd' "$_profile_file")
+      _iterm2_profile=$(jq -r '.iterm2_profile // empty' "$_profile_file")
+      _add_dirs_file="$_profile_file"
+      system_prompt=$(jq -r '.system_prompt // empty' "$_profile_file")
+      profile_name="$_profile_name"
+      ;;
+  esac
+
   cwd="${cwd/#\~/$HOME}"  # expand ~ to $HOME (jq returns literal ~)
-  local system_prompt=$(jq -r '.system_prompt // empty' "$profile_file")
-  local history_file="$HISTORY_DIR/${profile_name}.json"
+  local history_file="$HISTORY_DIR/${_project_name:-$profile_name}.json"
 
   # Parse flags from remaining args
   local worktree_name=""
@@ -293,9 +494,8 @@ if last_title: print(last_title)
 
   # Terminal theming (iTerm2-specific — gracefully skipped on other terminals)
   if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
-    local iterm2_profile=$(jq -r '.iterm2_profile // empty' "$profile_file")
-    if [[ -n "$iterm2_profile" ]]; then
-      printf "\033]1337;SetProfile=%s\a" "$iterm2_profile"
+    if [[ -n "$_iterm2_profile" ]]; then
+      printf "\033]1337;SetProfile=%s\a" "$_iterm2_profile"
     else
       echo -ne "\033]6;1;bg;red;brightness;$r\a"
       echo -ne "\033]6;1;bg;green;brightness;$g\a"
@@ -303,9 +503,11 @@ if last_title: print(last_title)
     fi
   fi
 
-  # Set tab title (works on most terminals) and clear screen
+  # Set tab title (works on most terminals) and clear visible screen.
+  # Use printf directly rather than `clear` — on macOS, /usr/bin/clear emits
+  # \e[3J (erase scrollback) before \e[2J, which destroys terminal history.
   echo -ne "\033]0;$display_name\007"
-  clear
+  printf '\e[H\e[2J'
 
   # Generate session ID
   local session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
@@ -359,15 +561,22 @@ if last_title: print(last_title)
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
       local dyn_profile="$dyn_profile_dir/pokegents-session-${session_id}.json"
       local profile_guid="CCD-SESSION-${session_id}"
-      # Inherit from the profile's iTerm2 profile, or "General" (iTerm2's built-in default)
-      local parent_profile=$(jq -r '.iterm2_profile // "" | if . == "" then "General" else . end' "$profile_file" 2>/dev/null)
-      [[ -z "$parent_profile" ]] && parent_profile="General"
+      # Inherit from the project/profile's iTerm2 profile if it exists in ccd-profiles.json.
+      # If not found (or not set), omit "Dynamic Profile Parent Name" entirely — iTerm2
+      # will use the default profile, which works on any setup without hardcoded names.
+      local parent_profile=""
+      if [[ -n "$_iterm2_profile" ]]; then
+        local _ccd_profiles_json="$dyn_profile_dir/ccd-profiles.json"
+        if [[ -f "$_ccd_profiles_json" ]] && jq -e --arg p "$_iterm2_profile" '.Profiles[] | select(.Name == $p)' "$_ccd_profiles_json" > /dev/null 2>&1; then
+          parent_profile="$_iterm2_profile"
+        fi
+      fi
       jq -n \
         --arg name "CCD Session: $display_name" \
         --arg guid "$profile_guid" \
         --arg parent "$parent_profile" \
         --arg icon_path "$abs_sprite_path" \
-        '{Profiles: [{Name: $name, Guid: $guid, "Dynamic Profile Parent Name": $parent, Icon: 2, "Custom Icon Path": $icon_path}]}' \
+        '{Profiles: [{Name: $name, Guid: $guid} + (if $parent != "" then {"Dynamic Profile Parent Name": $parent} else {} end) + {Icon: 2, "Custom Icon Path": $icon_path}]}' \
         > "$dyn_profile"
       # Small delay for iTerm2 to detect the new profile, then switch to it
       sleep 0.3
@@ -393,6 +602,8 @@ if last_title: print(last_title)
   local created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   jq -n \
     --arg profile "$profile_name" \
+    --arg role "${_role_name:-}" \
+    --arg project "${_project_name:-}" \
     --arg sid "$session_id" \
     --arg pid "$$" \
     --arg tty "$(tty)" \
@@ -400,12 +611,17 @@ if last_title: print(last_title)
     --arg ccd_sid "$session_id" \
     --arg iterm_sid "$iterm_sid" \
     --arg created_at "$created_at" \
-    '{profile: $profile, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
+    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
     > "$running_file"
 
-  # Build claude args — skip_permissions is configurable per-profile or global
-  local profile_skip=$(jq -r '.skip_permissions // empty' "$profile_file" 2>/dev/null)
-  local skip_perms="${profile_skip:-$POKEGENTS_SKIP_PERMISSIONS}"
+  # Build claude args — skip_permissions: role override > legacy profile > global config
+  local skip_perms="$POKEGENTS_SKIP_PERMISSIONS"
+  if [[ "$_resolved_mode" == "legacy" ]]; then
+    local _legacy_skip=$(jq -r '.skip_permissions // empty' "$_profile_file" 2>/dev/null)
+    [[ -n "$_legacy_skip" ]] && skip_perms="$_legacy_skip"
+  elif [[ -n "$_skip_perms_override" && "$_skip_perms_override" != "unset" ]]; then
+    skip_perms="$_skip_perms_override"
+  fi
   local claude_args=(--name "$display_name")
   if [[ "$skip_perms" == "true" ]]; then
     claude_args=(--dangerously-skip-permissions "${claude_args[@]}")
@@ -436,12 +652,19 @@ if last_title: print(last_title)
         rm -f "$running_file"
         return 1
       elif [[ ${#matches[@]} -gt 1 ]]; then
-        echo "Ambiguous prefix '$resume_session_id' — matches ${#matches[@]} sessions:"
-        for i in {1..${#matches[@]}}; do
-          echo "  ${matches[$i]}  ($(basename "${match_dirs[$i]}"))"
-        done
-        rm -f "$running_file"
-        return 1
+        # Deduplicate: same session ID can appear in multiple project dirs (e.g. worktrees).
+        # If all matches resolve to the same session ID, it's not truly ambiguous.
+        local unique_ids=("${(@u)matches}")
+        if [[ ${#unique_ids[@]} -gt 1 ]]; then
+          echo "Ambiguous prefix '$resume_session_id' — matches ${#unique_ids[@]} sessions:"
+          for i in {1..${#unique_ids[@]}}; do
+            echo "  ${unique_ids[$i]}"
+          done
+          rm -f "$running_file"
+          return 1
+        fi
+        # All matches are the same session ID — just use first match
+        matches=("${unique_ids[1]}")
       fi
       claude_args+=(--resume "${matches[1]}")
       rm -f "$running_file"
@@ -463,6 +686,8 @@ if last_title: print(last_title)
       running_file="$RUNNING_DIR/${profile_name}-${session_id}.json"
       jq -n \
         --arg profile "$profile_name" \
+        --arg role "${_role_name:-}" \
+        --arg project "${_project_name:-}" \
         --arg sid "$session_id" \
         --arg pid "$$" \
         --arg tty "$(tty)" \
@@ -470,7 +695,7 @@ if last_title: print(last_title)
         --arg ccd_sid "$ccd_session_id" \
         --arg iterm_sid "$iterm_sid" \
         --arg created_at "$created_at" \
-        '{profile: $profile, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
+        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "
@@ -520,12 +745,14 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
 }${messaging_prompt}"
   claude_args+=(--append-system-prompt "$full_prompt")
 
-  # Add extra directories from profile
-  local add_dir
-  while IFS= read -r add_dir; do
-    add_dir="${add_dir/#\~/$HOME}"  # expand ~ (jq returns literal ~)
-    [[ -n "$add_dir" ]] && claude_args+=(--add-dir "$add_dir")
-  done < <(jq -r '.add_dirs // [] | .[]' "$profile_file")
+  # Add extra directories from project/profile
+  if [[ -n "$_add_dirs_file" ]]; then
+    local add_dir
+    while IFS= read -r add_dir; do
+      add_dir="${add_dir/#\~/$HOME}"  # expand ~ (jq returns literal ~)
+      [[ -n "$add_dir" ]] && claude_args+=(--add-dir "$add_dir")
+    done < <(jq -r '.add_dirs // [] | .[]' "$_add_dirs_file")
+  fi
 
   # Pass through extra args
   claude_args+=("$@")

@@ -18,6 +18,9 @@ type WriteTextFunc func(iTermSessionID, tty, text string) error
 // Injected by the server — keeps messaging free of state manager imports.
 type AgentLookupFunc func(sessionID string) *AgentInfo
 
+// IsSessionFocusedFunc checks if a terminal session is currently focused by the user.
+type IsSessionFocusedFunc func(iTermSessionID, tty string) bool
+
 // AgentInfo is the minimal agent state the nudger needs for its guards.
 type AgentInfo struct {
 	State          string
@@ -29,30 +32,36 @@ type AgentInfo struct {
 
 // MessagingService consolidates message routing, delivery, budget, and nudging.
 type MessagingService struct {
-	store     store.MessageStore
-	writeText WriteTextFunc
-	getAgent  AgentLookupFunc
+	store            store.MessageStore
+	writeText        WriteTextFunc
+	getAgent         AgentLookupFunc
+	isSessionFocused IsSessionFocusedFunc
 
 	// Nudger state
-	mu         sync.Mutex
-	pending    map[string]*time.Timer // session_id → scheduled nudge
-	lastNudge  map[string]time.Time   // session_id → last nudge time
-	debounce   time.Duration
-	batchDelay time.Duration
-	minIdle    time.Duration
+	mu           sync.Mutex
+	pending      map[string]*time.Timer // session_id → scheduled nudge
+	lastNudge    map[string]time.Time   // session_id → last nudge time
+	focusRetries map[string]int         // session_id → focus-defer retry count
+	debounce     time.Duration
+	batchDelay   time.Duration
+	minIdle      time.Duration
+	maxFocusRetries int
 }
 
 // NewMessagingService creates a messaging service with injected dependencies.
-func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgent AgentLookupFunc) *MessagingService {
+func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgent AgentLookupFunc, isFocused IsSessionFocusedFunc) *MessagingService {
 	return &MessagingService{
-		store:      ms,
-		writeText:  writeText,
-		getAgent:   getAgent,
-		pending:    make(map[string]*time.Timer),
-		lastNudge:  make(map[string]time.Time),
-		debounce:   10 * time.Second,
-		batchDelay: 2 * time.Second,
-		minIdle:    3 * time.Second,
+		store:            ms,
+		writeText:        writeText,
+		getAgent:         getAgent,
+		isSessionFocused: isFocused,
+		pending:          make(map[string]*time.Timer),
+		lastNudge:        make(map[string]time.Time),
+		focusRetries:     make(map[string]int),
+		debounce:         5 * time.Second,
+		batchDelay:       500 * time.Millisecond,
+		minIdle:          1 * time.Second,
+		maxFocusRetries:  3,
 	}
 }
 
@@ -195,8 +204,29 @@ func (s *MessagingService) executeNudge(sessionID string) {
 		return
 	}
 
+	// Don't nudge if user is actively typing in this terminal — but limit retries.
+	// After maxFocusRetries deferrals, nudge anyway (Ctrl+U makes it safe).
+	if s.isSessionFocused != nil && s.isSessionFocused(agent.ITermSessionID, agent.TTY) {
+		s.mu.Lock()
+		retries := s.focusRetries[sessionID]
+		if retries < s.maxFocusRetries {
+			s.focusRetries[sessionID] = retries + 1
+			log.Printf("nudger: defer %s — session focused (retry %d/%d)", sessionID[:8], retries+1, s.maxFocusRetries)
+			s.pending[sessionID] = time.AfterFunc(2*time.Second, func() {
+				s.executeNudge(sessionID)
+			})
+			s.mu.Unlock()
+			return
+		}
+		// Max retries hit — nudge anyway, clear retry counter
+		delete(s.focusRetries, sessionID)
+		log.Printf("nudger: focus-retry limit reached for %s — nudging anyway", sessionID[:8])
+		s.mu.Unlock()
+	}
+
 	s.mu.Lock()
 	s.lastNudge[sessionID] = time.Now()
+	delete(s.focusRetries, sessionID)
 	s.mu.Unlock()
 
 	short := sessionID

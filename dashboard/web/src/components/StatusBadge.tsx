@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 
-const STATUS_CONFIG: Record<string, { label: string; dotColor: string; textColor: string; timeColor: string; pulse?: boolean }> = {
-  idle:        { label: 'Idle',        dotColor: 'bg-zinc-500',    textColor: 'text-zinc-400',    timeColor: 'text-zinc-500' },
-  busy:        { label: 'Busy',        dotColor: 'bg-amber-400',   textColor: 'text-amber-400',   timeColor: 'text-amber-400/60', pulse: true },
-  done:        { label: 'Done',        dotColor: 'bg-emerald-400', textColor: 'text-emerald-400', timeColor: 'text-emerald-400/60' },
-  needs_input: { label: 'Needs input', dotColor: 'bg-red-400',     textColor: 'text-red-400',     timeColor: 'text-red-400/60', pulse: true },
-  error:       { label: 'Error',       dotColor: 'bg-orange-400',  textColor: 'text-orange-400',  timeColor: 'text-orange-400/60', pulse: true },
-  starting:    { label: 'Starting',   dotColor: 'bg-blue-400',    textColor: 'text-blue-400',    timeColor: 'text-blue-400/60', pulse: true },
+// GBA-style status condition pills — solid bg + white text, like BRN/PSN/SLP in Pokemon
+const STATUS_CONFIG: Record<string, { label: string; bg: string; timeColor: string; pulse?: boolean }> = {
+  idle:        { label: 'SLP',  bg: '#788890',  timeColor: 'text-white/30' },
+  busy:        { label: 'ATK',  bg: '#e87848',  timeColor: 'text-white/50', pulse: true },
+  done:        { label: 'OK',   bg: '#58a868',  timeColor: 'text-white/40' },
+  needs_input: { label: 'WAIT', bg: '#d84848',  timeColor: 'text-white/50', pulse: true },
+  error:       { label: 'PSN',  bg: '#a858a8',  timeColor: 'text-white/50', pulse: true },
+  starting:    { label: 'NEW',  bg: '#5898c8',  timeColor: 'text-white/50', pulse: true },
 }
 
 function formatDuration(seconds: number): string {
@@ -51,12 +52,20 @@ export function StatusBadge({ status, lastUpdated, busySince }: StatusBadgeProps
 
   return (
     <div className="flex flex-col items-end gap-0.5 shrink-0">
-      <span className={`inline-flex items-center gap-1 text-[10px] ${config.textColor}`}>
-        <span className={`w-1 h-1 rounded-full ${config.dotColor} ${config.pulse ? 'animate-pulse-soft' : ''}`} />
+      <span
+        className={`inline-flex items-center justify-center text-[7px] font-pixel text-white px-2 py-0.5 rounded-full leading-none ${config.pulse ? 'animate-pulse-soft' : ''}`}
+        style={{
+          backgroundColor: config.bg,
+          textShadow: '1px 1px 0 rgba(0,0,0,0.4)',
+          boxShadow: 'inset 1px 1px 0 rgba(255,255,255,0.2), inset -1px -1px 0 rgba(0,0,0,0.2)',
+          minWidth: 28,
+          textAlign: 'center',
+        }}
+      >
         {config.label}
       </span>
       {timeLabel && (
-        <span className={`text-[8px] ${config.timeColor}`}>
+        <span className={`text-[7px] font-mono ${config.timeColor}`}>
           {timeLabel}
         </span>
       )}
