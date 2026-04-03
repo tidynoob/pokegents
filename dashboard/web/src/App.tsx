@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
-import { useGridLayout } from './hooks/useLayout'
+import { useGridEngine } from './hooks/useGridEngine'
 import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard } from './components/AgentCard'
+import { GridContainer } from './components/GridContainer'
 import { SessionBrowser } from './components/SessionBrowser'
 import { hashString } from './components/CreatureIcon'
 import { POKEMON_SPRITES } from './components/sprites'
@@ -11,6 +12,7 @@ import { useMessageAnimations, DeliveryOverlay } from './components/MessageAnima
 import { useSettings } from './hooks/useSettings'
 import { SettingsPanel } from './components/SettingsPanel'
 import { LaunchModal } from './components/LaunchModal'
+import { PokeballAnimationLayer, usePokeballAnimations } from './components/PokeballAnimation'
 
 const STATUS_PILLS: Record<string, { label: string; bg: string; pulse?: boolean }> = {
   idle:        { label: 'SLP',  bg: '#788890' },
@@ -29,51 +31,73 @@ function formatInactive(lastUpdated?: string): string {
   return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
 }
 
-function CollapsedBubble({ agent, sprite, statusColor, onExpand, onFocus }: {
-  agent: AgentState; sprite: string; statusColor: string; onExpand: () => void; onFocus: () => void
+function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
+  agent: AgentState; sprite: string; onExpand: () => void
+  bubbleRef?: (el: HTMLDivElement | null) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [, setTick] = useState(0)
+  const [hovered, setHovered] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-
-  // Update duration every 30s
-  useEffect(() => {
-    const iv = setInterval(() => setTick(n => n + 1), 30000)
-    return () => clearInterval(iv)
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const st = STATUS_PILLS[agent.state] || STATUS_PILLS.idle
   const dur = formatInactive(agent.last_updated)
 
   return (
-    <div ref={ref} className="relative">
+    <div
+      ref={(el) => { ref.current = el; bubbleRef?.(el) }}
+      className="relative"
+      onMouseEnter={() => { hoverTimer.current = setTimeout(() => setHovered(true), 300) }}
+      onMouseLeave={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); setHovered(false) }}
+    >
       <button
-        onClick={() => setOpen(v => !v)}
-        className={`relative flex items-center gap-1.5 gba-card rounded-full pl-1 pr-2.5 py-1 border-2 ${statusColor} transition-colors group`}
-        title={`${agent.display_name} — ${agent.state}`}
+        onClick={() => { setHovered(false); onExpand() }}
+        className="relative w-8 h-8 flex items-center justify-center group"
+        title={`${agent.display_name} — click to expand`}
       >
-        <div className="w-5 h-5 flex items-center justify-center overflow-visible">
-          <img src={`/sprites/${sprite}.png`} alt="" style={{ imageRendering: 'pixelated', transform: 'scale(0.8)' }} />
-        </div>
-        <span className="text-[7px] font-pixel text-white/80 group-hover:text-white max-w-[80px] truncate pixel-shadow">{agent.display_name}</span>
-        <span
-          className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
-          style={{ backgroundColor: st.bg, textShadow: '1px 1px 0 rgba(0,0,0,0.4)', boxShadow: 'inset 1px 1px 0 rgba(255,255,255,0.2), inset -1px -1px 0 rgba(0,0,0,0.2)' }}
-        >{st.label}</span>
-        {dur && <span className="text-[6px] font-mono text-white/30">{dur}</span>}
+        <img
+          src="/sprites/pokeball.png"
+          alt=""
+          className="absolute w-7 h-7 opacity-40 group-hover:opacity-70 transition-opacity"
+          style={{ imageRendering: 'pixelated' }}
+        />
+        <img
+          src={`/sprites/${sprite}.png`}
+          alt=""
+          className="relative z-10"
+          style={{ imageRendering: 'pixelated', transform: 'scale(1.2)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
+          onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
+          onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
+        />
       </button>
-      {open && (
-        <div className="absolute top-full left-0 mt-1 gba-panel z-50 py-1 min-w-[130px]">
-          <button onClick={() => { onExpand(); setOpen(false) }} className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/90 hover:bg-white/10 transition-colors pixel-shadow">Expand</button>
-          <button onClick={() => { onFocus(); setOpen(false) }} className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/90 hover:bg-white/10 transition-colors pixel-shadow">Focus terminal</button>
-          <button onClick={() => { shutdownAgent(agent.session_id); setOpen(false) }} className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-accent-red hover:bg-white/10 transition-colors pixel-shadow">Shutdown</button>
+
+      {/* Hover preview card */}
+      {hovered && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 pointer-events-none"
+          style={{ animation: 'fadeIn 0.15s ease' }}
+        >
+          <div className="gba-card rounded-lg px-3 py-2.5 border border-white/10 min-w-[180px] max-w-[220px]"
+            style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.6)' }}
+          >
+            <div className="flex items-center gap-2 mb-1.5">
+              <img src={`/sprites/${sprite}.png`} alt="" style={{ imageRendering: 'pixelated', width: 28, height: 28 }} />
+              <div className="flex-1 min-w-0">
+                <div className="text-[8px] font-pixel text-white pixel-shadow truncate">{agent.display_name}</div>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span
+                    className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
+                    style={{ backgroundColor: st.bg, textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+                  >{st.label}</span>
+                  {dur && <span className="text-[6px] font-mono text-white/30">{dur}</span>}
+                </div>
+              </div>
+            </div>
+            {agent.detail && (
+              <div className="text-[7px] font-mono text-white/50 truncate mt-1 border-t border-white/10 pt-1">{agent.detail}</div>
+            )}
+            {agent.user_prompt && (
+              <div className="text-[7px] font-mono text-white/35 truncate mt-1">{agent.user_prompt.slice(0, 80)}</div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -95,12 +119,13 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useState(false)
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
+  const { animations, triggerRecall, triggerDeploy, onComplete: onAnimComplete } = usePokeballAnimations()
+  const bubbleRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [roles, setRoles] = useState<RoleInfo[]>([])
   const [showLauncher, setShowLauncher] = useState(false)
-  const dragSrcId = useRef<string | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
+  const [gridSliderDragging, setGridSliderDragging] = useState(false)
 
   // Restore from localStorage AFTER first agents load (so we know which IDs are valid)
   useEffect(() => {
@@ -226,13 +251,17 @@ export default function App() {
   const baseVisible = useMemo(() => agents.filter(a => !collapsedIds.has(a.session_id)), [agents, collapsedIds])
   const collapsedAgents = useMemo(() => agents.filter(a => collapsedIds.has(a.session_id)), [agents, collapsedIds])
   const visibleAgents = baseVisible
+  const visibleIds = useMemo(() => visibleAgents.map(a => a.session_id), [visibleAgents])
 
-  const { cols, mode } = useGridLayout(visibleAgents.length, {
-    cardHeight: settings.cardHeight,
-    cardMinWidth: settings.cardMinWidth,
+  const gridEngine = useGridEngine(visibleIds, {
+    rows: settings.gridRows,
+    cols: settings.gridCols,
+    defaultCardW: settings.defaultCardW ?? 2,
+    defaultCardH: settings.defaultCardH ?? 2,
   })
-  const showHeader = mode === 'standard'
-  const isCompact = mode === 'compact' || mode === 'compact-minimal'
+  // Show header when cells are tall enough for standard mode
+  const showHeader = gridEngine.cellH >= 140
+  const isCompact = gridEngine.cellH < 120
 
 
   // Map any ID → ccd_session_id (for sprite hashing — matches pokegent.sh which hashes the ccd UUID)
@@ -269,7 +298,7 @@ export default function App() {
   const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, spriteOverrides, getSpriteForId)
 
   // Build a map of session_id → connected agent info (for icons)
-  const agentMap = useMemo(() => {
+  const agentInfoMap = useMemo(() => {
     const m: Record<string, { session_id: string; emoji: string; display_name: string }> = {}
     for (const a of agents) {
       m[a.session_id] = { session_id: a.session_id, emoji: a.emoji, display_name: a.display_name || a.profile_name }
@@ -283,8 +312,8 @@ export default function App() {
   const connectedAgentsMap = useMemo(() => {
     const map: Record<string, { session_id: string; emoji: string; display_name: string }[]> = {}
     for (const conn of connections) {
-      const a = agentMap[conn.agent_a]
-      const b = agentMap[conn.agent_b]
+      const a = agentInfoMap[conn.agent_a]
+      const b = agentInfoMap[conn.agent_b]
       if (a) {
         if (!map[conn.agent_a]) map[conn.agent_a] = []
         if (b && !map[conn.agent_a].some(x => x.session_id === b.session_id)) map[conn.agent_a].push(b)
@@ -295,7 +324,7 @@ export default function App() {
       }
     }
     return map
-  }, [connections, agentMap])
+  }, [connections, agentInfoMap])
 
   // Auto-scroll message/activity logs
   useEffect(() => {
@@ -318,269 +347,15 @@ export default function App() {
   }, [showBrowser])
 
 
-
-  const dragAllowed = useRef(true)
-
-  // iOS-style grid layout: each card has {col, row, w, h} on the grid
-  const ROW_H = mode === 'standard' ? settings.cardHeight : mode === 'compact' ? 128 : 92
-  const GRID_GAP = 8
-  type CardLayout = { col: number; row: number; w: number; h: number }
-  const [cardLayouts, setCardLayouts] = useState<Record<string, CardLayout>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem('pokegents-card-layouts') || '{}')
-    } catch { return {} }
-  })
-  const [dropPreview, setDropPreview] = useState<{ col: number; row: number } | null>(null)
-  const resizeRef = useRef<{ id: string; startX: number; startY: number; startW: number; startH: number } | null>(null)
-  const gridRef = useRef<HTMLDivElement>(null)
-
-  // Persist layouts
-  const persistLayouts = (layouts: Record<string, CardLayout>) => {
-    localStorage.setItem('pokegents-card-layouts', JSON.stringify(layouts))
-  }
-
-  // Compute grid cell from mouse position
-  const getGridCell = (e: React.DragEvent | MouseEvent) => {
-    if (!gridRef.current) return { col: 1, row: 1 }
-    const rect = gridRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top + gridRef.current.scrollTop
-    const colWidth = (rect.width - (cols - 1) * GRID_GAP) / cols
-    const col = Math.floor(x / (colWidth + GRID_GAP)) + 1
-    const row = Math.floor(y / (ROW_H + GRID_GAP)) + 1
-    return { col: Math.max(1, Math.min(cols, col)), row: Math.max(1, row) }
-  }
-
-  // Auto-assign positions for cards without explicit layouts
-  const getLayout = (agentId: string, index: number): CardLayout => {
-    if (!isCompact && activeLayouts[agentId]) return activeLayouts[agentId]
-    // Default: sequential placement
-    const col = (index % cols) + 1
-    const row = Math.floor(index / cols) + 1
-    return { col, row, w: 1, h: 1 }
-  }
-
-  // Check if two card rects overlap
-  const overlaps = (a: CardLayout, b: CardLayout) =>
-    a.col < b.col + b.w && a.col + a.w > b.col && a.row < b.row + b.h && a.row + a.h > b.row
-
-  // iOS-style collision resolution: push overlapping cards down
-  const resolveCollisions = (layouts: Record<string, CardLayout>, movedId: string): Record<string, CardLayout> => {
-    const result = { ...layouts }
-    const moved = result[movedId]
-    if (!moved) return result
-    for (const [id, layout] of Object.entries(result)) {
-      if (id !== movedId && overlaps(moved, layout)) {
-        result[id] = { ...layout, row: moved.row + moved.h }
-      }
-    }
-    // Recursively resolve cascading collisions
-    for (let iter = 0; iter < 20; iter++) {
-      let ok = true
-      const ids = Object.keys(result)
-      for (let i = 0; i < ids.length; i++) {
-        for (let j = i + 1; j < ids.length; j++) {
-          if (overlaps(result[ids[i]], result[ids[j]])) {
-            const [upper, lower] = result[ids[i]].row <= result[ids[j]].row ? [ids[i], ids[j]] : [ids[j], ids[i]]
-            result[lower] = { ...result[lower], row: result[upper].row + result[upper].h }
-            ok = false
-          }
-        }
-      }
-      if (ok) break
-    }
-    return result
-  }
-
-  // Ensure all visible agents have layouts
-  const ensureAllLayouts = () => {
-    const all = { ...cardLayouts }
-    visibleAgents.forEach((a, i) => {
-      if (!all[a.session_id]) all[a.session_id] = getLayout(a.session_id, i)
-    })
-    return all
-  }
-
-  // Live preview layouts — resolved collision state during drag
-  const [previewLayouts, setPreviewLayouts] = useState<Record<string, CardLayout> | null>(null)
-
-  // The active layout: preview during drag, committed otherwise
-  const activeLayouts = previewLayouts || cardLayouts
-
-  // Compute max row from active layouts
-  const maxRow = useMemo(() => {
-    let max = 1
-    visibleAgents.forEach((a, i) => {
-      const layout = activeLayouts[a.session_id] || getLayout(a.session_id, i)
-      max = Math.max(max, layout.row + layout.h - 1)
-    })
-    return max + 2 // extra rows for drop targets
-  }, [visibleAgents, activeLayouts, cols, isCompact])
-
-  // Live drag — resolve collisions on every hover cell change
-  const lastDragCell = useRef<string>('')
-  const handleGridDragOver = (e: React.DragEvent) => {
-    if (!dragSrcId.current || isCompact) return
-    e.preventDefault()
-    const cell = getGridCell(e)
-    const cellKey = `${cell.col},${cell.row}`
-    if (cellKey === lastDragCell.current) return // debounce same cell
-    lastDragCell.current = cellKey
-    setDropPreview(cell)
-
-    const srcId = dragSrcId.current
-    const existing = cardLayouts[srcId] || getLayout(srcId, 0)
-    const clampedCol = Math.max(1, Math.min(cell.col, cols - existing.w + 1))
-    const clampedRow = Math.max(1, cell.row)
-
-    const all = ensureAllLayouts()
-    all[srcId] = { ...existing, col: clampedCol, row: clampedRow }
-    setPreviewLayouts(resolveCollisions(all, srcId))
-  }
-
-  const handleGridDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    if (!previewLayouts) return
-    // Commit the preview
-    setCardLayouts(previewLayouts)
-    persistLayouts(previewLayouts)
-    setPreviewLayouts(null)
-    dragSrcId.current = null
-    setIsDragging(false)
-    setDropPreview(null)
-    lastDragCell.current = ''
-  }
-
-  const handleDragEnd = () => {
-    // Cancel — revert to committed layouts
-    setPreviewLayouts(null)
-    dragSrcId.current = null
-    setIsDragging(false)
-    setDropPreview(null)
-    lastDragCell.current = ''
-  }
-
-  // Resize handler (size only, position stays)
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!resizeRef.current || !gridRef.current) return
-      const r = resizeRef.current
-      const gridWidth = gridRef.current.offsetWidth
-      const colWidth = (gridWidth - (cols - 1) * GRID_GAP) / cols
-      const deltaX = e.clientX - r.startX
-      const totalW = r.startW * colWidth + (r.startW - 1) * GRID_GAP + deltaX
-      const newW = Math.max(1, Math.min(cols, Math.round((totalW + GRID_GAP) / (colWidth + GRID_GAP))))
-      const deltaY = e.clientY - r.startY
-      const totalH = r.startH * ROW_H + (r.startH - 1) * GRID_GAP + deltaY
-      const newH = Math.max(1, Math.min(4, Math.round((totalH + GRID_GAP) / (ROW_H + GRID_GAP))))
-      const prev = cardLayouts[r.id]
-      const prevW = prev?.w || 1
-      const prevH = prev?.h || 1
-      if (newW !== prevW || newH !== prevH) {
-        setCardLayouts(p => ({ ...p, [r.id]: { ...(p[r.id] || { col: 1, row: 1, w: 1, h: 1 }), w: newW, h: newH } }))
-      }
-    }
-    const onUp = () => {
-      const id = resizeRef.current?.id
-      resizeRef.current = null
-      if (id) {
-        setCardLayouts(current => {
-          const resolved = resolveCollisions(current, id)
-          persistLayouts(resolved)
-          return resolved
-        })
-      }
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-  }, [cols, cardLayouts, ROW_H])
-
-  const renderCard = (agent: AgentState, cardMode: typeof mode, index: number) => {
-    const layout = getLayout(agent.session_id, index)
-    const h = layout.h * ROW_H + (layout.h - 1) * GRID_GAP
-    return (
-      <div
-        key={agent.session_id}
-        draggable={dragAllowed.current}
-        onMouseDown={(e) => {
-          const el = e.target as HTMLElement
-          dragAllowed.current = !(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || !!el.closest('[data-no-drag]'))
-        }}
-        onDragStart={(e) => {
-          if (!dragAllowed.current) { e.preventDefault(); return }
-          dragSrcId.current = agent.session_id
-          setIsDragging(true)
-          e.dataTransfer.effectAllowed = 'move'
-          // Assign layout if card doesn't have one yet
-          if (!cardLayouts[agent.session_id]) {
-            setCardLayouts(p => ({ ...p, [agent.session_id]: layout }))
-          }
-        }}
-        onDragEnd={handleDragEnd}
-        className="relative"
-        style={{
-          height: h,
-          gridColumn: `${layout.col} / span ${layout.w}`,
-          gridRow: `${layout.row} / span ${layout.h}`,
-          transition: resizeRef.current ? 'none' : 'transform 200ms ease',
-        }}
-      >
-        <AgentCard
-          agent={agent}
-          onClick={() => focusAgent(agent.session_id)}
-          mode={cardMode}
-          connectedAgents={connectedAgentsMap[agent.session_id]}
-          spriteOverride={spriteOverrides[resolveToSpriteId(agent.session_id)] || spriteOverrides[agent.session_id]}
-          spriteSessionId={resolveToSpriteId(agent.session_id)}
-          isReading={readingAgents.has(agent.session_id)}
-          hideSprite={hiddenSprites.has(agent.session_id)}
-          projects={projects}
-          roles={roles}
-          onCollapse={() => setCollapsedIds(prev => new Set([...prev, agent.session_id]))}
-          cardRef={(el) => {
-            if (el) {
-              cardRefs.current.set(agent.session_id, el)
-              if (agent.ccd_session_id && agent.ccd_session_id !== agent.session_id) cardRefs.current.set(agent.ccd_session_id, el)
-            } else {
-              cardRefs.current.delete(agent.session_id)
-              if (agent.ccd_session_id) cardRefs.current.delete(agent.ccd_session_id)
-            }
-          }}
-        />
-        {/* Resize handle — only in standard mode */}
-        {!isCompact && (
-          <div
-            data-no-drag
-            className="absolute bottom-0 right-0 w-5 h-5 cursor-nwse-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
-            onMouseDown={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              // Ensure layout exists before resizing
-              if (!cardLayouts[agent.session_id]) {
-                setCardLayouts(p => ({ ...p, [agent.session_id]: layout }))
-              }
-              resizeRef.current = {
-                id: agent.session_id,
-                startX: e.clientX,
-                startY: e.clientY,
-                startW: layout.w,
-                startH: layout.h,
-              }
-            }}
-          >
-            <svg viewBox="0 0 16 16" className="w-full h-full text-white/40">
-              <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="8" y1="14" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="12" y1="14" x2="14" y2="12" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-          </div>
-        )}
-      </div>
-    )
-  }
+  // Agent lookup for rendering cards in GridContainer
+  const agentMap = useMemo(() => {
+    const m: Record<string, AgentState> = {}
+    for (const a of visibleAgents) m[a.session_id] = a
+    return m
+  }, [visibleAgents])
 
   return (
+    <>
     <div className="h-screen flex flex-col p-3 overflow-hidden relative z-10">
       {/* Header — hidden in compact mode */}
       {showHeader && (
@@ -621,6 +396,7 @@ export default function App() {
                   onReset={resetSettings}
                   onClose={() => setShowSettings(false)}
                   onTestMessaging={triggerTestDelivery}
+                  onGridDragging={setGridSliderDragging}
                 />
               )}
             </div>
@@ -633,15 +409,52 @@ export default function App() {
         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
           {collapsedAgents.map(agent => {
             const sprite = getSpriteForId(agent.session_id)
-            const statusColor = agent.state === 'busy' ? 'border-accent-yellow' : agent.state === 'done' ? 'border-accent-green' : agent.state === 'error' ? 'border-accent-orange' : agent.state === 'needs_input' ? 'border-accent-red' : 'border-gba-card-dark'
             return (
               <CollapsedBubble
                 key={agent.session_id}
                 agent={agent}
                 sprite={sprite}
-                statusColor={statusColor}
-                onExpand={() => { manualExpandRef.current.add(agent.session_id); setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next }) }}
-                onFocus={() => focusAgent(agent.session_id)}
+                bubbleRef={(el) => {
+                  if (el) bubbleRefs.current.set(agent.session_id, el)
+                  else bubbleRefs.current.delete(agent.session_id)
+                }}
+                onExpand={() => {
+                  const bubbleEl = bubbleRefs.current.get(agent.session_id)
+                  if (bubbleEl) {
+                    const bubbleRect = bubbleEl.getBoundingClientRect()
+                    const bubbleSource = {
+                      x: bubbleRect.left + bubbleRect.width / 2,
+                      y: bubbleRect.top + bubbleRect.height / 2,
+                    }
+                    // Compute where the card will land using grid engine
+                    const existingLayout = gridEngine.layouts[agent.session_id]
+                    const targetRect = existingLayout
+                      ? gridEngine.gridRectToPixels(existingLayout)
+                      : (() => {
+                          // Estimate: place temporarily to get the position
+                          const { defaultCardW: w, defaultCardH: h, cols } = gridEngine.settings
+                          const occupied = { ...gridEngine.layouts }
+                          for (let row = 1; row <= 100; row++) {
+                            for (let col = 1; col <= cols - w + 1; col++) {
+                              const candidate = { col, row, w, h }
+                              const fits = !Object.values(occupied).some(r =>
+                                r.col < candidate.col + candidate.w && r.col + r.w > candidate.col &&
+                                r.row < candidate.row + candidate.h && r.row + r.h > candidate.row
+                              )
+                              if (fits) return gridEngine.gridRectToPixels(candidate)
+                            }
+                          }
+                          return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
+                        })()
+                    triggerDeploy(agent.session_id, sprite, bubbleSource, targetRect, () => {
+                      manualExpandRef.current.add(agent.session_id)
+                      setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
+                    })
+                  } else {
+                    manualExpandRef.current.add(agent.session_id)
+                    setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
+                  }
+                }}
               />
             )
           })}
@@ -659,71 +472,74 @@ export default function App() {
           </div>
         </div>
       ) : (
-        <div
-          ref={gridRef}
-          className="flex-1 grid gap-2 min-h-0 content-start items-start overflow-auto"
-          style={{
-            gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-            gridAutoRows: ROW_H,
-          }}
-          onDragOver={handleGridDragOver}
-          onDrop={handleGridDrop}
+        <GridContainer
+          engine={gridEngine}
+          agentIds={visibleIds}
+          showHeader={showHeader}
+          showGridLines={gridSliderDragging}
         >
-          {/* Background grid cells + column lines — visible during drag */}
-          {isDragging && !isCompact && (
-            <>
-              {Array.from({ length: maxRow * cols }, (_, i) => {
-                const c = (i % cols) + 1
-                const r = Math.floor(i / cols) + 1
-                return (
-                  <div
-                    key={`grid-${c}-${r}`}
-                    className="rounded-lg border border-dashed pointer-events-none"
-                    style={{
-                      gridColumn: `${c} / span 1`,
-                      gridRow: `${r} / span 1`,
-                      borderColor: 'rgba(255,255,255,0.06)',
-                    }}
-                  />
-                )
-              })}
-              {/* Vertical column separator lines */}
-              {Array.from({ length: cols - 1 }, (_, i) => (
-                <div
-                  key={`vsep-${i}`}
-                  className="pointer-events-none"
-                  style={{
-                    gridColumn: `${i + 2} / span 1`,
-                    gridRow: `1 / span ${maxRow}`,
-                    borderLeft: '1px dashed rgba(255,255,255,0.12)',
-                    marginLeft: -5,
-                  }}
-                />
-              ))}
-            </>
-          )}
-          {visibleAgents.map((agent, i) => renderCard(agent, mode, i))}
-          {/* Drop preview ghost — matches dragged card's size */}
-          {dropPreview && isDragging && dragSrcId.current && !isCompact && (() => {
-            const srcLayout = activeLayouts[dragSrcId.current] || { w: 1, h: 1 }
-            const clampedCol = Math.max(1, Math.min(dropPreview.col, cols - srcLayout.w + 1))
+          {(id, rect, cardMode) => {
+            const agent = agentMap[id]
+            if (!agent) return null
             return (
-              <div
-                className="rounded-lg border-2 border-dashed border-white/25 pointer-events-none"
-                style={{
-                  gridColumn: `${clampedCol} / span ${srcLayout.w}`,
-                  gridRow: `${dropPreview.row} / span ${srcLayout.h}`,
-                  background: 'rgba(255,255,255,0.06)',
+              <AgentCard
+                agent={agent}
+                onClick={() => focusAgent(agent.session_id)}
+                mode={cardMode}
+                connectedAgents={connectedAgentsMap[agent.session_id]}
+                spriteOverride={spriteOverrides[resolveToSpriteId(agent.session_id)] || spriteOverrides[agent.session_id]}
+                spriteSessionId={resolveToSpriteId(agent.session_id)}
+                isReading={readingAgents.has(agent.session_id)}
+                hideSprite={hiddenSprites.has(agent.session_id)}
+                projects={projects}
+                roles={roles}
+                onCollapse={() => {
+                  const cardEl = cardRefs.current.get(agent.session_id)
+                  if (cardEl) {
+                    // Find the actual sprite img inside the card
+                    const spriteEl = cardEl.querySelector('.creature-sprite') as HTMLElement | null
+                    const spriteRect = spriteEl?.getBoundingClientRect()
+                    const cardRect = spriteRect
+                      ? new DOMRect(cardEl.getBoundingClientRect().left, cardEl.getBoundingClientRect().top,
+                          cardEl.getBoundingClientRect().width, cardEl.getBoundingClientRect().height)
+                      : cardEl.getBoundingClientRect()
+                    // Override card position with sprite center for animation origin
+                    const animRect = new DOMRect(
+                      cardRect.left, cardRect.top, cardRect.width, cardRect.height
+                    )
+                    // Store sprite position in the anim rect (abuse cardX/Y for sprite center)
+                    const spriteCx = spriteRect ? spriteRect.left + spriteRect.width / 2 : cardRect.left + cardRect.width - 40
+                    const spriteCy = spriteRect ? spriteRect.top + spriteRect.height / 2 : cardRect.top + 32
+                    const sprite = getSpriteForId(agent.session_id)
+                    const existingBubbles = bubbleRefs.current.size
+                    const bubbleTarget = { x: 12 + existingBubbles * 36 + 16, y: showHeader ? 56 : 16 }
+                    triggerRecall(agent.session_id, sprite, animRect, bubbleTarget, () => {
+                      setCollapsedIds(prev => new Set([...prev, agent.session_id]))
+                    }, { spriteCx, spriteCy })
+                  } else {
+                    setCollapsedIds(prev => new Set([...prev, agent.session_id]))
+                  }
+                }}
+                cardRef={(el) => {
+                  if (el) {
+                    cardRefs.current.set(agent.session_id, el)
+                    if (agent.ccd_session_id && agent.ccd_session_id !== agent.session_id) cardRefs.current.set(agent.ccd_session_id, el)
+                  } else {
+                    cardRefs.current.delete(agent.session_id)
+                    if (agent.ccd_session_id) cardRefs.current.delete(agent.ccd_session_id)
+                  }
                 }}
               />
             )
-          })()}
-        </div>
+          }}
+        </GridContainer>
       )}
 
-      {/* Bottom bar — Messages + Activity tabs */}
+      </div>{/* ← end ROOT flex container */}
+
+      {/* Bottom bar — Messages + Activity tabs (fixed, outside flex) */}
       {(messages.length > 0 || activity.length > 0) && (
-        <div className="shrink-0 mt-2 border-t-2 border-gba-teal-dark pt-2">
+        <div className="fixed bottom-0 left-0 right-0 z-30 border-t-2 border-gba-teal-dark pt-2 pb-2 px-3" style={{ background: 'linear-gradient(180deg, rgba(42,104,88,0.95) 0%, rgba(42,104,88,1) 30%)' }}>
           <div className="flex items-center gap-3 mb-1 px-0.5">
             <button
               onClick={() => setBottomOpen(o => !o)}
@@ -804,9 +620,14 @@ export default function App() {
       )}
 
       <DeliveryOverlay deliveries={deliveries} />
-      {showBrowser && <SessionBrowser onClose={() => setShowBrowser(false)} activeSessionIds={new Set(agents.map(a => a.session_id))} />}
+      <PokeballAnimationLayer animations={animations} onComplete={onAnimComplete} />
+      {showBrowser && <SessionBrowser
+        onClose={() => setShowBrowser(false)}
+        activeSessionIds={new Set(agents.map(a => a.session_id))}
+        onResume={(id) => setCollapsedIds(prev => { const next = new Set(prev); next.delete(id); return next })}
+      />}
       {showLauncher && <LaunchModal projects={projects} roles={roles} agents={agents} onClose={() => setShowLauncher(false)} />}
-    </div>
+    </>
   )
 }
 

@@ -25,6 +25,12 @@ export async function resumeSession(sessionId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/resume`, { method: 'POST' })
 }
 
+export async function fetchSessionPreview(sessionId: string): Promise<{ user_prompt: string; last_summary: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/preview`)
+  if (!res.ok) return { user_prompt: '', last_summary: '' }
+  return res.json()
+}
+
 export async function focusAgent(sessionId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/focus`, { method: 'POST' })
 }

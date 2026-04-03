@@ -8,11 +8,14 @@ interface SettingsPanelProps {
   onReset: () => void
   onClose: () => void
   onTestMessaging?: () => void
+  onGridDragging?: (dragging: boolean) => void
 }
 
-function Slider({ label, value, min, max, step, unit, onChange }: {
+function Slider({ label, value, min, max, step, unit, onChange, onDragStart, onDragEnd }: {
   label: string; value: number; min: number; max: number; step: number; unit?: string
   onChange: (v: number) => void
+  onDragStart?: () => void
+  onDragEnd?: () => void
 }) {
   return (
     <div className="flex items-center gap-3">
@@ -21,6 +24,8 @@ function Slider({ label, value, min, max, step, unit, onChange }: {
         type="range"
         min={min} max={max} step={step} value={value}
         onChange={e => onChange(Number(e.target.value))}
+        onPointerDown={() => onDragStart?.()}
+        onPointerUp={() => onDragEnd?.()}
         className="flex-1 h-1.5 accent-accent-blue cursor-pointer"
       />
       <span className="text-[10px] font-mono text-white/50 w-12 text-right">{value}{unit || ''}</span>
@@ -82,7 +87,7 @@ function OptionGroup<T extends string>({ label, value, options, onChange }: {
   )
 }
 
-export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging }: SettingsPanelProps) {
+export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging, onGridDragging }: SettingsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -135,23 +140,60 @@ export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, 
           onChange={v => onChange({ fontSize: v })}
         />
 
-        {/* Card Height */}
+        {/* Grid Size */}
         <Slider
-          label="CARD HEIGHT"
-          value={settings.cardHeight}
-          min={160} max={500} step={10}
-          unit="px"
-          onChange={v => onChange({ cardHeight: v })}
+          label="COLUMNS"
+          value={settings.gridCols}
+          min={2} max={8} step={1}
+          onChange={v => onChange({ gridCols: v })}
+          onDragStart={() => onGridDragging?.(true)}
+          onDragEnd={() => onGridDragging?.(false)}
+        />
+        <Slider
+          label="ROWS"
+          value={settings.gridRows}
+          min={1} max={6} step={1}
+          onChange={v => onChange({ gridRows: v })}
+          onDragStart={() => onGridDragging?.(true)}
+          onDragEnd={() => onGridDragging?.(false)}
         />
 
-        {/* Card Width */}
-        <Slider
-          label="MIN WIDTH"
-          value={settings.cardMinWidth}
-          min={200} max={600} step={10}
-          unit="px"
-          onChange={v => onChange({ cardMinWidth: v })}
-        />
+        {/* Default Card Size */}
+        <div>
+          <label className="text-[7px] font-pixel text-white/70 pixel-shadow block mb-1.5">DEFAULT CARD SIZE</label>
+          <div className="flex items-center gap-2">
+            <span className="text-[6px] font-pixel text-white/40 w-8">W</span>
+            <div className="flex gap-1">
+              {[1, 2, 3].map(n => (
+                <button
+                  key={n}
+                  onClick={() => onChange({ defaultCardW: n })}
+                  className={`text-[7px] font-pixel w-6 h-5 rounded transition-colors ${
+                    settings.defaultCardW === n
+                      ? 'bg-accent-blue text-white'
+                      : 'bg-white/10 text-white/50 hover:bg-white/20'
+                  }`}
+                  style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+                >{n}</button>
+              ))}
+            </div>
+            <span className="text-[6px] font-pixel text-white/40 w-8 ml-2">H</span>
+            <div className="flex gap-1">
+              {[1, 2, 3].map(n => (
+                <button
+                  key={n}
+                  onClick={() => onChange({ defaultCardH: n })}
+                  className={`text-[7px] font-pixel w-6 h-5 rounded transition-colors ${
+                    settings.defaultCardH === n
+                      ? 'bg-accent-blue text-white'
+                      : 'bg-white/10 text-white/50 hover:bg-white/20'
+                  }`}
+                  style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+                >{n}</button>
+              ))}
+            </div>
+          </div>
+        </div>
 
         {/* Auto-collapse */}
         <Slider

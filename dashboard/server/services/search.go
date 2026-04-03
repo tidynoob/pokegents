@@ -102,7 +102,13 @@ func (ss *SearchService) createTables() error {
 			tokenize='porter unicode61'
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migrate: add columns added after initial schema (ignore error if already exists)
+	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN last_user_message TEXT`)
+	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN last_assistant_message TEXT`)
+	return nil
 }
 
 // BuildIndex scans all JSONL files and indexes new/modified ones.

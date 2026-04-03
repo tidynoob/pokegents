@@ -172,7 +172,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const isIdle = agent.state === 'idle'
   const isError = agent.state === 'error'
   const ageSeconds = agent.last_updated ? (Date.now() - new Date(agent.last_updated).getTime()) / 1000 : 0
-  const outputText = isBusy ? agent.last_trace : agent.last_summary
+  const isCompacting = agent.detail === 'compacting'
+  const outputText = isCompacting ? null : (isBusy ? agent.last_trace : agent.last_summary)
 
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState(title)
@@ -336,6 +337,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           isBusy={isBusy}
           isDone={isDone}
           isError={isError}
+          isCompacting={isCompacting}
           outputText={outputText}
           compact={compact}
           outputH={outputH}
@@ -385,9 +387,9 @@ function formatElapsed(lastUpdated?: string): string {
   return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
 }
 
-function ActivityBox({ agent, isBusy, isDone, isError, outputText, compact, outputH, textSize }: {
-  agent: AgentState; isBusy: boolean; isDone: boolean; isError: boolean;
-  outputText: string; compact: boolean; outputH: string; textSize: string;
+function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText, compact, outputH, textSize }: {
+  agent: AgentState; isBusy: boolean; isDone: boolean; isError: boolean; isCompacting: boolean;
+  outputText: string | null; compact: boolean; outputH: string; textSize: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const feed = agent.activity_feed
@@ -418,7 +420,11 @@ function ActivityBox({ agent, isBusy, isDone, isError, outputText, compact, outp
         style={{ background: 'rgba(0, 0, 0, 0.45)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)' }}
         onClick={(e) => { e.stopPropagation(); focusAgent(agent.session_id) }}
       >
-      {isBusy && feed && feed.length > 0 ? (
+      {isCompacting ? (
+        <div className="text-[10px] font-mono text-accent-yellow/80 animate-pulse">
+          Compacting conversation history...
+        </div>
+      ) : isBusy && feed && feed.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           {feed.map((item, i) => (
             <div key={i} className={`text-[10px] font-mono leading-snug truncate ${

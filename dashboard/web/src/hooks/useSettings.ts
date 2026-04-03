@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 
 export interface DashboardSettings {
-  cardHeight: number          // default card height in px (160-500)
-  cardMinWidth: number        // min card width in px (240-600)
+  gridRows: number            // grid rows (1-8)
+  gridCols: number            // grid columns (2-10)
+  defaultCardW: number        // default card width in grid cells
+  defaultCardH: number        // default card height in grid cells
   fontSize: 'small' | 'medium' | 'large'
   theme: 'fire-red' | 'classic'
   autoCollapseMinutes: number // 0 = disabled, otherwise minutes
@@ -10,8 +12,10 @@ export interface DashboardSettings {
 }
 
 const DEFAULTS: DashboardSettings = {
-  cardHeight: 250,
-  cardMinWidth: 280,
+  gridRows: 3,
+  gridCols: 4,
+  defaultCardW: 2,
+  defaultCardH: 2,
   fontSize: 'medium',
   theme: 'fire-red',
   autoCollapseMinutes: 15,

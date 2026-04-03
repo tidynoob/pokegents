@@ -141,6 +141,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
 	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
+	s.mux.HandleFunc("GET /api/sessions/{id}/preview", s.handleSessionPreview)
 	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
 	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
@@ -163,6 +164,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/messages/deliver/{id}", s.handleDeliverPending)
 	s.mux.HandleFunc("POST /api/messages/consume/{id}", s.handleConsumePending)
 	s.mux.HandleFunc("GET /api/activity", s.handleGetActivity)
+	s.mux.HandleFunc("GET /api/grid-layout", s.handleGetGridLayout)
+	s.mux.HandleFunc("PUT /api/grid-layout", s.handleSetGridLayout)
+	s.mux.HandleFunc("GET /api/grid-profiles", s.handleListGridProfiles)
+	s.mux.HandleFunc("GET /api/grid-profiles/{name}", s.handleGetGridProfile)
+	s.mux.HandleFunc("PUT /api/grid-profiles/{name}", s.handleSetGridProfile)
+	s.mux.HandleFunc("DELETE /api/grid-profiles/{name}", s.handleDeleteGridProfile)
 
 	// Serve frontend static files
 	if s.webDir != "" {
@@ -260,12 +267,20 @@ func (s *Server) startTracePoller() {
 				}
 				// Update context usage — detect compaction (tokens decrease)
 				ctx := extractContextUsage(transcriptPath)
-				if ctx.Tokens > 0 && ctx.Tokens != a.ContextTokens {
+				if ctx.Tokens > 0 && (ctx.Tokens != a.ContextTokens || ctx.Window != a.ContextWindow) {
 					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && (a.State == "done" || a.State == "idle") {
 						// Context shrunk on a done agent — compaction detected
 						s.state.UpdateSummary(a.SessionID, "Compacted")
 					}
 					s.state.UpdateContext(a.SessionID, ctx.Tokens, ctx.Window)
+					changed = true
+				} else if ctx.Tokens == 0 && a.ContextTokens > 0 {
+					// extractContextUsage returned 0 — the compact_boundary trimming found
+					// no assistant entries after the last compact. Reset HP bar immediately.
+					s.state.UpdateContext(a.SessionID, 0, a.ContextWindow)
+					if a.LastSummary != "Compacted" {
+						s.state.UpdateSummary(a.SessionID, "Compacted")
+					}
 					changed = true
 				}
 				// Update trace and activity feed for busy agents
@@ -460,6 +475,89 @@ func (s *Server) handleSetAgentOrder(w http.ResponseWriter, r *http.Request) {
 	s.state.SetAgentOrder(order)
 	// Broadcast reordered state
 	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ── Grid Layout Persistence ────────────────────────────────
+
+func (s *Server) gridLayoutPath() string {
+	return filepath.Join(s.state.dataDir, "grid-layout.json")
+}
+
+func (s *Server) gridProfilesDir() string {
+	return filepath.Join(s.state.dataDir, "grid-profiles")
+}
+
+func (s *Server) handleGetGridLayout(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(s.gridLayoutPath())
+	if err != nil {
+		writeJSON(w, map[string]any{"settings": nil, "layouts": map[string]any{}})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) handleSetGridLayout(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := os.WriteFile(s.gridLayoutPath(), data, 0644); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleListGridProfiles(w http.ResponseWriter, r *http.Request) {
+	dir := s.gridProfilesDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		writeJSON(w, map[string]any{"profiles": []string{}})
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+		}
+	}
+	writeJSON(w, map[string]any{"profiles": names})
+}
+
+func (s *Server) handleGetGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path := filepath.Join(s.gridProfilesDir(), name+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) handleSetGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	dir := s.gridProfilesDir()
+	os.MkdirAll(dir, 0755)
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0644); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDeleteGridProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	os.Remove(filepath.Join(s.gridProfilesDir(), name+".json"))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -1178,6 +1276,20 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 	reader := store.NewTranscriptReader(s.state.claudeProjectDir)
 	page := reader.ParseTranscript(path, tail, afterUUID)
 	writeJSON(w, page)
+}
+
+func (s *Server) handleSessionPreview(w http.ResponseWriter, r *http.Request) {
+	sessionID := s.resolveSessionID(r.PathValue("id"))
+	path := s.state.FindTranscriptPath(sessionID)
+	if path == "" {
+		writeJSON(w, map[string]string{"user_prompt": "", "last_summary": ""})
+		return
+	}
+	userPrompt, lastSummary := extractLastMessages(path)
+	writeJSON(w, map[string]string{
+		"user_prompt":  userPrompt,
+		"last_summary": lastSummary,
+	})
 }
 
 func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {

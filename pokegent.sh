@@ -79,9 +79,10 @@ Commands:
   edit role <name>    Edit a role config
   edit <profile>      Edit a legacy profile config
   dashboard           Open the dashboard (default)
+  dashboard build     Build server + frontend, restart dashboard (no session restart)
   dashboard start     Start the dashboard server
   dashboard stop      Stop the dashboard server
-  dashboard restart   Restart the dashboard server
+  dashboard restart   Restart the dashboard server (no rebuild)
   reload              Stop all sessions, rebuild dashboard, relaunch everything
   doctor              Verify installation health (deps, hooks, MCP, dashboard)
   -h, --help          Show this help message
@@ -149,8 +150,39 @@ HELP
       restart)
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &
+        "$dashboard_bin" serve &>/dev/null &
+        disown
         echo "Dashboard restarted at http://localhost:$POKEGENTS_PORT"
+        ;;
+      build)
+        echo "=== Dashboard Build ==="
+        echo ""
+        # Build Go server
+        echo "Building server..."
+        if (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard . 2>&1); then
+          echo "  ✓ Server built"
+        else
+          echo "  ✗ Server build FAILED"
+          return 1
+        fi
+        # Build frontend
+        echo "Building frontend..."
+        if (cd "$POKEGENTS_ROOT/dashboard/web" && npm run build 2>&1 | tail -3); then
+          echo "  ✓ Frontend built"
+        else
+          echo "  ✗ Frontend build FAILED"
+          return 1
+        fi
+        # Restart server
+        echo ""
+        echo "Restarting dashboard..."
+        _pokegent_kill_dashboard
+        sleep 0.5
+        "$dashboard_bin" serve &>/dev/null &
+        disown
+        echo "  ✓ Dashboard running at http://localhost:$POKEGENTS_PORT"
+        echo ""
+        echo "=== Build complete ==="
         ;;
       open|"")
         # Open as standalone app window (separate Dock/Cmd+Tab entry)
@@ -471,9 +503,11 @@ if last_title: print(last_title)
     fi
   fi
 
-  # Set tab title (works on most terminals) and clear screen
+  # Set tab title (works on most terminals) and clear visible screen.
+  # Use printf directly rather than `clear` — on macOS, /usr/bin/clear emits
+  # \e[3J (erase scrollback) before \e[2J, which destroys terminal history.
   echo -ne "\033]0;$display_name\007"
-  clear
+  printf '\e[H\e[2J'
 
   # Generate session ID
   local session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
@@ -527,14 +561,22 @@ if last_title: print(last_title)
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
       local dyn_profile="$dyn_profile_dir/pokegents-session-${session_id}.json"
       local profile_guid="CCD-SESSION-${session_id}"
-      # Inherit from the project/profile's iTerm2 profile, or "General" (iTerm2's built-in default)
-      local parent_profile="${_iterm2_profile:-General}"
+      # Inherit from the project/profile's iTerm2 profile if it exists in ccd-profiles.json.
+      # If not found (or not set), omit "Dynamic Profile Parent Name" entirely — iTerm2
+      # will use the default profile, which works on any setup without hardcoded names.
+      local parent_profile=""
+      if [[ -n "$_iterm2_profile" ]]; then
+        local _ccd_profiles_json="$dyn_profile_dir/ccd-profiles.json"
+        if [[ -f "$_ccd_profiles_json" ]] && jq -e --arg p "$_iterm2_profile" '.Profiles[] | select(.Name == $p)' "$_ccd_profiles_json" > /dev/null 2>&1; then
+          parent_profile="$_iterm2_profile"
+        fi
+      fi
       jq -n \
         --arg name "CCD Session: $display_name" \
         --arg guid "$profile_guid" \
         --arg parent "$parent_profile" \
         --arg icon_path "$abs_sprite_path" \
-        '{Profiles: [{Name: $name, Guid: $guid, "Dynamic Profile Parent Name": $parent, Icon: 2, "Custom Icon Path": $icon_path}]}' \
+        '{Profiles: [{Name: $name, Guid: $guid} + (if $parent != "" then {"Dynamic Profile Parent Name": $parent} else {} end) + {Icon: 2, "Custom Icon Path": $icon_path}]}' \
         > "$dyn_profile"
       # Small delay for iTerm2 to detect the new profile, then switch to it
       sleep 0.3
@@ -610,12 +652,19 @@ if last_title: print(last_title)
         rm -f "$running_file"
         return 1
       elif [[ ${#matches[@]} -gt 1 ]]; then
-        echo "Ambiguous prefix '$resume_session_id' — matches ${#matches[@]} sessions:"
-        for i in {1..${#matches[@]}}; do
-          echo "  ${matches[$i]}  ($(basename "${match_dirs[$i]}"))"
-        done
-        rm -f "$running_file"
-        return 1
+        # Deduplicate: same session ID can appear in multiple project dirs (e.g. worktrees).
+        # If all matches resolve to the same session ID, it's not truly ambiguous.
+        local unique_ids=("${(@u)matches}")
+        if [[ ${#unique_ids[@]} -gt 1 ]]; then
+          echo "Ambiguous prefix '$resume_session_id' — matches ${#unique_ids[@]} sessions:"
+          for i in {1..${#unique_ids[@]}}; do
+            echo "  ${unique_ids[$i]}"
+          done
+          rm -f "$running_file"
+          return 1
+        fi
+        # All matches are the same session ID — just use first match
+        matches=("${unique_ids[1]}")
       fi
       claude_args+=(--resume "${matches[1]}")
       rm -f "$running_file"

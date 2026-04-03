@@ -38,12 +38,14 @@ type MessagingService struct {
 	isSessionFocused IsSessionFocusedFunc
 
 	// Nudger state
-	mu         sync.Mutex
-	pending    map[string]*time.Timer // session_id → scheduled nudge
-	lastNudge  map[string]time.Time   // session_id → last nudge time
-	debounce   time.Duration
-	batchDelay time.Duration
-	minIdle    time.Duration
+	mu           sync.Mutex
+	pending      map[string]*time.Timer // session_id → scheduled nudge
+	lastNudge    map[string]time.Time   // session_id → last nudge time
+	focusRetries map[string]int         // session_id → focus-defer retry count
+	debounce     time.Duration
+	batchDelay   time.Duration
+	minIdle      time.Duration
+	maxFocusRetries int
 }
 
 // NewMessagingService creates a messaging service with injected dependencies.
@@ -53,11 +55,13 @@ func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgen
 		writeText:        writeText,
 		getAgent:         getAgent,
 		isSessionFocused: isFocused,
-		pending:    make(map[string]*time.Timer),
-		lastNudge:  make(map[string]time.Time),
-		debounce:   10 * time.Second,
-		batchDelay: 2 * time.Second,
-		minIdle:    3 * time.Second,
+		pending:          make(map[string]*time.Timer),
+		lastNudge:        make(map[string]time.Time),
+		focusRetries:     make(map[string]int),
+		debounce:         5 * time.Second,
+		batchDelay:       500 * time.Millisecond,
+		minIdle:          1 * time.Second,
+		maxFocusRetries:  3,
 	}
 }
 
@@ -200,19 +204,29 @@ func (s *MessagingService) executeNudge(sessionID string) {
 		return
 	}
 
-	// Don't nudge if user is actively typing in this terminal
+	// Don't nudge if user is actively typing in this terminal — but limit retries.
+	// After maxFocusRetries deferrals, nudge anyway (Ctrl+U makes it safe).
 	if s.isSessionFocused != nil && s.isSessionFocused(agent.ITermSessionID, agent.TTY) {
-		log.Printf("nudger: defer %s — session is focused (user may be typing)", sessionID[:8])
 		s.mu.Lock()
-		s.pending[sessionID] = time.AfterFunc(5*time.Second, func() {
-			s.executeNudge(sessionID)
-		})
+		retries := s.focusRetries[sessionID]
+		if retries < s.maxFocusRetries {
+			s.focusRetries[sessionID] = retries + 1
+			log.Printf("nudger: defer %s — session focused (retry %d/%d)", sessionID[:8], retries+1, s.maxFocusRetries)
+			s.pending[sessionID] = time.AfterFunc(2*time.Second, func() {
+				s.executeNudge(sessionID)
+			})
+			s.mu.Unlock()
+			return
+		}
+		// Max retries hit — nudge anyway, clear retry counter
+		delete(s.focusRetries, sessionID)
+		log.Printf("nudger: focus-retry limit reached for %s — nudging anyway", sessionID[:8])
 		s.mu.Unlock()
-		return
 	}
 
 	s.mu.Lock()
 	s.lastNudge[sessionID] = time.Now()
+	delete(s.focusRetries, sessionID)
 	s.mu.Unlock()
 
 	short := sessionID

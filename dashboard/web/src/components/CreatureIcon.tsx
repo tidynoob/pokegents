@@ -41,6 +41,7 @@ export function CreatureIcon({ sessionId, size = 40, noGlow, doneFlash, spriteOv
         onClick={editable ? (e) => { e.stopPropagation(); setShowPicker(true) } : undefined}
       >
         <img
+          className="creature-sprite"
           src={`/sprites/${sprite}.png`}
           alt={sprite}
           style={{
