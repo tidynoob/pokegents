@@ -433,6 +433,20 @@ export default function App() {
           <div className="flex-1" />
           <div className="flex items-center gap-2">
             <button
+              onClick={() => gridEngine.compactUp()}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              title="Move cards up to fill gaps"
+            >
+              TIDY UP
+            </button>
+            <button
+              onClick={() => gridEngine.resetSizes()}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              title="Reset all cards to default size"
+            >
+              RESET
+            </button>
+            <button
               onClick={() => setShowLauncher(true)}
               className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
             >
