@@ -48,7 +48,7 @@ echo "✓ Dependencies checked"
 echo ""
 
 # ── 1. Create data directories ──────────────────────────────────────────
-mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages}
+mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages,grid-profiles,activity,activity-lastread}
 echo "✓ Data directories ready"
 
 # ── 2. Copy default config (if not present) ──────────────────────────────

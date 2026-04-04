@@ -52,20 +52,20 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
     >
       <button
         onClick={() => { setHovered(false); onExpand() }}
-        className="relative w-8 h-8 flex items-center justify-center group"
+        className="relative flex items-center justify-center group" style={{ width: 32, height: 32 }}
         title={`${agent.display_name} — click to expand`}
       >
         <img
           src="/sprites/pokeball.png"
           alt=""
-          className="absolute w-7 h-7 opacity-40 group-hover:opacity-70 transition-opacity"
-          style={{ imageRendering: 'pixelated' }}
+          className="absolute opacity-50 group-hover:opacity-80 transition-opacity"
+          style={{ imageRendering: 'pixelated', width: 32, height: 32 }}
         />
         <img
           src={`/sprites/${sprite}.png`}
           alt=""
           className="relative z-10"
-          style={{ imageRendering: 'pixelated', transform: 'scale(1.2)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
+          style={{ imageRendering: 'pixelated', transform: 'scale(0.8)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
           onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
           onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
         />
@@ -244,7 +244,13 @@ export default function App() {
   }, [agents])
 
   // Track manually expanded agents so auto-collapse doesn't immediately re-collapse them
-  const manualExpandRef = useRef<Set<string>>(new Set())
+  const manualExpandRef = useRef<Set<string>>(
+    (() => { try { return new Set<string>(JSON.parse(localStorage.getItem('pokegents-manual-expand') || '[]')) } catch { return new Set<string>() } })()
+  )
+
+  const persistManualExpand = () => {
+    localStorage.setItem('pokegents-manual-expand', JSON.stringify([...manualExpandRef.current]))
+  }
 
   // Auto-collapse after 15 min of inactivity (idle/done only), auto-expand when busy/needs_input
   useEffect(() => {
@@ -268,7 +274,7 @@ export default function App() {
         }
         if (active) {
           toExpand.push(a.session_id)
-          manualExpandRef.current.delete(a.session_id) // reset manual flag when agent becomes active
+          manualExpandRef.current.delete(a.session_id); persistManualExpand() // reset manual flag when agent becomes active
         }
       }
 
@@ -533,58 +539,17 @@ export default function App() {
     <div className="h-screen flex flex-col p-3 overflow-hidden relative z-10">
       {/* Header — hidden in compact mode */}
       {showHeader && (
-        <div className="flex items-center justify-between shrink-0 mb-2">
+        <div className="flex items-center shrink-0 mb-2">
           <div className="flex items-center gap-3">
             <h1 className="text-[10px] font-pixel text-white pixel-shadow">POKéGENTS</h1>
             <span className="text-[8px] font-pixel text-white/50">
-              {agents.length} active
+              {agents.length - collapsedAgents.length} active{collapsedAgents.length > 0 && <>, {collapsedAgents.length} idle</>}
               <span className={`ml-1.5 ${connected ? 'text-accent-green' : 'text-accent-red'}`}>●</span>
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowLauncher(true)}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
-            >
-              NEW AGENT
-            </button>
-            <button
-              onClick={() => setShowBrowser(true)}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
-            >
-              PC BOX
-            </button>
-            <div className="relative" ref={settingsRef}>
-              <button
-                onClick={() => setShowSettings(v => !v)}
-                className="gba-button text-[7px] font-pixel px-2.5 py-1.5 transition-colors"
-                title="Settings"
-              >
-                SETTINGS
-              </button>
-              {showSettings && (
-                <SettingsPanel
-                  settings={settings}
-                  defaults={DEFAULTS}
-                  onChange={setSettings}
-                  onReset={resetSettings}
-                  onClose={() => setShowSettings(false)}
-                  onTestMessaging={triggerTestDelivery}
-                  onGridDragging={setGridSliderDragging}
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Collapsed agent + group bubbles */}
-      {(collapsedAgents.length > 0 || collapsedGroupNames.length > 0) && (
-        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-          {/* Group bubbles */}
+          {/* Group bubbles — inline in header */}
           {collapsedGroupNames.map(groupName => {
             const members = grouped[groupName] || []
-            // Use coordinator's sprite, or first member's sprite
             const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
             const primaryAgent = coord || members[0]
             const sprite = primaryAgent ? getSpriteForId(primaryAgent.session_id) : 'pokeball'
@@ -598,7 +563,9 @@ export default function App() {
               />
             )
           })}
-          {/* Individual agent bubbles */}
+          {/* Collapsed pokeballs inline */}
+          {collapsedAgents.length > 0 && (
+            <div className="flex items-center gap-1.5 ml-6">
           {collapsedAgents.map(agent => {
             const sprite = getSpriteForId(agent.session_id)
             return (
@@ -638,18 +605,70 @@ export default function App() {
                           }
                           return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
                         })()
-                    triggerDeploy(agent.session_id, sprite, bubbleSource, targetRect, () => {
-                      manualExpandRef.current.add(agent.session_id)
+                    const doExpand = () => {
+                      manualExpandRef.current.add(agent.session_id); persistManualExpand()
                       setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
-                    })
+                    }
+                    triggerDeploy(agent.session_id, sprite, bubbleSource, targetRect, () => {}, doExpand)
                   } else {
-                    manualExpandRef.current.add(agent.session_id)
+                    manualExpandRef.current.add(agent.session_id); persistManualExpand()
                     setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
                   }
                 }}
               />
             )
           })}
+            </div>
+          )}
+          <div className="flex-1" />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => gridEngine.compactUp()}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              title="Move cards up to fill gaps"
+            >
+              TIDY UP
+            </button>
+            <button
+              onClick={() => gridEngine.resetSizes()}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              title="Reset all cards to default size"
+            >
+              RESET
+            </button>
+            <button
+              onClick={() => setShowLauncher(true)}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+            >
+              NEW AGENT
+            </button>
+            <button
+              onClick={() => setShowBrowser(true)}
+              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+            >
+              PC BOX
+            </button>
+            <div className="relative" ref={settingsRef}>
+              <button
+                onClick={() => setShowSettings(v => !v)}
+                className="gba-button text-[7px] font-pixel px-2.5 py-1.5 transition-colors"
+                title="Settings"
+              >
+                SETTINGS
+              </button>
+              {showSettings && (
+                <SettingsPanel
+                  settings={settings}
+                  defaults={DEFAULTS}
+                  onChange={setSettings}
+                  onReset={resetSettings}
+                  onClose={() => setShowSettings(false)}
+                  onTestMessaging={triggerTestDelivery}
+                  onGridDragging={setGridSliderDragging}
+                />
+              )}
+            </div>
+          </div>
         </div>
       )}
 

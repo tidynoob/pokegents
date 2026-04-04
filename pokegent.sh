@@ -137,7 +137,7 @@ HELP
     case "${2:-open}" in
       start)
         if [[ ! -f "$dashboard_bin" ]]; then
-          echo "Dashboard not built. Run: cd $POKEGENTS_ROOT/dashboard && make build"
+          echo "Dashboard not built. Run: pokegent dashboard build"
           return 1
         fi
         POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &
