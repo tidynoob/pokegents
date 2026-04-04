@@ -140,7 +140,7 @@ HELP
           echo "Dashboard not built. Run: cd $POKEGENTS_ROOT/dashboard && make build"
           return 1
         fi
-        "$dashboard_bin" serve &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &
         echo "Dashboard started at http://localhost:$POKEGENTS_PORT"
         ;;
       stop)
@@ -150,7 +150,7 @@ HELP
       restart)
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &>/dev/null &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &>/dev/null &
         disown
         echo "Dashboard restarted at http://localhost:$POKEGENTS_PORT"
         ;;
@@ -178,7 +178,7 @@ HELP
         echo "Restarting dashboard..."
         _pokegent_kill_dashboard
         sleep 0.5
-        "$dashboard_bin" serve &>/dev/null &
+        POKEGENTS_DATA="$POKEGENTS_DATA" "$dashboard_bin" serve &>/dev/null &
         disown
         echo "  ✓ Dashboard running at http://localhost:$POKEGENTS_PORT"
         echo ""
@@ -402,6 +402,7 @@ ${_role_prompt}"
   local continue_mode=false
   local resume_session_id=""
   local fork_session=false
+  local task_group=""
   local filtered_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -417,6 +418,15 @@ ${_role_prompt}"
         fork_session=true
         filtered_args+=("$1")
         shift
+        ;;
+      --group|-g)
+        if [[ -n "$2" && "$2" != -* ]]; then
+          task_group="$2"
+          shift 2
+        else
+          echo "Error: --group requires a name argument"
+          return 1
+        fi
         ;;
       --worktree|-w)
         if [[ -n "$2" ]]; then
@@ -611,7 +621,8 @@ if last_title: print(last_title)
     --arg ccd_sid "$session_id" \
     --arg iterm_sid "$iterm_sid" \
     --arg created_at "$created_at" \
-    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
+    --arg task_group "${task_group:-}" \
+    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group}' \
     > "$running_file"
 
   # Build claude args — skip_permissions: role override > legacy profile > global config
@@ -683,6 +694,14 @@ if last_title: print(last_title)
       # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
       local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
+      # Inherit task_group from original session on fork (if not explicitly set)
+      if [[ "$fork_session" == "true" && -z "$task_group" ]]; then
+        local orig_rf=$(ls "$RUNNING_DIR"/*-${matches[1]}.json 2>/dev/null | head -1)
+        if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
+          task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
+        fi
+      fi
+
       running_file="$RUNNING_DIR/${profile_name}-${session_id}.json"
       jq -n \
         --arg profile "$profile_name" \
@@ -695,7 +714,8 @@ if last_title: print(last_title)
         --arg ccd_sid "$ccd_session_id" \
         --arg iterm_sid "$iterm_sid" \
         --arg created_at "$created_at" \
-        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at}' \
+        --arg task_group "${task_group:-}" \
+        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "

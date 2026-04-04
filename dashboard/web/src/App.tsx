@@ -3,8 +3,9 @@ import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
 import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
-import { AgentCard } from './components/AgentCard'
+import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
+import { GroupContainer } from './components/GroupContainer'
 import { SessionBrowser } from './components/SessionBrowser'
 import { hashString } from './components/CreatureIcon'
 import { POKEMON_SPRITES } from './components/sprites'
@@ -104,6 +105,72 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
   )
 }
 
+function CollapsedGroupBubble({ name, members, sprite, onExpand }: {
+  name: string; members: AgentState[]; sprite: string; onExpand: () => void
+}) {
+  const [hovered, setHovered] = useState(false)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const idx = Math.abs(hashString(name)) % GROUP_COLORS.length
+  const [r, g, b] = GROUP_COLORS[idx]
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => { hoverTimer.current = setTimeout(() => setHovered(true), 300) }}
+      onMouseLeave={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); setHovered(false) }}
+    >
+      <button
+        onClick={() => { setHovered(false); onExpand() }}
+        className="relative w-8 h-8 flex items-center justify-center group"
+        title={`${name} — ${members.length} agents — click to open`}
+      >
+        <div
+          className="absolute inset-0 rounded-full opacity-40 group-hover:opacity-70 transition-opacity"
+          style={{ background: `radial-gradient(circle, rgba(${r},${g},${b},0.5) 0%, rgba(${r},${g},${b},0.1) 70%)` }}
+        />
+        <img
+          src={`/sprites/${sprite}.png`}
+          alt=""
+          className="relative z-10"
+          style={{ imageRendering: 'pixelated', transform: 'scale(1.2)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
+          onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
+          onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
+        />
+        {/* Count badge */}
+        <span
+          className="absolute -bottom-0.5 -right-0.5 z-20 text-[6px] font-pixel text-white rounded-full px-1 leading-tight"
+          style={{ background: `rgb(${r},${g},${b})`, textShadow: '1px 1px 0 rgba(0,0,0,0.5)' }}
+        >{members.length}</span>
+      </button>
+
+      {/* Hover tooltip */}
+      {hovered && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 pointer-events-none"
+          style={{ animation: 'fadeIn 0.15s ease' }}
+        >
+          <div className="gba-card rounded-lg px-3 py-2 border border-white/10 min-w-[140px] max-w-[200px]"
+            style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.6)' }}
+          >
+            <div className="text-[8px] font-pixel pixel-shadow uppercase mb-1" style={{ color: `rgb(${r},${g},${b})` }}>{name}</div>
+            {members.map(m => {
+              const st = STATUS_PILLS[m.state] || STATUS_PILLS.idle
+              return (
+                <div key={m.session_id} className="flex items-center gap-1.5 py-0.5">
+                  <span
+                    className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
+                    style={{ backgroundColor: st.bg, textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+                  >{st.label}</span>
+                  <span className="text-[7px] font-pixel text-white/60 truncate">{m.display_name || m.profile_name}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const { settings, setSettings, reset: resetSettings, DEFAULTS } = useSettings()
   const { agents: sseAgents, connections: sseConnections, newMessage, connected } = useSSE()
@@ -119,6 +186,12 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useState(false)
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
+  const [groupViewModes, setGroupViewModes] = useState<Record<string, 'collapsed' | 'single' | 'expanded'>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('pokegents-group-view-modes') || '{}')
+    } catch { return {} }
+  })
+  const [groupPageIndex, setGroupPageIndex] = useState<Record<string, number>>({})
   const { animations, triggerRecall, triggerDeploy, onComplete: onAnimComplete } = usePokeballAnimations()
   const bubbleRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
@@ -147,6 +220,29 @@ export default function App() {
     localStorage.setItem('pokegents-collapsed', JSON.stringify([...collapsedIds]))
   }, [collapsedIds])
 
+  // Persist group view modes
+  useEffect(() => {
+    localStorage.setItem('pokegents-group-view-modes', JSON.stringify(groupViewModes))
+  }, [groupViewModes])
+
+  // Auto-collapse new groups on first appearance (seed existing groups on first load)
+  const knownGroupsRef = useRef<Set<string>>(new Set())
+  const knownGroupsInitialized = useRef(false)
+  useEffect(() => {
+    const currentGroups = new Set(agents.filter(a => a.task_group).map(a => a.task_group!))
+    if (!knownGroupsInitialized.current && currentGroups.size > 0) {
+      knownGroupsInitialized.current = true
+      knownGroupsRef.current = currentGroups
+      return // don't treat existing groups as new on first load
+    }
+    for (const g of currentGroups) {
+      if (!knownGroupsRef.current.has(g)) {
+        knownGroupsRef.current.add(g)
+        setGroupViewModes(prev => ({ ...prev, [g]: 'collapsed' }))
+      }
+    }
+  }, [agents])
+
   // Track manually expanded agents so auto-collapse doesn't immediately re-collapse them
   const manualExpandRef = useRef<Set<string>>(new Set())
 
@@ -161,6 +257,8 @@ export default function App() {
       const toExpand: string[] = []
 
       for (const a of agents) {
+        // Skip grouped agents — they're managed by GroupContainer, not pokéball collapse
+        if (a.task_group) continue
         const age = a.last_updated ? now - new Date(a.last_updated).getTime() : 0
         const inactive = a.state === 'idle' || a.state === 'done'
         const active = a.state === 'busy' || a.state === 'needs_input'
@@ -183,18 +281,40 @@ export default function App() {
           return next
         })
       }
+
+      // Auto-expand groups when any member enters needs_input → switch to 'single' at that agent
+      const groupUpdates: Record<string, number> = {}
+      for (const a of agents) {
+        if (a.state === 'needs_input' && a.task_group &&
+            (groupViewModes[a.task_group] || 'collapsed') === 'collapsed') {
+          // Find index of this agent in its group
+          const members = agents.filter(m => m.task_group === a.task_group)
+          const idx = members.findIndex(m => m.session_id === a.session_id)
+          groupUpdates[a.task_group] = Math.max(idx, 0)
+        }
+      }
+      if (Object.keys(groupUpdates).length > 0) {
+        setGroupViewModes(prev => {
+          const next = { ...prev }
+          for (const g of Object.keys(groupUpdates)) next[g] = 'single'
+          return next
+        })
+        setGroupPageIndex(prev => ({ ...prev, ...groupUpdates }))
+      }
     }
 
     check()
     const iv = setInterval(check, 30000)
     return () => clearInterval(iv)
-  }, [agents, settings.autoCollapseMinutes])
+  }, [agents, settings.autoCollapseMinutes, groupViewModes])
 
   const msgLogRef = useRef<HTMLDivElement>(null)
   const actLogRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const groupSingleRects = useRef<Record<string, { w: number; h: number }>>({})
+  const groupExpandedRects = useRef<Record<string, { w: number; h: number }>>({})
   // useMessageAnimations moved below getSpriteForId (needs it as dependency)
-  // Layout computed after visibleAgents (below)
+  // Layout computed after gridIds (below)
   // showHeader computed after layout (below)
 
   useEffect(() => {
@@ -248,12 +368,45 @@ export default function App() {
     }
   }, [newMessage])
 
-  const baseVisible = useMemo(() => agents.filter(a => !collapsedIds.has(a.session_id)), [agents, collapsedIds])
-  const collapsedAgents = useMemo(() => agents.filter(a => collapsedIds.has(a.session_id)), [agents, collapsedIds])
-  const visibleAgents = baseVisible
-  const visibleIds = useMemo(() => visibleAgents.map(a => a.session_id), [visibleAgents])
+  // Split agents into grouped and ungrouped
+  const { grouped, ungrouped } = useMemo(() => {
+    const grouped: Record<string, AgentState[]> = {}
+    const ungrouped: AgentState[] = []
+    agents.forEach(a => {
+      if (a.task_group) {
+        (grouped[a.task_group] ??= []).push(a)
+      } else {
+        ungrouped.push(a)
+      }
+    })
+    return { grouped, ungrouped }
+  }, [agents])
 
-  const gridEngine = useGridEngine(visibleIds, {
+  // Ungrouped: filter collapsed for pokéball bubbles
+  const visibleUngrouped = useMemo(() => ungrouped.filter(a => !collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
+  const collapsedAgents = useMemo(() => ungrouped.filter(a => collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
+
+  // Collapsed group names (rendered as bubbles, not grid items)
+  const collapsedGroupNames = useMemo(() =>
+    Object.keys(grouped).filter(g => (groupViewModes[g] || 'collapsed') === 'collapsed'),
+    [grouped, groupViewModes]
+  )
+
+  // Grid IDs: open group virtual IDs + ungrouped agent IDs
+  const gridIds = useMemo(() => {
+    const ids: string[] = []
+    for (const groupName of Object.keys(grouped).sort()) {
+      if ((groupViewModes[groupName] || 'collapsed') !== 'collapsed') {
+        ids.push(`group:${groupName}`)
+      }
+    }
+    for (const a of visibleUngrouped) {
+      ids.push(a.session_id)
+    }
+    return ids
+  }, [grouped, visibleUngrouped, groupViewModes])
+
+  const gridEngine = useGridEngine(gridIds, {
     rows: settings.gridRows,
     cols: settings.gridCols,
     defaultCardW: settings.defaultCardW ?? 2,
@@ -262,6 +415,27 @@ export default function App() {
   // Show header when cells are tall enough for standard mode
   const showHeader = gridEngine.cellH >= 140
   const isCompact = gridEngine.cellH < 120
+
+  // Auto-adjust expanded group height when width changes (user manual resize)
+  // Mental model: group height in grid units = cardRows * singleH (always exact)
+  useEffect(() => {
+    for (const [groupName, members] of Object.entries(grouped)) {
+      if ((groupViewModes[groupName] || 'collapsed') !== 'expanded') continue
+      const groupId = `group:${groupName}`
+      const rect = gridEngine.layouts[groupId]
+      const singleRect = groupSingleRects.current[groupName]
+      if (!rect || !singleRect) continue
+
+      const cols = Math.max(1, Math.floor(rect.w / singleRect.w))
+      const rows = Math.ceil(members.length / cols)
+      const neededH = rows * singleRect.h
+
+      if (rect.h !== neededH) {
+        gridEngine.resizeItem(groupId, rect.w, neededH)
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gridEngine.layouts, gridEngine.resizeState, grouped, groupViewModes])
 
 
   // Map any ID → ccd_session_id (for sprite hashing — matches pokegent.sh which hashes the ccd UUID)
@@ -347,12 +521,12 @@ export default function App() {
   }, [showBrowser])
 
 
-  // Agent lookup for rendering cards in GridContainer
+  // Agent lookup for rendering cards in GridContainer (includes all agents for group members)
   const agentMap = useMemo(() => {
     const m: Record<string, AgentState> = {}
-    for (const a of visibleAgents) m[a.session_id] = a
+    for (const a of agents) m[a.session_id] = a
     return m
-  }, [visibleAgents])
+  }, [agents])
 
   return (
     <>
@@ -404,9 +578,27 @@ export default function App() {
         </div>
       )}
 
-      {/* Collapsed agent bubbles */}
-      {collapsedAgents.length > 0 && (
+      {/* Collapsed agent + group bubbles */}
+      {(collapsedAgents.length > 0 || collapsedGroupNames.length > 0) && (
         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+          {/* Group bubbles */}
+          {collapsedGroupNames.map(groupName => {
+            const members = grouped[groupName] || []
+            // Use coordinator's sprite, or first member's sprite
+            const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
+            const primaryAgent = coord || members[0]
+            const sprite = primaryAgent ? getSpriteForId(primaryAgent.session_id) : 'pokeball'
+            return (
+              <CollapsedGroupBubble
+                key={`group:${groupName}`}
+                name={groupName}
+                members={members}
+                sprite={sprite}
+                onExpand={() => setGroupViewModes(prev => ({ ...prev, [groupName]: 'single' }))}
+              />
+            )
+          })}
+          {/* Individual agent bubbles */}
           {collapsedAgents.map(agent => {
             const sprite = getSpriteForId(agent.session_id)
             return (
@@ -474,11 +666,84 @@ export default function App() {
       ) : (
         <GridContainer
           engine={gridEngine}
-          agentIds={visibleIds}
+          agentIds={gridIds}
           showHeader={showHeader}
           showGridLines={gridSliderDragging}
         >
           {(id, rect, cardMode) => {
+            // Group container
+            if (id.startsWith('group:')) {
+              const groupName = id.slice(6)
+              const members = grouped[groupName]
+              if (!members) return null
+              const pixelW = rect.w * gridEngine.cellW + (rect.w - 1) * 8
+              const pixelH = rect.h * gridEngine.cellH + (rect.h - 1) * 8
+              const sr = groupSingleRects.current[groupName]
+              const singleCardPixelW = sr ? sr.w * gridEngine.cellW + (sr.w - 1) * 8 : undefined
+              const singleCardPixelH = sr ? sr.h * gridEngine.cellH + (sr.h - 1) * 8 : undefined
+              return (
+                <GroupContainer
+                  name={groupName}
+                  members={members}
+                  viewMode={(groupViewModes[groupName] === 'expanded' ? 'expanded' : 'single')}
+                  pageIndex={groupPageIndex[groupName] || 0}
+                  onSetViewMode={(mode) => {
+                    setGroupViewModes(prev => ({ ...prev, [groupName]: mode }))
+                    if (mode === 'expanded') {
+                      // Save single-view rect as card unit
+                      groupSingleRects.current[groupName] = { w: rect.w, h: rect.h }
+                      // Restore previous expanded config if available
+                      const saved = groupExpandedRects.current[groupName]
+                      const sr = groupSingleRects.current[groupName] || { w: rect.w, h: rect.h }
+                      if (saved) {
+                        // Clamp width to available space at current position
+                        const maxW = gridEngine.settings.cols - rect.col + 1
+                        const clampedW = Math.min(saved.w, maxW)
+                        if (clampedW !== saved.w) {
+                          // Recalculate height: more rows needed since fewer columns
+                          const savedCols = Math.max(1, Math.floor(saved.w / sr.w))
+                          const newCols = Math.max(1, Math.floor(clampedW / sr.w))
+                          const savedRows = Math.ceil(members.length / savedCols)
+                          const newRows = Math.ceil(members.length / newCols)
+                          const newH = Math.round(saved.h * newRows / savedRows)
+                          gridEngine.resizeItem(id, clampedW, newH)
+                        } else {
+                          gridEngine.resizeItem(id, saved.w, saved.h)
+                        }
+                      } else {
+                        // Default: single column, height = memberCount * singleH
+                        gridEngine.resizeItem(id, rect.w, members.length * rect.h)
+                      }
+                    } else if (mode === 'single') {
+                      // Save expanded rect for next time
+                      groupExpandedRects.current[groupName] = { w: rect.w, h: rect.h }
+                      // Restore single-view rect
+                      const sr = groupSingleRects.current[groupName]
+                      if (sr) {
+                        gridEngine.resizeItem(id, sr.w, sr.h)
+                      } else {
+                        gridEngine.resizeItem(id, rect.w, gridEngine.settings.defaultCardH)
+                      }
+                    }
+                  }}
+                  onSetPageIndex={(idx) => setGroupPageIndex(prev => ({ ...prev, [groupName]: idx }))}
+                  onMinimize={() => setGroupViewModes(prev => ({ ...prev, [groupName]: 'collapsed' }))}
+                  cols={rect.w}
+                  cardMode={cardMode}
+                  pixelW={pixelW}
+                  pixelH={pixelH}
+                  singleCardPixelW={singleCardPixelW}
+                  singleCardPixelH={singleCardPixelH}
+                  spriteOverrides={spriteOverrides}
+                  resolveToSpriteId={resolveToSpriteId}
+                  readingAgents={readingAgents}
+                  projects={projects}
+                  roles={roles}
+                />
+              )
+            }
+
+            // Regular agent card
             const agent = agentMap[id]
             if (!agent) return null
             return (
@@ -496,18 +761,15 @@ export default function App() {
                 onCollapse={() => {
                   const cardEl = cardRefs.current.get(agent.session_id)
                   if (cardEl) {
-                    // Find the actual sprite img inside the card
                     const spriteEl = cardEl.querySelector('.creature-sprite') as HTMLElement | null
                     const spriteRect = spriteEl?.getBoundingClientRect()
                     const cardRect = spriteRect
                       ? new DOMRect(cardEl.getBoundingClientRect().left, cardEl.getBoundingClientRect().top,
                           cardEl.getBoundingClientRect().width, cardEl.getBoundingClientRect().height)
                       : cardEl.getBoundingClientRect()
-                    // Override card position with sprite center for animation origin
                     const animRect = new DOMRect(
                       cardRect.left, cardRect.top, cardRect.width, cardRect.height
                     )
-                    // Store sprite position in the anim rect (abuse cardX/Y for sprite center)
                     const spriteCx = spriteRect ? spriteRect.left + spriteRect.width / 2 : cardRect.left + cardRect.width - 40
                     const spriteCy = spriteRect ? spriteRect.top + spriteRect.height / 2 : cardRect.top + 32
                     const sprite = getSpriteForId(agent.session_id)

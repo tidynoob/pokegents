@@ -9,6 +9,7 @@ export interface AgentState {
   project?: string
   role_emoji?: string
   project_color?: [number, number, number]
+  task_group?: string
   state: string
   detail: string
   cwd: string

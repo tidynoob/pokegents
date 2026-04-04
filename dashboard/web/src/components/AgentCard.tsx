@@ -35,6 +35,26 @@ function RolePill({ name }: { name: string }) {
   )
 }
 
+export const GROUP_COLORS: [number, number, number][] = [
+  [168, 80, 200],  // purple
+  [80, 168, 200],  // teal
+  [200, 140, 60],  // amber
+  [100, 180, 100], // green
+  [200, 80, 120],  // rose
+  [80, 120, 200],  // blue
+]
+
+function TaskGroupPill({ name }: { name: string }) {
+  const idx = Math.abs(hashString(name)) % GROUP_COLORS.length
+  const [r, g, b] = GROUP_COLORS[idx]
+  return (
+    <span
+      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      style={{ background: `rgba(${r}, ${g}, ${b}, 0.6)`, border: `1px solid rgba(${r}, ${g}, ${b}, 0.8)` }}
+    >{name}</span>
+  )
+}
+
 function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
@@ -309,6 +329,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               <div className="flex flex-col items-end gap-0.5 shrink-0">
                 {!compact && (
                   <>
+                    {agent.task_group && <TaskGroupPill name={agent.task_group} />}
                     {agent.role && <RolePill name={agent.role} />}
                     <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />
                   </>

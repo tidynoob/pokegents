@@ -136,6 +136,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/sprite", s.handleSetSprite)
 	s.mux.HandleFunc("POST /api/sessions/{id}/role", s.handleSetRole)
 	s.mux.HandleFunc("POST /api/sessions/{id}/project", s.handleSetProject)
+	s.mux.HandleFunc("POST /api/sessions/{id}/task-group", s.handleSetTaskGroup)
 	s.mux.HandleFunc("POST /api/sessions/{id}/prompt", s.handleSendPrompt)
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
@@ -1393,6 +1394,24 @@ func (s *Server) handleSetProject(w http.ResponseWriter, r *http.Request) {
 	s.eventBus.Publish("state_update", s.state.GetAgents())
 	status := s.relaunchIfIdle(sessionID)
 	writeJSON(w, map[string]string{"status": status, "project": body.Project})
+}
+
+func (s *Server) handleSetTaskGroup(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var body struct {
+		TaskGroup string `json:"task_group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	sessionID = s.resolveSessionID(sessionID)
+	if err := s.state.SetAgentTaskGroup(sessionID, body.TaskGroup); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]string{"status": "updated", "task_group": body.TaskGroup})
 }
 
 // relaunchIfIdle stops and relaunches an agent with its current role@project.

@@ -273,10 +273,10 @@ function GridCell({
     window.addEventListener('pointerup', onUp)
   }, [id])
 
-  const onResizePointerDown = useCallback((e: React.PointerEvent) => {
+  const onResizePointerDown = useCallback((e: React.PointerEvent, axis: 'both' | 'x' | 'y' = 'both') => {
     e.preventDefault()
     e.stopPropagation()
-    engineRef.current.startResize(id, e.clientX, e.clientY)
+    engineRef.current.startResize(id, e.clientX, e.clientY, axis)
   }, [id])
 
   const h = rect.h * cellH + (rect.h - 1) * GAP
@@ -299,19 +299,36 @@ function GridCell({
     >
       {children}
 
-      {/* Resize handle — bottom-right, visible on hover */}
+      {/* Resize handles — edges and corner, visible on hover */}
       {!isCompact && !isDragging && (
-        <div
-          data-no-drag
-          className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
-          onPointerDown={onResizePointerDown}
-        >
-          <svg viewBox="0 0 16 16" className="w-full h-full text-white/40">
-            <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" />
-            <line x1="8" y1="14" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
-            <line x1="12" y1="14" x2="14" y2="12" stroke="currentColor" strokeWidth="1.5" />
-          </svg>
-        </div>
+        <>
+          {/* Right edge */}
+          <div
+            data-no-drag
+            className="absolute top-2 right-0 bottom-2 w-2 cursor-ew-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+            style={{ background: 'linear-gradient(to right, transparent, rgba(255,255,255,0.15))' }}
+            onPointerDown={(e) => onResizePointerDown(e, 'x')}
+          />
+          {/* Bottom edge */}
+          <div
+            data-no-drag
+            className="absolute left-2 right-2 bottom-0 h-2 cursor-ns-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+            style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.15))' }}
+            onPointerDown={(e) => onResizePointerDown(e, 'y')}
+          />
+          {/* Bottom-right corner */}
+          <div
+            data-no-drag
+            className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+            onPointerDown={(e) => onResizePointerDown(e, 'both')}
+          >
+            <svg viewBox="0 0 16 16" className="w-full h-full text-white/40">
+              <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" />
+              <line x1="8" y1="14" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
+              <line x1="12" y1="14" x2="14" y2="12" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+          </div>
+        </>
       )}
     </div>
   )

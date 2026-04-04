@@ -63,6 +63,16 @@ export async function assignProject(sessionId: string, project: string): Promise
   return res.json()
 }
 
+export async function assignTaskGroup(sessionId: string, taskGroup: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/task-group`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_group: taskGroup }),
+  })
+  if (!res.ok) return { status: 'error' }
+  return res.json()
+}
+
 export async function setSprite(sessionId: string, sprite: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/sprite`, {
     method: 'POST',
@@ -179,7 +189,7 @@ export async function uploadImage(sessionId: string, imageBlob: Blob): Promise<{
 export async function fetchMessageHistory(): Promise<AgentMessage[]> {
   const res = await fetch(`${BASE}/messages`)
   if (!res.ok) return []
-  return res.json()
+  return (await res.json()) ?? []
 }
 
 export interface ProfileInfo {
@@ -210,13 +220,13 @@ export interface RoleInfo {
 export async function fetchProjectList(): Promise<ProjectInfo[]> {
   const res = await fetch(`${BASE}/projects`)
   if (!res.ok) return []
-  return res.json()
+  return (await res.json()) ?? []
 }
 
 export async function fetchRoleList(): Promise<RoleInfo[]> {
   const res = await fetch(`${BASE}/roles`)
   if (!res.ok) return []
-  return res.json()
+  return (await res.json()) ?? []
 }
 
 export async function launchProfile(name: string): Promise<void> {

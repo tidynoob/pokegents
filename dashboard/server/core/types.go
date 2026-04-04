@@ -67,8 +67,9 @@ type RunningSession struct {
 	CCDSessionID   string `json:"ccd_session_id,omitempty"`
 	ITermSessionID string `json:"iterm_session_id,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
-	Role           string `json:"role,omitempty"`    // role name (empty for legacy/bare project)
-	Project        string `json:"project,omitempty"` // project name (empty for legacy profiles)
+	Role           string `json:"role,omitempty"`       // role name (empty for legacy/bare project)
+	Project        string `json:"project,omitempty"`    // project name (empty for legacy profiles)
+	TaskGroup      string `json:"task_group,omitempty"` // organizational grouping (e.g. "proxy", "auth-migration")
 }
 
 // Agent interface implementation for identity resolution.

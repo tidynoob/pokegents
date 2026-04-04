@@ -35,6 +35,7 @@ export interface ResizeState {
   startY: number
   startW: number
   startH: number
+  axis: 'both' | 'x' | 'y'
 }
 
 const DEFAULT_SETTINGS: GridSettings = {
@@ -258,6 +259,7 @@ export interface GridEngine {
 
   // Direct layout manipulation
   setLayouts: (layouts: Record<string, GridRect>) => void
+  resizeItem: (id: string, newW: number, newH: number) => void
 
   // Convert a grid rect to a pixel DOMRect (relative to viewport)
   gridRectToPixels: (rect: GridRect) => DOMRect
@@ -274,7 +276,7 @@ export interface GridEngine {
 
   // Resize
   resizeState: ResizeState | null
-  startResize: (id: string, pointerX: number, pointerY: number) => void
+  startResize: (id: string, pointerX: number, pointerY: number, axis?: 'both' | 'x' | 'y') => void
   updateResize: (pointerX: number, pointerY: number) => void
   endResize: () => void
 
@@ -538,10 +540,10 @@ export function useGridEngine(
 
   // ── Resize ───────────────────────────────────────────────
 
-  const startResize = useCallback((id: string, pointerX: number, pointerY: number) => {
+  const startResize = useCallback((id: string, pointerX: number, pointerY: number, axis: 'both' | 'x' | 'y' = 'both') => {
     const rect = layouts[id]
     if (!rect) return
-    setResizeState({ id, startX: pointerX, startY: pointerY, startW: rect.w, startH: rect.h })
+    setResizeState({ id, startX: pointerX, startY: pointerY, startW: rect.w, startH: rect.h, axis })
   }, [layouts])
 
   const lastResizeSize = useRef<string>('')
@@ -551,14 +553,14 @@ export function useGridEngine(
     const baseRect = layouts[resizeState.id]
     if (!baseRect) return
 
-    const deltaX = pointerX - resizeState.startX
-    const deltaY = pointerY - resizeState.startY
+    const deltaX = resizeState.axis === 'y' ? 0 : pointerX - resizeState.startX
+    const deltaY = resizeState.axis === 'x' ? 0 : pointerY - resizeState.startY
     const colUnit = dims.cellW + GAP
     const rowUnit = dims.cellH + GAP
     const totalW = resizeState.startW * dims.cellW + (resizeState.startW - 1) * GAP + deltaX
     const totalH = resizeState.startH * dims.cellH + (resizeState.startH - 1) * GAP + deltaY
-    const newW = Math.max(1, Math.min(settings.cols - baseRect.col + 1, Math.round((totalW + GAP) / colUnit)))
-    const newH = Math.max(1, Math.round((totalH + GAP) / rowUnit))
+    const newW = resizeState.axis === 'y' ? resizeState.startW : Math.max(1, Math.min(settings.cols - baseRect.col + 1, Math.round((totalW + GAP) / colUnit)))
+    const newH = resizeState.axis === 'x' ? resizeState.startH : Math.max(1, Math.round((totalH + GAP) / rowUnit))
 
     // Debounce: only recompute if size actually changed
     const sizeKey = `${newW},${newH}`
@@ -621,6 +623,18 @@ export function useGridEngine(
     return data.profiles || []
   }, [])
 
+  // ── Programmatic resize (for view mode changes) ──
+  const resizeItem = useCallback((id: string, newW: number, newH: number) => {
+    setLayoutsState(prev => {
+      const rect = prev[id]
+      if (!rect) return prev
+      const updated = { ...prev, [id]: { ...rect, w: newW, h: newH } }
+      const resolved = resolveCollisions(updated, id, settings.cols)
+      persistLayouts(resolved, settings)
+      return resolved
+    })
+  }, [settings, persistLayouts])
+
   // ── Public setLayouts ──
   const setLayouts = useCallback((newLayouts: Record<string, GridRect>) => {
     setLayoutsState(newLayouts)
@@ -646,6 +660,7 @@ export function useGridEngine(
     getCardMode,
     ensureLayout,
     setLayouts,
+    resizeItem,
     gridRectToPixels,
     updateSettings,
     dragState,
