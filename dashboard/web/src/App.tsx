@@ -105,16 +105,19 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
   )
 }
 
-function CollapsedGroupBubble({ name, members, sprite, onExpand }: {
+function CollapsedGroupBubble({ name, members, sprite, onExpand, bubbleRef }: {
   name: string; members: AgentState[]; sprite: string; onExpand: () => void
+  bubbleRef?: (el: HTMLDivElement | null) => void
 }) {
   const [hovered, setHovered] = useState(false)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const ref = useRef<HTMLDivElement>(null)
   const idx = Math.abs(hashString(name)) % GROUP_COLORS.length
   const [r, g, b] = GROUP_COLORS[idx]
 
   return (
     <div
+      ref={(el) => { ref.current = el; bubbleRef?.(el) }}
       className="relative"
       onMouseEnter={() => { hoverTimer.current = setTimeout(() => setHovered(true), 300) }}
       onMouseLeave={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); setHovered(false) }}
@@ -564,7 +567,43 @@ export default function App() {
                 name={groupName}
                 members={members}
                 sprite={sprite}
-                onExpand={() => setGroupViewModes(prev => ({ ...prev, [groupName]: 'single' }))}
+                bubbleRef={(el) => {
+                  if (el) bubbleRefs.current.set(`group:${groupName}`, el)
+                  else bubbleRefs.current.delete(`group:${groupName}`)
+                }}
+                onExpand={() => {
+                  const bubbleEl = bubbleRefs.current.get(`group:${groupName}`)
+                  if (bubbleEl) {
+                    const bubbleRect = bubbleEl.getBoundingClientRect()
+                    const bubbleSource = {
+                      x: bubbleRect.left + bubbleRect.width / 2,
+                      y: bubbleRect.top + bubbleRect.height / 2,
+                    }
+                    const groupId = `group:${groupName}`
+                    const existingLayout = gridEngine.layouts[groupId]
+                    const targetRect = existingLayout
+                      ? gridEngine.gridRectToPixels(existingLayout)
+                      : (() => {
+                          const { defaultCardW: w, defaultCardH: h, cols } = gridEngine.settings
+                          const occupied = { ...gridEngine.layouts }
+                          for (let row = 1; row <= 100; row++) {
+                            for (let col = 1; col <= cols - w + 1; col++) {
+                              const candidate = { col, row, w, h }
+                              const fits = !Object.values(occupied).some(r =>
+                                r.col < candidate.col + candidate.w && r.col + r.w > candidate.col &&
+                                r.row < candidate.row + candidate.h && r.row + r.h > candidate.row
+                              )
+                              if (fits) return gridEngine.gridRectToPixels(candidate)
+                            }
+                          }
+                          return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
+                        })()
+                    triggerDeploy(groupId, sprite, bubbleSource, targetRect, () => {},
+                      () => setGroupViewModes(prev => ({ ...prev, [groupName]: 'single' })))
+                  } else {
+                    setGroupViewModes(prev => ({ ...prev, [groupName]: 'single' }))
+                  }
+                }}
               />
             )
           })}
@@ -748,7 +787,19 @@ export default function App() {
                     }
                   }}
                   onSetPageIndex={(idx) => setGroupPageIndex(prev => ({ ...prev, [groupName]: idx }))}
-                  onMinimize={() => setGroupViewModes(prev => ({ ...prev, [groupName]: 'collapsed' }))}
+                  onMinimize={() => {
+                    const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
+                    const primaryAgent = coord || members[0]
+                    const groupSprite = primaryAgent ? getSpriteForId(primaryAgent.session_id) : 'pokeball'
+                    const cardRect = gridEngine.gridRectToPixels(rect)
+                    const spriteCx = cardRect.left + cardRect.width / 2
+                    const spriteCy = cardRect.top + 40
+                    const existingBubbles = bubbleRefs.current.size
+                    const bubbleTarget = { x: 12 + existingBubbles * 36 + 16, y: showHeader ? 56 : 16 }
+                    triggerRecall(`group:${groupName}`, groupSprite, cardRect, bubbleTarget, () => {
+                      setGroupViewModes(prev => ({ ...prev, [groupName]: 'collapsed' }))
+                    }, { spriteCx, spriteCy })
+                  }}
                   cols={rect.w}
                   cardMode={cardMode}
                   pixelW={pixelW}
