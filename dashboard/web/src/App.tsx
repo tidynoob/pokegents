@@ -121,24 +121,26 @@ function CollapsedGroupBubble({ name, members, sprite, onExpand }: {
     >
       <button
         onClick={() => { setHovered(false); onExpand() }}
-        className="relative w-8 h-8 flex items-center justify-center group"
+        className="relative flex items-center justify-center group" style={{ width: 32, height: 32 }}
         title={`${name} — ${members.length} agents — click to open`}
       >
-        <div
-          className="absolute inset-0 rounded-full opacity-40 group-hover:opacity-70 transition-opacity"
-          style={{ background: `radial-gradient(circle, rgba(${r},${g},${b},0.5) 0%, rgba(${r},${g},${b},0.1) 70%)` }}
+        <img
+          src="/sprites/pokeball.png"
+          alt=""
+          className="absolute opacity-50 group-hover:opacity-80 transition-opacity"
+          style={{ imageRendering: 'pixelated', width: 32, height: 32 }}
         />
         <img
           src={`/sprites/${sprite}.png`}
           alt=""
           className="relative z-10"
-          style={{ imageRendering: 'pixelated', transform: 'scale(1.2)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
+          style={{ imageRendering: 'pixelated', transform: 'scale(0.8)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
           onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
           onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
         />
         {/* Count badge */}
         <span
-          className="absolute -bottom-0.5 -right-0.5 z-20 text-[6px] font-pixel text-white rounded-full px-1 leading-tight"
+          className="absolute -bottom-1 -right-1.5 z-20 text-[5px] font-pixel text-white rounded-full px-0.5 leading-tight"
           style={{ background: `rgb(${r},${g},${b})`, textShadow: '1px 1px 0 rgba(0,0,0,0.5)' }}
         >{members.length}</span>
       </button>
@@ -547,7 +549,10 @@ export default function App() {
               <span className={`ml-1.5 ${connected ? 'text-accent-green' : 'text-accent-red'}`}>●</span>
             </span>
           </div>
-          {/* Group bubbles — inline in header */}
+          {/* Collapsed pokeballs + group bubbles inline */}
+          {(collapsedAgents.length > 0 || collapsedGroupNames.length > 0) && (
+            <div className="flex items-center gap-1.5 ml-6">
+          {/* Group bubbles */}
           {collapsedGroupNames.map(groupName => {
             const members = grouped[groupName] || []
             const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
@@ -563,9 +568,6 @@ export default function App() {
               />
             )
           })}
-          {/* Collapsed pokeballs inline */}
-          {collapsedAgents.length > 0 && (
-            <div className="flex items-center gap-1.5 ml-6">
           {collapsedAgents.map(agent => {
             const sprite = getSpriteForId(agent.session_id)
             return (
