@@ -21,8 +21,9 @@ export async function fetchRecentSessions(limit = 20): Promise<SearchResult[]> {
   return res.json()
 }
 
-export async function resumeSession(sessionId: string): Promise<void> {
-  await fetch(`${BASE}/sessions/${sessionId}/resume`, { method: 'POST' })
+export async function resumeSession(sessionId: string, compact?: 'yes' | 'no'): Promise<void> {
+  const params = compact ? `?compact=${compact}` : ''
+  await fetch(`${BASE}/sessions/${sessionId}/resume${params}`, { method: 'POST' })
 }
 
 export async function fetchSessionPreview(sessionId: string): Promise<{ user_prompt: string; last_summary: string }> {

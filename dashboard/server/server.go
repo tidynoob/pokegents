@@ -764,7 +764,8 @@ func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.terminal.ResumeSession(profileName, sessionID); err != nil {
+	compact := r.URL.Query().Get("compact")
+	if err := s.terminal.ResumeSession(profileName, sessionID, compact); err != nil {
 		http.Error(w, fmt.Sprintf("failed to open iTerm2: %v", err), http.StatusInternalServerError)
 		return
 	}

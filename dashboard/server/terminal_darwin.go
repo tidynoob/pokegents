@@ -101,20 +101,31 @@ end tell`, createTab, safeProfile)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
-func (t *ITerm2Terminal) ResumeSession(profile, sessionID string) error {
+func (t *ITerm2Terminal) ResumeSession(profile, sessionID, compact string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)
 	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
+	// If compact is "yes" or "no", auto-answer the Claude auto-compact prompt after a delay
+	autoAnswer := ""
+	if compact == "yes" || compact == "no" {
+		answer := "yes"
+		if compact == "no" {
+			answer = "no"
+		}
+		autoAnswer = fmt.Sprintf(`
+			delay 5
+			write text "%s"`, answer)
+	}
 	script := fmt.Sprintf(`
 tell application "iTerm2"
 	tell current window
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "pokegent %s -r %s"
+			write text "pokegent %s -r %s"%s
 		end tell
 	end tell
-end tell`, safeProfile, safeSession)
+end tell`, safeProfile, safeSession, autoAnswer)
 	return exec.Command("osascript", "-e", script).Run()
 }
 

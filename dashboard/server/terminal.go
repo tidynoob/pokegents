@@ -15,7 +15,8 @@ type TerminalIntegration interface {
 	// CloneSession opens a new tab and launches a forked pokegents session.
 	CloneSession(profile, sessionIDPrefix string) error
 	// ResumeSession opens a new tab and resumes an existing pokegents session.
-	ResumeSession(profile, sessionID string) error
+	// compact: "yes" to auto-compact, "no" to skip, "" to let user decide.
+	ResumeSession(profile, sessionID, compact string) error
 	// LaunchProfile opens a new tab and starts a fresh pokegents session for the given profile.
 	LaunchProfile(profile, itermProfile string) error
 	// IsAvailable reports whether the terminal integration is functional

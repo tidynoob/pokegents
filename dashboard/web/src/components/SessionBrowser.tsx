@@ -91,11 +91,12 @@ export function SessionBrowser({ onClose, activeSessionIds, onResume }: SessionB
     setLoading(false)
   }, [allResults, revivedIds])
 
-  const handleResume = async (sessionId: string) => {
+  const handleResume = async (sessionId: string, compact?: 'yes' | 'no') => {
     setRevivingId(sessionId)
     setReviveResult(null)
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/resume`, { method: 'POST' })
+      const params = compact ? `?compact=${compact}` : ''
+      const res = await fetch(`/api/sessions/${sessionId}/resume${params}`, { method: 'POST' })
       if (res.ok) {
         setReviveResult('ok')
         onResume?.(sessionId)
@@ -421,7 +422,7 @@ function PkmnDataPanel({ session, sprite, preview, revivingId, reviveResult, onR
   preview: { user_prompt: string; last_summary: string } | null
   revivingId: string | null
   reviveResult: 'ok' | 'fail' | null
-  onResume: (id: string) => void
+  onResume: (id: string, compact?: 'yes' | 'no') => void
 }) {
   const isReviving = revivingId === session.session_id
   const name = session.custom_title || session.session_id.slice(0, 8)
@@ -500,42 +501,75 @@ function PkmnDataPanel({ session, sprite, preview, revivingId, reviveResult, onR
       {/* LAST MESSAGE box */}
       <InfoBox label="LAST MESSAGE" text={preview?.last_summary} />
 
-      {/* RESUME button */}
-      <button
-        onClick={() => onResume(session.session_id)}
-        disabled={isReviving}
-        style={{
-          width: '100%',
-          padding: '8px 0',
-          borderRadius: 5,
-          border: isReviving
-            ? reviveResult === 'ok' ? '2px solid #58d068'
-            : reviveResult === 'fail' ? '2px solid #e05040'
-            : '2px solid #d0a830'
-            : '2px solid #6090e0',
-          background: isReviving
-            ? reviveResult === 'ok' ? 'linear-gradient(180deg, #58d068 0%, #38a848 100%)'
-            : reviveResult === 'fail' ? 'linear-gradient(180deg, #e05040 0%, #b03020 100%)'
-            : 'linear-gradient(180deg, #d0a830 0%, #a07820 100%)'
-            : 'linear-gradient(180deg, #5888e0 0%, #3060c0 100%)',
-          boxShadow: isReviving ? 'none' : '0 3px 0 #1838a0, 0 4px 6px rgba(0,0,0,0.3)',
-          cursor: isReviving ? 'default' : 'pointer',
-          fontFamily: '"Press Start 2P"',
-          fontSize: 8,
-          color: '#fff',
-          textShadow: '1px 1px 0 rgba(0,0,0,0.5)',
-          letterSpacing: 1,
-          transform: isReviving ? 'translateY(2px)' : undefined,
-          flexShrink: 0,
-          transition: 'all 0.1s',
-        }}
-      >
-        {isReviving
-          ? reviveResult === 'ok'   ? '✓ REVIVED!'
-          : reviveResult === 'fail' ? '✗ FAILED'
-          : '▶▶ REVIVING...'
-          : '▶ RESUME'}
-      </button>
+      {/* RESUME buttons */}
+      {isReviving ? (
+        <div
+          style={{
+            width: '100%',
+            padding: '8px 0',
+            borderRadius: 5,
+            border: reviveResult === 'ok' ? '2px solid #58d068'
+              : reviveResult === 'fail' ? '2px solid #e05040'
+              : '2px solid #d0a830',
+            background: reviveResult === 'ok' ? 'linear-gradient(180deg, #58d068 0%, #38a848 100%)'
+              : reviveResult === 'fail' ? 'linear-gradient(180deg, #e05040 0%, #b03020 100%)'
+              : 'linear-gradient(180deg, #d0a830 0%, #a07820 100%)',
+            fontFamily: '"Press Start 2P"',
+            fontSize: 8,
+            color: '#fff',
+            textShadow: '1px 1px 0 rgba(0,0,0,0.5)',
+            letterSpacing: 1,
+            textAlign: 'center',
+            transform: 'translateY(2px)',
+            flexShrink: 0,
+          }}
+        >
+          {reviveResult === 'ok' ? '✓ REVIVED!' : reviveResult === 'fail' ? '✗ FAILED' : '▶▶ REVIVING...'}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <button
+            onClick={() => onResume(session.session_id, 'no')}
+            style={{
+              flex: 1,
+              padding: '8px 0',
+              borderRadius: 5,
+              border: '2px solid #6090e0',
+              background: 'linear-gradient(180deg, #5888e0 0%, #3060c0 100%)',
+              boxShadow: '0 3px 0 #1838a0, 0 4px 6px rgba(0,0,0,0.3)',
+              cursor: 'pointer',
+              fontFamily: '"Press Start 2P"',
+              fontSize: 7,
+              color: '#fff',
+              textShadow: '1px 1px 0 rgba(0,0,0,0.5)',
+              letterSpacing: 1,
+              transition: 'all 0.1s',
+            }}
+          >
+            ▶ RESUME
+          </button>
+          <button
+            onClick={() => onResume(session.session_id, 'yes')}
+            style={{
+              flex: 1,
+              padding: '8px 0',
+              borderRadius: 5,
+              border: '2px solid #d09030',
+              background: 'linear-gradient(180deg, #d09030 0%, #a06820 100%)',
+              boxShadow: '0 3px 0 #704010, 0 4px 6px rgba(0,0,0,0.3)',
+              cursor: 'pointer',
+              fontFamily: '"Press Start 2P"',
+              fontSize: 7,
+              color: '#fff',
+              textShadow: '1px 1px 0 rgba(0,0,0,0.5)',
+              letterSpacing: 1,
+              transition: 'all 0.1s',
+            }}
+          >
+            ▶ COMPACT
+          </button>
+        </div>
+      )}
     </div>
   )
 }
