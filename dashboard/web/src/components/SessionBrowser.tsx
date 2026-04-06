@@ -529,7 +529,7 @@ function PkmnDataPanel({ session, sprite, preview, revivingId, reviveResult, onR
       ) : (
         <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
           <button
-            onClick={() => onResume(session.session_id, 'no')}
+            onClick={() => onResume(session.session_id)}
             style={{
               flex: 1,
               padding: '8px 0',

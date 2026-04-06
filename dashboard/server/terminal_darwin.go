@@ -105,16 +105,13 @@ func (t *ITerm2Terminal) ResumeSession(profile, sessionID, compact string) error
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)
 	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
-	// If compact is "yes" or "no", auto-answer the Claude auto-compact prompt after a delay
+	// Only auto-answer when user explicitly chose to compact — otherwise let them
+	// handle the prompt in the terminal (Claude doesn't always show it)
 	autoAnswer := ""
-	if compact == "yes" || compact == "no" {
-		answer := "yes"
-		if compact == "no" {
-			answer = "no"
-		}
-		autoAnswer = fmt.Sprintf(`
+	if compact == "yes" {
+		autoAnswer = `
 			delay 5
-			write text "%s"`, answer)
+			write text "yes"`
 	}
 	script := fmt.Sprintf(`
 tell application "iTerm2"
