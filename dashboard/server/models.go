@@ -21,6 +21,7 @@ type AgentState struct {
 	Project      string `json:"project,omitempty"`
 	RoleEmoji    string `json:"role_emoji,omitempty"`
 	ProjectColor [3]int `json:"project_color,omitempty"`
+	TaskGroup    string `json:"task_group,omitempty"`
 	DisplayName  string `json:"display_name"`
 	Emoji        string `json:"emoji"`
 	Color        [3]int `json:"color"`

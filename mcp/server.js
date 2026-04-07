@@ -254,7 +254,7 @@ server.tool(
     const agents = await getCachedAgents();
     const lines = agents.map(
       (a) =>
-        `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
+        `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.task_group ? ` (group: ${a.task_group})` : ""}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
     );
     return {
       content: [
@@ -409,6 +409,187 @@ server.tool(
         text: `${messages.length} new message(s):\n\n${formatted}`,
       }],
     };
+  }
+);
+
+// Spawn a new agent
+server.tool(
+  "spawn_agent",
+  "Spawn a new agent in a new iTerm2 tab. Use role@project syntax (e.g. 'implementer@platform') or just a profile name. The dashboard must be running. Use this when you need another agent to help with a task. Optionally name it for easier messaging.",
+  {
+    profile: z
+      .string()
+      .describe("Profile to launch. Use role@project syntax (e.g. 'implementer@platform', 'debugger@pipeline') or a legacy profile name."),
+    name: z
+      .string()
+      .optional()
+      .describe("Display name for the new agent (e.g. 'QA Pipeline Impl'). Makes it easier to find in list_agents. If omitted, uses the default profile name."),
+    message: z
+      .string()
+      .optional()
+      .describe("Optional initial message to send to the new agent once it's active. Include context about what you need it to do."),
+    task_group: z
+      .string()
+      .optional()
+      .describe("Optional task group to assign (e.g. 'proxy', 'auth-migration'). Groups agents by workstream in the dashboard."),
+  },
+  async ({ profile, name, message, task_group }) => {
+    // Snapshot agents before launch so we can detect the new one
+    let agentsBefore;
+    try {
+      agentsBefore = await apiCall("/api/sessions");
+    } catch {
+      agentsBefore = fileListAgents();
+    }
+    const beforeIds = new Set(agentsBefore.map(a => a.session_id));
+
+    try {
+      const res = await fetch(`${DASHBOARD_URL}/api/launch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to spawn ${profile}: ${err}. Make sure the dashboard is running (pokegent dashboard start).`,
+          }],
+        };
+      }
+
+      // If name or message requested, wait for the new agent to appear
+      let newAgent = null;
+      if (name || message) {
+        for (let attempt = 0; attempt < 10; attempt++) {
+          await new Promise(r => setTimeout(r, 2000));
+          let agentsNow;
+          try {
+            agentsNow = await apiCall("/api/sessions");
+          } catch {
+            agentsNow = fileListAgents();
+          }
+          newAgent = agentsNow.find(a => !beforeIds.has(a.session_id));
+          if (newAgent) break;
+        }
+      }
+
+      let result = `Spawned ${profile} in a new iTerm2 tab.`;
+
+      if (newAgent && name) {
+        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        try {
+          await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/rename`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          result = `Spawned ${profile} as "${name}" [${sid.slice(0, 8)}].`;
+        } catch {
+          result = `Spawned ${profile} [${sid.slice(0, 8)}] (rename to "${name}" failed).`;
+        }
+      } else if (newAgent) {
+        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        result = `Spawned ${profile} [${sid.slice(0, 8)}].`;
+      }
+
+      if (newAgent && task_group) {
+        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        try {
+          await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task_group }),
+          });
+          result += ` Group: ${task_group}.`;
+        } catch {
+          result += ` (task group assignment failed)`;
+        }
+      }
+
+      if (newAgent && message) {
+        const toId = newAgent.ccd_session_id || newAgent.session_id;
+        const toName = name || newAgent.display_name || newAgent.profile_name;
+        const sessionIdEnv = getMySessionId();
+        const agents = await getCachedAgents();
+        const me = resolveSelf(agents);
+        const fromId = me ? (me.ccd_session_id || me.session_id) : sessionIdEnv;
+        const fromName = me ? (me.display_name || me.profile_name) : fromId;
+        try {
+          await apiCall("/api/messages", {
+            method: "POST",
+            body: JSON.stringify({ from: fromId, to: toId, content: message }),
+          });
+          result += ` Message sent.`;
+        } catch {
+          fileSendMessage(fromId, fromName, toId, toName, message);
+          result += ` Message queued.`;
+        }
+      } else if (message && !newAgent) {
+        result += ` Could not detect new agent to send message — use list_agents and send_message manually.`;
+      }
+
+      return { content: [{ type: "text", text: result }] };
+    } catch (err) {
+      return {
+        content: [{
+          type: "text",
+          text: `Failed to spawn ${profile}: ${err.message}. Is the dashboard running? Start it with: pokegent dashboard start`,
+        }],
+      };
+    }
+  }
+);
+
+// Set task group on an agent
+server.tool(
+  "set_task_group",
+  "Assign an agent (yourself or another) to a task group. Groups are organizational labels that cluster agents by workstream in the dashboard (e.g. 'proxy', 'auth-migration'). Pass an empty string to remove from a group.",
+  {
+    session_id: z
+      .string()
+      .describe("Target agent session ID (8-char prefix). Use list_agents to find IDs, or 'self' for yourself."),
+    task_group: z
+      .string()
+      .describe("Task group name (e.g. 'proxy', 'auth-migration'). Empty string to ungroup."),
+  },
+  async ({ session_id, task_group }) => {
+    // Resolve "self"
+    let targetId = session_id;
+    if (targetId === "self") {
+      const agents = await getCachedAgents();
+      const me = resolveSelf(agents);
+      if (me) {
+        targetId = me.ccd_session_id || me.session_id;
+      } else {
+        targetId = getMySessionId();
+      }
+    } else {
+      // Resolve prefix
+      const agents = await getCachedAgents();
+      const match = resolveAgent(agents, targetId);
+      if (match) {
+        targetId = match.ccd_session_id || match.session_id;
+      }
+    }
+
+    try {
+      const res = await fetch(`${DASHBOARD_URL}/api/sessions/${targetId}/task-group`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_group }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        return { content: [{ type: "text", text: `Failed to set task group: ${err}` }] };
+      }
+      invalidateAgentCache();
+      const label = task_group || "(none)";
+      return { content: [{ type: "text", text: `Task group set to ${label} for ${targetId.slice(0, 8)}.` }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Failed to set task group: ${err.message}` }] };
+    }
   }
 );
 

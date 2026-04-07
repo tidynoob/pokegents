@@ -126,7 +126,17 @@ func (sm *StateManager) GetAgents() []AgentState {
 		if oj != 0 {
 			return false
 		}
-		// Both unordered: sort by creation time
+		// Both unordered: sort by task_group first (ungrouped last), then creation time
+		gi, gj := result[i].TaskGroup, result[j].TaskGroup
+		if gi != gj {
+			if gi == "" {
+				return false // ungrouped after grouped
+			}
+			if gj == "" {
+				return true // grouped before ungrouped
+			}
+			return gi < gj
+		}
 		return result[i].CreatedAt < result[j].CreatedAt
 	})
 
@@ -216,6 +226,25 @@ func (sm *StateManager) SetAgentProject(sessionID, project string) {
 		})
 	}
 	sm.rebuildAgents()
+}
+
+// SetAgentTaskGroup updates the task_group field on a running agent.
+// Task group is organizational metadata — no relaunch needed.
+func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	rs, ok := sm.running[sessionID]
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	rs.TaskGroup = taskGroup
+	sm.running[sessionID] = rs
+	sm.store.Running.Update(sessionID, func(r *RunningSession) {
+		r.TaskGroup = taskGroup
+	})
+	sm.rebuildAgents()
+	return nil
 }
 
 // composeProfileKey builds the composite profile key from role and project.
@@ -917,6 +946,7 @@ func (sm *StateManager) rebuildAgents() {
 			ProfileName:    rs.Profile,
 			Role:           rs.Role,
 			Project:        rs.Project,
+			TaskGroup:      rs.TaskGroup,
 			DisplayName:    rs.DisplayName,
 			PID:            rs.PID,
 			TTY:            rs.TTY,
