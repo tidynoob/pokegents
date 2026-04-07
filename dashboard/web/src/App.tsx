@@ -390,7 +390,33 @@ export default function App() {
         ungrouped.push(a)
       }
     })
-    return { grouped, ungrouped }
+    // Sort ephemeral agents to appear immediately after their parent.
+    // Helper: reorder a list so ephemerals follow their parent
+    function sortWithEphemerals(list: AgentState[]): AgentState[] {
+      const result: AgentState[] = []
+      const ephByParent: Record<string, AgentState[]> = {}
+      for (const a of list) {
+        if (a.ephemeral && a.parent_session_id) {
+          (ephByParent[a.parent_session_id] ??= []).push(a)
+        }
+      }
+      for (const a of list) {
+        if (a.ephemeral) continue
+        result.push(a)
+        const children = ephByParent[a.session_id] || ephByParent[a.ccd_session_id || ''] || []
+        result.push(...children)
+      }
+      // Append orphaned ephemerals at the end
+      for (const a of list) {
+        if (a.ephemeral && !result.includes(a)) result.push(a)
+      }
+      return result
+    }
+    // Apply to both grouped and ungrouped
+    for (const key of Object.keys(grouped)) {
+      grouped[key] = sortWithEphemerals(grouped[key])
+    }
+    return { grouped, ungrouped: sortWithEphemerals(ungrouped) }
   }, [agents])
 
   // Ungrouped: filter collapsed for pokéball bubbles

@@ -36,6 +36,7 @@ type SearchResult struct {
 	ProfileName string `json:"profile_name"`
 	Role        string `json:"role,omitempty"`
 	Project     string `json:"project,omitempty"`
+	TaskGroup   string `json:"task_group,omitempty"`
 	Snippet     string `json:"snippet"`
 	CWD         string `json:"cwd"`
 	GitBranch   string `json:"git_branch"`
@@ -108,6 +109,9 @@ func (ss *SearchService) createTables() error {
 	// Migrate: add columns added after initial schema (ignore error if already exists)
 	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN last_user_message TEXT`)
 	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN last_assistant_message TEXT`)
+	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN role TEXT`)
+	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN project TEXT`)
+	ss.db.Exec(`ALTER TABLE session_meta ADD COLUMN task_group TEXT`)
 	return nil
 }
 
@@ -222,12 +226,25 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 		profileName = ss.profileMatcher.MatchProfile(cwd)
 	}
 
+	// Preserve role/project/task_group that were synced from running sessions
+	var existingRole, existingProject, existingTaskGroup, existingProfile sql.NullString
+	ss.db.QueryRow("SELECT role, project, task_group, profile_name FROM session_meta WHERE session_id = ?", sessionID).
+		Scan(&existingRole, &existingProject, &existingTaskGroup, &existingProfile)
+
 	ss.db.Exec(`DELETE FROM session_meta WHERE session_id = ?`, sessionID)
 	ss.db.Exec(`DELETE FROM sessions_fts WHERE session_id = ?`, sessionID)
 
-	ss.db.Exec(`INSERT INTO session_meta (session_id, project_dir, custom_title, first_user_message, last_modified, profile_name, cwd, git_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, projectDir, customTitle, firstUserMessage, modTime, profileName, cwd, gitBranch)
+	// Use synced values if JSONL-derived profile is empty
+	if profileName == "" && existingProfile.Valid {
+		profileName = existingProfile.String
+	}
+	savedRole := existingRole.String
+	savedProject := existingProject.String
+	savedTaskGroup := existingTaskGroup.String
+
+	ss.db.Exec(`INSERT INTO session_meta (session_id, project_dir, custom_title, first_user_message, last_modified, profile_name, cwd, git_branch, role, project, task_group)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, projectDir, customTitle, firstUserMessage, modTime, profileName, cwd, gitBranch, savedRole, savedProject, savedTaskGroup)
 
 	ss.db.Exec(`INSERT INTO sessions_fts (session_id, project_dir, custom_title, user_messages, assistant_messages)
 		VALUES (?, ?, ?, ?, ?)`,
@@ -273,7 +290,8 @@ func (ss *SearchService) Search(query string, limit, offset int) ([]SearchResult
 			COALESCE(m.git_branch, ''),
 			rank,
 			COALESCE(m.role, ''),
-			COALESCE(m.project, '')
+			COALESCE(m.project, ''),
+			COALESCE(m.task_group, '')
 		FROM sessions_fts f
 		LEFT JOIN session_meta m ON f.session_id = m.session_id
 		WHERE sessions_fts MATCH ?
@@ -289,7 +307,7 @@ func (ss *SearchService) Search(query string, limit, offset int) ([]SearchResult
 	for rows.Next() {
 		var r SearchResult
 		var rank float64
-		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &rank, &r.Role, &r.Project); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &rank, &r.Role, &r.Project, &r.TaskGroup); err != nil {
 			continue
 		}
 		results = append(results, r)
@@ -311,7 +329,8 @@ func (ss *SearchService) RecentSessions(limit int) ([]SearchResult, error) {
 		SELECT session_id, project_dir, COALESCE(custom_title, ''),
 			   COALESCE(profile_name, ''), COALESCE(first_user_message, ''),
 			   COALESCE(cwd, ''), COALESCE(git_branch, ''),
-			   COALESCE(role, ''), COALESCE(project, '')
+			   COALESCE(role, ''), COALESCE(project, ''),
+			   COALESCE(task_group, '')
 		FROM session_meta
 		ORDER BY last_modified DESC
 		LIMIT ?
@@ -324,7 +343,38 @@ func (ss *SearchService) RecentSessions(limit int) ([]SearchResult, error) {
 	var results []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &r.Role, &r.Project); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &r.Role, &r.Project, &r.TaskGroup); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// SessionsByTaskGroup returns all sessions that belonged to a given task group.
+func (ss *SearchService) SessionsByTaskGroup(taskGroup string) ([]SearchResult, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	rows, err := ss.db.Query(`
+		SELECT session_id, project_dir, COALESCE(custom_title, ''),
+			   COALESCE(profile_name, ''), COALESCE(first_user_message, ''),
+			   COALESCE(cwd, ''), COALESCE(git_branch, ''),
+			   COALESCE(role, ''), COALESCE(project, ''),
+			   COALESCE(task_group, '')
+		FROM session_meta
+		WHERE task_group = ?
+		ORDER BY last_modified DESC
+	`, taskGroup)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.SessionID, &r.ProjectDir, &r.CustomTitle, &r.ProfileName, &r.Snippet, &r.CWD, &r.GitBranch, &r.Role, &r.Project, &r.TaskGroup); err != nil {
 			continue
 		}
 		results = append(results, r)
@@ -340,6 +390,42 @@ func (ss *SearchService) UpdateCustomTitle(sessionID, title string) {
 	ss.db.Exec("UPDATE sessions_fts SET custom_title = ? WHERE session_id = ?", title, sessionID)
 }
 
+// UpdateSessionMeta upserts role, project, task_group, and profile_name from
+// a running session into the search index. This ensures metadata survives after
+// the running file is deleted on SessionEnd.
+func (ss *SearchService) UpdateSessionMeta(sessionID, profileName, role, project, taskGroup string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	// Ensure row exists (may not yet be indexed from JSONL)
+	ss.db.Exec(`INSERT OR IGNORE INTO session_meta (session_id) VALUES (?)`, sessionID)
+
+	// Only update fields that have values — don't overwrite existing data with blanks
+	if profileName != "" {
+		ss.db.Exec("UPDATE session_meta SET profile_name = ? WHERE session_id = ?", profileName, sessionID)
+	}
+	if role != "" {
+		ss.db.Exec("UPDATE session_meta SET role = ? WHERE session_id = ?", role, sessionID)
+	}
+	if project != "" {
+		ss.db.Exec("UPDATE session_meta SET project = ? WHERE session_id = ?", project, sessionID)
+	}
+	if taskGroup != "" {
+		ss.db.Exec("UPDATE session_meta SET task_group = ? WHERE session_id = ?", taskGroup, sessionID)
+	}
+}
+
+// GetSessionMeta looks up stored metadata for a session.
+func (ss *SearchService) GetSessionMeta(sessionID string) (profileName, role, project, taskGroup string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.db.QueryRow(
+		"SELECT COALESCE(profile_name,''), COALESCE(role,''), COALESCE(project,''), COALESCE(task_group,'') FROM session_meta WHERE session_id = ?",
+		sessionID,
+	).Scan(&profileName, &role, &project, &taskGroup)
+	return
+}
+
 // GetProfileName looks up the profile name for a session.
 func (ss *SearchService) GetProfileName(sessionID string) string {
 	ss.mu.Lock()
@@ -349,10 +435,14 @@ func (ss *SearchService) GetProfileName(sessionID string) string {
 	return pn
 }
 
-// StartBackgroundIndexer re-indexes every interval.
-func (ss *SearchService) StartBackgroundIndexer(interval time.Duration) {
+// StartBackgroundIndexer re-indexes every interval. Calls onReady after the
+// first index build completes (used to sync running session metadata).
+func (ss *SearchService) StartBackgroundIndexer(interval time.Duration, onReady ...func()) {
 	go func() {
 		ss.BuildIndex()
+		for _, fn := range onReady {
+			fn()
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

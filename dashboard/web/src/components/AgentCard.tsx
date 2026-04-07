@@ -55,6 +55,15 @@ function TaskGroupPill({ name }: { name: string }) {
   )
 }
 
+function SubagentPill({ type }: { type?: string }) {
+  return (
+    <span
+      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      style={{ background: 'rgba(120, 180, 255, 0.6)', border: '1px solid rgba(120, 180, 255, 0.8)' }}
+    >{type || 'subagent'}</span>
+  )
+}
+
 function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
@@ -245,7 +254,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         onContextMenu={handleContextMenu}
         className={`text-left ${pad} cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
           isBusy ? 'gba-card-selected' : 'gba-card'
-        }`}
+        } ${agent.ephemeral ? 'opacity-80' : ''}`}
+        style={agent.ephemeral ? { borderStyle: 'dashed' } : undefined}
         onMouseEnter={() => {
           if (isDone && !flashDismissed) setFlashDismissed(true)
         }}
@@ -329,9 +339,10 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               <div className="flex flex-col items-end gap-0.5 shrink-0">
                 {!compact && (
                   <>
+                    {agent.ephemeral && <SubagentPill type={agent.subagent_type} />}
                     {agent.task_group && <TaskGroupPill name={agent.task_group} />}
                     {agent.role && <RolePill name={agent.role} />}
-                    <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />
+                    {!agent.ephemeral && <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />}
                   </>
                 )}
               </div>

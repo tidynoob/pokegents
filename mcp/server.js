@@ -129,6 +129,31 @@ function fileListAgents() {
       } catch {}
     }
   } catch {}
+
+  // Also include ephemeral agents from ~/.pokegents/ephemeral/
+  const ephemeralDir = join(POKEGENTS_DATA, "ephemeral");
+  try {
+    for (const file of readdirSync(ephemeralDir)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const ef = JSON.parse(readFileSync(join(ephemeralDir, file), "utf8"));
+        agents.push({
+          profile_name: ef.agent_type || "subagent",
+          session_id: ef.agent_id || file.replace(".json", ""),
+          ccd_session_id: ef.agent_id || file.replace(".json", ""),
+          display_name: ef.description || ef.agent_type || "subagent",
+          state: ef.state === "running" ? "busy" : ef.state === "completed" ? "done" : (ef.state || "busy"),
+          detail: ef.agent_type ? `${ef.agent_type} subagent` : "",
+          user_prompt: "",
+          tty: "",
+          ephemeral: true,
+          parent_session_id: ef.parent_session_id || "",
+          subagent_type: ef.agent_type || "",
+        });
+      } catch {}
+    }
+  } catch {}
+
   return agents;
 }
 
@@ -252,10 +277,18 @@ server.tool(
   {},
   async () => {
     const agents = await getCachedAgents();
-    const lines = agents.map(
-      (a) =>
-        `${a.display_name || a.profile_name} [${(a.ccd_session_id || a.session_id).slice(0, 8)}] — ${a.state}${a.task_group ? ` (group: ${a.task_group})` : ""}${a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : ""}`
-    );
+    const lines = agents.map((a) => {
+      const id = (a.ccd_session_id || a.session_id).slice(0, 8);
+      const group = a.task_group ? ` (group: ${a.task_group})` : "";
+      const task = a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : "";
+
+      if (a.ephemeral) {
+        const parentId = a.parent_session_id ? a.parent_session_id.slice(0, 8) : "?";
+        return `  ↳ ${a.display_name || a.subagent_type || "subagent"} [${id}] — ${a.state} (${a.subagent_type || "agent"}, parent: ${parentId})`;
+      }
+
+      return `${a.display_name || a.profile_name} [${id}] — ${a.state}${group}${task}`;
+    });
     return {
       content: [
         {
@@ -589,6 +622,210 @@ server.tool(
       return { content: [{ type: "text", text: `Task group set to ${label} for ${targetId.slice(0, 8)}.` }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Failed to set task group: ${err.message}` }] };
+    }
+  }
+);
+
+// Release (shutdown all agents in) a task group
+server.tool(
+  "release_task_group",
+  "Shut down all agents in a task group. Use this when the group's work is done and you want to free up resources. Sends /exit to each agent and closes their terminals.",
+  {
+    task_group: z
+      .string()
+      .describe("Name of the task group to release (e.g. 'proxy', 'auth-migration')."),
+  },
+  async ({ task_group }) => {
+    try {
+      const res = await fetch(
+        `${DASHBOARD_URL}/api/task-groups/${encodeURIComponent(task_group)}/release`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const err = await res.text();
+        return { content: [{ type: "text", text: `Failed to release group: ${err}` }] };
+      }
+      const data = await res.json();
+      invalidateAgentCache();
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Released task group "${task_group}": ${data.count} agent(s) shutting down.`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Failed to release group: ${err.message}` }] };
+    }
+  }
+);
+
+// List sessions that belonged to a task group (including inactive ones from the search index)
+server.tool(
+  "list_group_sessions",
+  "List all sessions (active and inactive) that belonged to a task group. Use this to find former teammates to resume. Returns session IDs, roles, titles, and whether each is currently active.",
+  {
+    task_group: z
+      .string()
+      .describe("Name of the task group to look up."),
+  },
+  async ({ task_group }) => {
+    try {
+      const res = await fetch(
+        `${DASHBOARD_URL}/api/task-groups/${encodeURIComponent(task_group)}/sessions`
+      );
+      if (!res.ok) {
+        const err = await res.text();
+        return { content: [{ type: "text", text: `Failed to list group sessions: ${err}` }] };
+      }
+      const sessions = await res.json();
+      if (!sessions || sessions.length === 0) {
+        return { content: [{ type: "text", text: `No sessions found for group "${task_group}".` }] };
+      }
+      const lines = sessions.map((s) => {
+        const status = s.active ? "ACTIVE" : "inactive";
+        const role = s.role ? ` (${s.role})` : "";
+        const title = s.custom_title || s.session_id.slice(0, 8);
+        return `[${status}] ${s.session_id.slice(0, 8)} — ${title}${role}`;
+      });
+      return {
+        content: [{
+          type: "text",
+          text: `Sessions in group "${task_group}":\n${lines.join("\n")}`,
+        }],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Failed to list group sessions: ${err.message}` }] };
+    }
+  }
+);
+
+// Resume a previous session from the PC Box (search index)
+server.tool(
+  "resume_session",
+  "Resume a previous Claude Code session by ID. Opens a new iTerm2 tab with the full conversation history restored via pokegent. Optionally assign it to a task group and send an initial message. Use list_group_sessions to find session IDs.",
+  {
+    session_id: z
+      .string()
+      .describe("Session ID to resume (8-char prefix or full UUID). Use list_group_sessions to find IDs."),
+    task_group: z
+      .string()
+      .optional()
+      .describe("Task group to assign the resumed session to."),
+    message: z
+      .string()
+      .optional()
+      .describe("Optional message to send once the session is active. Include context about what you need."),
+  },
+  async ({ session_id, task_group, message }) => {
+    // Snapshot agents before resume so we can detect the new one
+    let agentsBefore;
+    try {
+      agentsBefore = await apiCall("/api/sessions");
+    } catch {
+      agentsBefore = fileListAgents();
+    }
+    const beforeIds = new Set(agentsBefore.map((a) => a.session_id));
+
+    // Resolve prefix to full session ID from search index
+    let fullSessionId = session_id;
+    if (session_id.length < 36) {
+      try {
+        const searchRes = await fetch(
+          `${DASHBOARD_URL}/api/search/recent?limit=200`
+        );
+        if (searchRes.ok) {
+          const results = await searchRes.json();
+          const match = results.find((r) => r.session_id.startsWith(session_id));
+          if (match) fullSessionId = match.session_id;
+        }
+      } catch {
+        // Fall through with prefix — the resume endpoint will handle it
+      }
+    }
+
+    try {
+      const res = await fetch(
+        `${DASHBOARD_URL}/api/sessions/${fullSessionId}/resume`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const err = await res.text();
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to resume ${session_id}: ${err}`,
+          }],
+        };
+      }
+
+      // Wait for the resumed agent to appear
+      let newAgent = null;
+      for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let agentsNow;
+        try {
+          agentsNow = await apiCall("/api/sessions");
+        } catch {
+          agentsNow = fileListAgents();
+        }
+        newAgent = agentsNow.find((a) => !beforeIds.has(a.session_id));
+        if (newAgent) break;
+      }
+
+      let result = `Resumed session ${fullSessionId.slice(0, 8)}.`;
+
+      if (newAgent && task_group) {
+        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        try {
+          await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task_group }),
+          });
+          result += ` Group: ${task_group}.`;
+        } catch {
+          result += ` (task group assignment failed)`;
+        }
+      }
+
+      if (newAgent && message) {
+        const toId = newAgent.ccd_session_id || newAgent.session_id;
+        const toName = newAgent.display_name || newAgent.profile_name;
+        const sessionIdEnv = getMySessionId();
+        const agents = await getCachedAgents();
+        const me = resolveSelf(agents);
+        const fromId = me ? (me.ccd_session_id || me.session_id) : sessionIdEnv;
+        try {
+          await apiCall("/api/messages", {
+            method: "POST",
+            body: JSON.stringify({ from: fromId, to: toId, content: message }),
+          });
+          result += ` Message sent.`;
+        } catch {
+          const fromName = me ? (me.display_name || me.profile_name) : fromId;
+          fileSendMessage(fromId, fromName, toId, toName, message);
+          result += ` Message queued.`;
+        }
+      } else if (message && !newAgent) {
+        result += ` Could not detect resumed agent — use list_agents and send_message manually.`;
+      }
+
+      if (newAgent) {
+        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        result += ` New session ID: ${sid.slice(0, 8)}.`;
+      }
+
+      invalidateAgentCache();
+      return { content: [{ type: "text", text: result }] };
+    } catch (err) {
+      return {
+        content: [{
+          type: "text",
+          text: `Failed to resume ${session_id}: ${err.message}`,
+        }],
+      };
     }
   }
 );

@@ -10,6 +10,11 @@ export interface AgentState {
   role_emoji?: string
   project_color?: [number, number, number]
   task_group?: string
+  model?: string
+  effort?: string
+  ephemeral?: boolean
+  parent_session_id?: string
+  subagent_type?: string
   state: string
   detail: string
   cwd: string
@@ -44,6 +49,7 @@ export interface SearchResult {
   profile_name: string
   role?: string
   project?: string
+  task_group?: string
   role_emoji?: string
   project_color?: [number, number, number]
   snippet: string

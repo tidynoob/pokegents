@@ -1,7 +1,8 @@
+import { useState, useRef, useEffect } from 'react'
 import { AgentState } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
-import { focusAgent, ProjectInfo, RoleInfo } from '../api'
+import { focusAgent, releaseTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import type { CardMode } from '../hooks/useGridEngine'
 
 export type GroupViewMode = 'collapsed' | 'single' | 'expanded'
@@ -49,6 +50,23 @@ export function GroupContainer({
   cols, cardMode, pixelW, pixelH, singleCardPixelW, singleCardPixelH,
   spriteOverrides, resolveToSpriteId, readingAgents, projects, roles,
 }: GroupContainerProps) {
+  const [confirmRelease, setConfirmRelease] = useState(false)
+  const confirmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+
+  useEffect(() => {
+    return () => { if (confirmTimer.current) clearTimeout(confirmTimer.current) }
+  }, [])
+
+  const handleRelease = () => {
+    if (!confirmRelease) {
+      setConfirmRelease(true)
+      confirmTimer.current = setTimeout(() => setConfirmRelease(false), 3000)
+      return
+    }
+    setConfirmRelease(false)
+    releaseTaskGroup(name)
+  }
+
   const idx = Math.abs(hashString(name)) % GROUP_COLORS.length
   const [r, g, b] = GROUP_COLORS[idx]
   const members = sortMembers(rawMembers)
@@ -131,6 +149,18 @@ export function GroupContainer({
               title={`${m.display_name || m.profile_name}: ${m.state}`}
             />
           ))}
+
+          {/* Release group (shutdown all agents) */}
+          <button
+            className={`h-3.5 rounded-full transition-colors flex items-center justify-center text-[8px] font-bold text-white leading-none ml-1 px-1 ${
+              confirmRelease
+                ? 'bg-red-500 hover:bg-red-400 min-w-[52px]'
+                : 'w-3.5 bg-white/10 hover:bg-red-500/60'
+            }`}
+            style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+            onClick={(e) => { e.stopPropagation(); handleRelease() }}
+            title={confirmRelease ? 'Click again to release all agents' : 'Release group'}
+          >{confirmRelease ? 'Release?' : '×'}</button>
 
           {/* Minimize to bubble */}
           <button
