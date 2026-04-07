@@ -1,11 +1,12 @@
 _pokegent_kill_dashboard() {
-  # Kill by port since the binary may run as "main" or "pokegents-dashboard"
-  local pids=$(lsof -ti :${POKEGENTS_PORT:-7834} 2>/dev/null)
+  # Kill only the LISTENING server process, not browser clients connected to the port
+  local port=${POKEGENTS_PORT:-7834}
+  local pids=$(lsof -ti :${port} -sTCP:LISTEN 2>/dev/null)
   if [[ -n "$pids" ]]; then
     echo "$pids" | xargs kill 2>/dev/null
     # Wait for port to actually free up
     local i=0
-    while lsof -ti :${POKEGENTS_PORT:-7834} &>/dev/null && [[ $i -lt 10 ]]; do
+    while lsof -ti :${port} -sTCP:LISTEN &>/dev/null && [[ $i -lt 10 ]]; do
       sleep 0.5
       ((i++))
     done

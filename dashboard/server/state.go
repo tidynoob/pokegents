@@ -436,6 +436,8 @@ func (sm *StateManager) CleanStale() bool {
 			for _, f := range matches {
 				os.Remove(f)
 			}
+			// Cascade: remove completed ephemeral children
+			sm.cleanupEphemeralsByParentLocked(sid)
 			delete(sm.running, sid)
 			changed = true
 		}
@@ -830,6 +832,8 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 	case "SessionEnd":
 		// Remove from statuses — agent disappears from dashboard
 		delete(sm.statuses, evt.SessionID)
+		// Cascade: remove completed ephemeral children so they don't linger
+		sm.cleanupEphemeralsByParentLocked(evt.SessionID)
 		sm.rebuildAgents()
 		return nil
 	default:
@@ -1022,6 +1026,43 @@ func (sm *StateManager) CompleteEphemeral(agentID, lastMessage, transcriptPath s
 		}
 	}
 	return nil
+}
+
+// DeleteEphemeral removes an ephemeral subagent from memory and disk.
+// Always removes from memory even if the disk file is already gone.
+func (sm *StateManager) DeleteEphemeral(agentID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.store.Ephemeral != nil {
+		// Best-effort disk removal — ignore "not found" errors
+		if err := sm.store.Ephemeral.Delete(agentID); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	delete(sm.ephemeral, agentID)
+	return nil
+}
+
+// cleanupEphemeralsByParentLocked removes completed ephemeral agents for a parent session.
+// Caller must hold sm.mu.
+func (sm *StateManager) cleanupEphemeralsByParentLocked(parentSessionID string) int {
+	if sm.store.Ephemeral == nil {
+		return 0
+	}
+	removed := 0
+	for id, ea := range sm.ephemeral {
+		if ea.ParentSessionID != parentSessionID {
+			continue
+		}
+		if ea.State != "completed" {
+			continue
+		}
+		if err := sm.store.Ephemeral.Delete(id); err == nil {
+			delete(sm.ephemeral, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 // reconcileNameOverrides uses the session ID map to fix name-override entries

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
-import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
@@ -856,6 +856,7 @@ export default function App() {
                 hideSprite={hiddenSprites.has(agent.session_id)}
                 projects={projects}
                 roles={roles}
+                onDismiss={agent.ephemeral ? () => dismissEphemeral(agent.session_id) : undefined}
                 onCollapse={() => {
                   const cardEl = cardRefs.current.get(agent.session_id)
                   if (cardEl) {

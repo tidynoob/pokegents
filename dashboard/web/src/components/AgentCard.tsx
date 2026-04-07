@@ -172,6 +172,7 @@ interface AgentCardProps {
   isReading?: boolean
   hideSprite?: boolean
   onCollapse?: () => void
+  onDismiss?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
   projects?: ProjectInfo[]
   roles?: RoleInfo[]
@@ -188,7 +189,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, cardRef, projects, roles }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -285,6 +286,20 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               title="Collapse"
             >
               −
+            </button>
+          </div>
+        )}
+
+        {/* Dismiss button for completed ephemeral subagents */}
+        {onDismiss && agent.ephemeral && isDone && (
+          <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
+            <button
+              onClick={(e) => { e.stopPropagation(); onDismiss() }}
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-white/20 hover:bg-white/40 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white leading-none"
+              style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+              title="Dismiss"
+            >
+              ×
             </button>
           </div>
         )}

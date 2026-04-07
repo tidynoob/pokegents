@@ -109,6 +109,10 @@ export async function shutdownAgent(sessionId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/shutdown`, { method: 'POST' })
 }
 
+export async function dismissEphemeral(agentId: string): Promise<void> {
+  await fetch(`${BASE}/ephemeral/${agentId}`, { method: 'DELETE' })
+}
+
 export async function releaseTaskGroup(groupName: string): Promise<{ ok: boolean; count: number }> {
   const res = await fetch(`${BASE}/task-groups/${encodeURIComponent(groupName)}/release`, { method: 'POST' })
   return res.json()

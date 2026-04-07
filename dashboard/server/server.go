@@ -178,6 +178,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/grid-profiles/{name}", s.handleDeleteGridProfile)
 	s.mux.HandleFunc("POST /api/ephemeral", s.handleCreateEphemeral)
 	s.mux.HandleFunc("PUT /api/ephemeral/{id}/complete", s.handleCompleteEphemeral)
+	s.mux.HandleFunc("DELETE /api/ephemeral/{id}", s.handleDeleteEphemeral)
 
 	// Serve frontend static files
 	if s.webDir != "" {
@@ -521,6 +522,16 @@ func (s *Server) handleCompleteEphemeral(w http.ResponseWriter, r *http.Request)
 	s.eventBus.Publish("ephemeral_stop", map[string]any{
 		"agent_id": agentID,
 	})
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleDeleteEphemeral(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if err := s.state.DeleteEphemeral(agentID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -918,12 +929,8 @@ end tell`, safeSession)
 		}
 	}
 
-<<<<<<< Updated upstream
 	compact := r.URL.Query().Get("compact")
-	if err := s.terminal.ResumeSession(profileName, sessionID, compact); err != nil {
-=======
-	if err := s.terminal.ResumeSession(pokegentTarget, sessionID); err != nil {
->>>>>>> Stashed changes
+	if err := s.terminal.ResumeSession(pokegentTarget, sessionID, compact); err != nil {
 		http.Error(w, fmt.Sprintf("failed to open iTerm2: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1384,7 +1391,14 @@ func (s *Server) handleReleaseTaskGroup(w http.ResponseWriter, r *http.Request) 
 
 	var released []string
 	for _, agent := range agents {
-		if agent.Ephemeral || agent.TTY == "" {
+		if agent.Ephemeral {
+			// Dismiss completed ephemerals immediately
+			if agent.State == "done" {
+				s.state.DeleteEphemeral(agent.SessionID)
+			}
+			continue
+		}
+		if agent.TTY == "" {
 			continue
 		}
 		itermSID := agent.ITermSessionID
@@ -1397,6 +1411,7 @@ func (s *Server) handleReleaseTaskGroup(w http.ResponseWriter, r *http.Request) 
 		released = append(released, agent.SessionID)
 	}
 
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]any{"ok": true, "released": released, "count": len(released)})
 }
 
