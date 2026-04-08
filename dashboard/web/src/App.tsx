@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
-import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
@@ -423,6 +423,8 @@ export default function App() {
   const visibleUngrouped = useMemo(() => ungrouped.filter(a => !collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
   const collapsedAgents = useMemo(() => ungrouped.filter(a => collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
 
+  const existingGroupNames = useMemo(() => Object.keys(grouped).sort(), [grouped])
+
   // Collapsed group names (rendered as bubbles, not grid items)
   const collapsedGroupNames = useMemo(() =>
     Object.keys(grouped).filter(g => (groupViewModes[g] || 'collapsed') === 'collapsed'),
@@ -755,6 +757,9 @@ export default function App() {
           agentIds={gridIds}
           showHeader={showHeader}
           showGridLines={gridSliderDragging}
+          onDropOnGroup={async (agentId, groupName) => {
+            await assignTaskGroup(agentId, groupName)
+          }}
         >
           {(id, rect, cardMode) => {
             // Group container
@@ -837,6 +842,7 @@ export default function App() {
                   readingAgents={readingAgents}
                   projects={projects}
                   roles={roles}
+                  existingGroups={existingGroupNames}
                 />
               )
             }
@@ -857,6 +863,7 @@ export default function App() {
                 projects={projects}
                 roles={roles}
                 onDismiss={agent.ephemeral ? () => dismissEphemeral(agent.session_id) : undefined}
+                existingGroups={existingGroupNames}
                 onCollapse={() => {
                   const cardEl = cardRefs.current.get(agent.session_id)
                   if (cardEl) {

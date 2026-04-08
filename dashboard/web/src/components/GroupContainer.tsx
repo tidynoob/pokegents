@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { AgentState } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
+import { POKEMON_SPRITES } from './sprites'
 import { focusAgent, releaseTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import type { CardMode } from '../hooks/useGridEngine'
 
@@ -10,7 +11,7 @@ export type GroupViewMode = 'collapsed' | 'single' | 'expanded'
 interface GroupContainerProps {
   name: string
   members: AgentState[]
-  viewMode: 'single' | 'expanded'  // collapsed is handled as a bubble, not rendered here
+  viewMode: 'single' | 'expanded'
   pageIndex: number
   onSetViewMode: (mode: GroupViewMode) => void
   onSetPageIndex: (index: number) => void
@@ -26,12 +27,31 @@ interface GroupContainerProps {
   readingAgents: Set<string>
   projects: ProjectInfo[]
   roles: RoleInfo[]
+  existingGroups?: string[]
 }
 
-function statusDotColor(state: string): string {
+function statusColor(state: string): string {
   if (state === 'busy') return '#e87848'
-  if (state === 'error' || state === 'needs_input') return '#d84848'
-  return '#58a868'
+  if (state === 'needs_input') return '#d84848'
+  if (state === 'error') return '#a858a8'
+  if (state === 'done') return '#58a868'
+  return '#788890'
+}
+
+function statusLabel(state: string): string {
+  if (state === 'busy') return 'ATK'
+  if (state === 'needs_input') return 'WAIT'
+  if (state === 'error') return 'PSN'
+  if (state === 'done') return 'OK'
+  return 'SLP'
+}
+
+function formatTime(lastUpdated?: string): string {
+  if (!lastUpdated) return ''
+  const secs = Math.max(0, (Date.now() - new Date(lastUpdated).getTime()) / 1000)
+  if (secs < 60) return `${Math.floor(secs)}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`
+  return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
 }
 
 function sortMembers(members: AgentState[]): AgentState[] {
@@ -43,12 +63,45 @@ function sortMembers(members: AgentState[]): AgentState[] {
   })
 }
 
-const HEADER_H = 40
+function getSprite(agent: AgentState, spriteOverrides: Record<string, string>, resolveToSpriteId: (id: string) => string): string {
+  const spriteId = resolveToSpriteId(agent.session_id)
+  return spriteOverrides[spriteId] || spriteOverrides[agent.session_id] || POKEMON_SPRITES[hashString(spriteId) % POKEMON_SPRITES.length]
+}
+
+const HEADER_H = 32
+
+/** Compact 1-row member entry: sprite + name + status pill + time */
+function MemberRow({ agent, sprite, isActive, onClick }: {
+  agent: AgentState; sprite: string; isActive: boolean; onClick: () => void
+}) {
+  const time = formatTime(agent.last_updated)
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 w-full px-1.5 py-0.5 rounded transition-colors ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}
+      style={{ minHeight: 20 }}
+    >
+      <img
+        src={`/sprites/${sprite}.png`}
+        alt=""
+        style={{ width: 16, height: 16, imageRendering: 'pixelated', flexShrink: 0 }}
+      />
+      <span className="text-[7px] font-pixel text-white/70 truncate flex-1 text-left">
+        {agent.display_name || agent.profile_name}
+      </span>
+      <span
+        className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none shrink-0${agent.state === 'busy' ? ' animate-pulse-soft' : ''}`}
+        style={{ backgroundColor: statusColor(agent.state), textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+      >{statusLabel(agent.state)}</span>
+      {time && <span className="text-[6px] font-mono text-white/25 shrink-0">{time}</span>}
+    </button>
+  )
+}
 
 export function GroupContainer({
   name, members: rawMembers, viewMode, pageIndex, onSetViewMode, onSetPageIndex, onMinimize,
   cols, cardMode, pixelW, pixelH, singleCardPixelW, singleCardPixelH,
-  spriteOverrides, resolveToSpriteId, readingAgents, projects, roles,
+  spriteOverrides, resolveToSpriteId, readingAgents, projects, roles, existingGroups,
 }: GroupContainerProps) {
   const [confirmRelease, setConfirmRelease] = useState(false)
   const confirmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -72,11 +125,9 @@ export function GroupContainer({
   const members = sortMembers(rawMembers)
   const safePageIndex = Math.min(pageIndex, members.length - 1)
   const contentH = pixelH - HEADER_H
-  // Use single-view width as card unit for column layout
   const innerCardW = singleCardPixelW || pixelW
-  // Card height computed dynamically: fill available space evenly
   const INNER_GAP = 8
-  const PAD = 8 // px-1 + pb-1
+  const PAD = 8
   const subCols = innerCardW < pixelW ? Math.max(1, Math.floor((pixelW - PAD) / innerCardW)) : 1
   const cardRows = Math.ceil(members.length / subCols)
   const innerCardH = cardRows > 0 ? Math.floor((contentH - PAD - (cardRows - 1) * INNER_GAP) / cardRows) : 180
@@ -92,8 +143,12 @@ export function GroupContainer({
       isReading={readingAgents.has(agent.session_id)}
       projects={projects}
       roles={roles}
+      existingGroups={existingGroups}
     />
   )
+
+  // Other members (not the active one) for the compact list
+  const otherMembers = members.filter((_, i) => i !== safePageIndex)
 
   return (
     <div
@@ -105,50 +160,35 @@ export function GroupContainer({
       }}
     >
       {/* Header bar */}
-      <div className="flex items-center gap-2 px-3 select-none shrink-0" style={{ height: HEADER_H }}>
-        {/* Left side: expand toggle */}
+      <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H }}>
         <button
-          className="text-[11px] text-white/50 hover:text-white/80 transition-colors px-0.5"
+          className="text-[9px] text-white/50 hover:text-white/80 transition-colors px-0.5"
           onClick={(e) => { e.stopPropagation(); onSetViewMode(viewMode === 'single' ? 'expanded' : 'single') }}
           title={viewMode === 'single' ? 'Expand all' : 'Single view'}
         >{viewMode === 'single' ? '▶' : '▼'}</button>
 
         <span
-          className="text-[8px] font-pixel pixel-shadow uppercase truncate"
+          className="text-[7px] font-pixel pixel-shadow uppercase truncate"
           style={{ color: `rgb(${r}, ${g}, ${b})` }}
         >{name}</span>
-        <span className="text-[8px] font-pixel text-white/40 shrink-0">
-          {viewMode === 'single'
-            ? `${safePageIndex + 1}/${members.length}`
-            : `${members.length}`}
-        </span>
+        <span className="text-[7px] font-pixel text-white/40 shrink-0">{members.length}</span>
 
         <div className="flex items-center gap-1 ml-auto" onClick={e => e.stopPropagation()}>
           {/* Single mode: pagination arrows */}
           {viewMode === 'single' && (
             <>
               <button
-                className="text-[10px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-1"
+                className="text-[9px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-0.5"
                 onClick={() => onSetPageIndex(Math.max(0, safePageIndex - 1))}
                 disabled={safePageIndex === 0}
               >◀</button>
               <button
-                className="text-[10px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-1"
+                className="text-[9px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-0.5"
                 onClick={() => onSetPageIndex(Math.min(members.length - 1, safePageIndex + 1))}
                 disabled={safePageIndex >= members.length - 1}
               >▶</button>
             </>
           )}
-
-          {/* Status dots */}
-          {members.map(m => (
-            <span
-              key={m.session_id}
-              className={`inline-block w-1.5 h-1.5 rounded-full${m.state === 'busy' ? ' animate-pulse' : ''}`}
-              style={{ background: statusDotColor(m.state) }}
-              title={`${m.display_name || m.profile_name}: ${m.state}`}
-            />
-          ))}
 
           {/* Release group (shutdown all agents) */}
           <button
@@ -162,9 +202,8 @@ export function GroupContainer({
             title={confirmRelease ? 'Click again to release all agents' : 'Release group'}
           >{confirmRelease ? 'Release?' : '×'}</button>
 
-          {/* Minimize to bubble */}
           <button
-            className="w-3.5 h-3.5 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-[8px] font-bold text-white leading-none ml-1"
+            className="w-3 h-3 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-[7px] font-bold text-white leading-none ml-1"
             style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
             onClick={onMinimize}
             title="Minimize"
@@ -172,32 +211,30 @@ export function GroupContainer({
         </div>
       </div>
 
-      {/* Single mode: one card + dot indicators */}
+      {/* Single mode: active card + compact member list */}
       {viewMode === 'single' && contentH > 0 && (
-        <div className="flex-1 flex flex-col min-h-0 min-w-0 px-1 pb-1">
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 px-1 pb-1 gap-1">
+          {/* Active agent card */}
           <div className="flex-1 min-h-0 min-w-0">
             {members[safePageIndex] && renderCard(members[safePageIndex])}
           </div>
-          {members.length > 1 && (
-            <div className="flex items-center justify-center gap-1 pt-1 shrink-0">
-              {members.map((m, i) => (
-                <button
-                  key={m.session_id}
-                  className="transition-all"
-                  onClick={() => onSetPageIndex(i)}
-                  title={m.display_name || m.profile_name}
-                >
-                  <span
-                    className="inline-block rounded-full transition-all"
-                    style={{
-                      width: i === safePageIndex ? 6 : 4,
-                      height: i === safePageIndex ? 6 : 4,
-                      background: i === safePageIndex ? `rgb(${r}, ${g}, ${b})` : statusDotColor(m.state),
-                      opacity: i === safePageIndex ? 1 : 0.5,
-                    }}
+
+          {/* Compact member list — other agents */}
+          {otherMembers.length > 0 && (
+            <div className="shrink-0 flex flex-col gap-px overflow-y-auto" style={{ maxHeight: Math.min(otherMembers.length * 22, 88) }}>
+              {otherMembers.map((m) => {
+                const sprite = getSprite(m, spriteOverrides, resolveToSpriteId)
+                const memberIdx = members.findIndex(x => x.session_id === m.session_id)
+                return (
+                  <MemberRow
+                    key={m.session_id}
+                    agent={m}
+                    sprite={sprite}
+                    isActive={false}
+                    onClick={() => onSetPageIndex(memberIdx)}
                   />
-                </button>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

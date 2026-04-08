@@ -9,9 +9,10 @@ interface GridContainerProps {
   agentIds: string[]
   showHeader: boolean
   showGridLines?: boolean
+  onDropOnGroup?: (agentId: string, groupName: string) => void
 }
 
-export function GridContainer({ engine, children, agentIds, showHeader, showGridLines }: GridContainerProps) {
+export function GridContainer({ engine, children, agentIds, showHeader, showGridLines, onDropOnGroup }: GridContainerProps) {
   const { layouts, settings, cellW, cellH, maxRow, getCardMode, dragState, gridRef } = engine
   const isDragging = !!dragState
   const isResizing = !!engine.resizeState
@@ -19,6 +20,9 @@ export function GridContainer({ engine, children, agentIds, showHeader, showGrid
   // Ghost element for drag
   const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null)
   const [ghostSize, setGhostSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
+  const [dropTargetGroup, setDropTargetGroup] = useState<string | null>(null)
+  const onDropOnGroupRef = useRef(onDropOnGroup)
+  onDropOnGroupRef.current = onDropOnGroup
 
   // Use refs for callbacks to avoid stale closures in event listeners
   const engineRef = useRef(engine)
@@ -39,17 +43,37 @@ export function GridContainer({ engine, children, agentIds, showHeader, showGrid
           x: e.clientX - ds.ghostOffset.x,
           y: e.clientY - ds.ghostOffset.y,
         })
+        // Check if dragging over a group container (only for non-group cards)
+        if (!ds.id.startsWith('group:')) {
+          const el = document.elementFromPoint(e.clientX, e.clientY)
+          const groupEl = el?.closest('[data-group-name]') as HTMLElement | null
+          setDropTargetGroup(groupEl?.dataset.groupName ?? null)
+        }
       }
       if (eng.resizeState) {
         eng.updateResize(e.clientX, e.clientY)
       }
     }
 
-    const onUp = () => {
+    const onUp = (e: PointerEvent) => {
       const eng = engineRef.current
+      const ds = dragStateRef.current
+      if (ds && !ds.id.startsWith('group:')) {
+        // Check if dropped on a group
+        const el = document.elementFromPoint(e.clientX, e.clientY)
+        const groupEl = el?.closest('[data-group-name]') as HTMLElement | null
+        if (groupEl?.dataset.groupName && onDropOnGroupRef.current) {
+          eng.cancelDrag()
+          onDropOnGroupRef.current(ds.id, groupEl.dataset.groupName)
+          setGhostPos(null)
+          setDropTargetGroup(null)
+          return
+        }
+      }
       if (eng.dragState) eng.endDrag()
       if (eng.resizeState) eng.endResize()
       setGhostPos(null)
+      setDropTargetGroup(null)
     }
 
     window.addEventListener('pointermove', onMove)
@@ -149,6 +173,7 @@ export function GridContainer({ engine, children, agentIds, showHeader, showGrid
               isAnyDragging={isDragging}
               isResizing={isResizing}
               engine={engine}
+              isDropTarget={id.startsWith('group:') && dropTargetGroup === id.slice(6)}
             >
               {children(id, rect, mode)}
             </GridCell>
@@ -193,6 +218,7 @@ interface GridCellProps {
   isAnyDragging: boolean
   isResizing: boolean
   engine: GridEngine
+  isDropTarget?: boolean
   children: React.ReactNode
 }
 
@@ -206,6 +232,7 @@ function GridCell({
   isAnyDragging,
   isResizing,
   engine,
+  isDropTarget,
   children,
 }: GridCellProps) {
   const cellRef = useRef<HTMLDivElement>(null)
@@ -282,18 +309,23 @@ function GridCell({
   const h = rect.h * cellH + (rect.h - 1) * GAP
   const isCompact = mode === 'compact' || mode === 'compact-minimal'
 
+  const isGroup = id.startsWith('group:')
+
   return (
     <div
       ref={cellRef}
-      className="relative overflow-hidden"
+      className={`relative ${isGroup ? '' : 'overflow-hidden'}`}
       onPointerDown={onPointerDown}
+      {...(isGroup ? { 'data-group-name': id.slice(6) } : {})}
       style={{
         gridColumn: `${rect.col} / span ${rect.w}`,
         gridRow: `${rect.row} / span ${rect.h}`,
         height: h,
         opacity: isDragging ? 0.3 : 1,
-        transition: 'opacity 200ms',
+        transition: 'opacity 200ms, box-shadow 150ms',
         cursor: isDragging ? 'grabbing' : 'grab',
+        boxShadow: isDropTarget ? 'inset 0 0 0 2px rgba(80,200,120,0.7), 0 0 12px rgba(80,200,120,0.3)' : undefined,
+        borderRadius: isDropTarget ? 8 : undefined,
         userSelect: 'none',
       }}
     >
@@ -305,32 +337,35 @@ function GridCell({
           {/* Right edge */}
           <div
             data-no-drag
-            className="absolute top-2 right-0 bottom-2 w-2 cursor-ew-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
-            style={{ background: 'linear-gradient(to right, transparent, rgba(255,255,255,0.15))' }}
+            className="absolute top-2 bottom-2 w-2 cursor-ew-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+            style={{ right: isGroup ? -4 : 0, background: 'linear-gradient(to right, transparent, rgba(255,255,255,0.15))' }}
             onPointerDown={(e) => onResizePointerDown(e, 'x')}
           />
           {/* Bottom edge */}
           <div
             data-no-drag
-            className="absolute left-2 right-2 bottom-0 h-2 cursor-ns-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
-            style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.15))' }}
+            className="absolute left-2 right-2 h-2 cursor-ns-resize z-10 opacity-0 hover:opacity-100 transition-opacity"
+            style={{ bottom: isGroup ? -4 : 0, background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.15))' }}
             onPointerDown={(e) => onResizePointerDown(e, 'y')}
           />
-          {/* Bottom-right corner — large touch target */}
+          {/* Bottom-right corner — offset outside for groups so it doesn't conflict with inner card resize */}
           <div
             data-no-drag
-            className="absolute bottom-0 right-0 cursor-nwse-resize z-10 group/resize"
-            style={{ width: 28, height: 28 }}
+            className="absolute cursor-nwse-resize z-20 group/resize"
+            style={{
+              width: 28, height: 28,
+              bottom: isGroup ? -6 : 0,
+              right: isGroup ? -6 : 0,
+            }}
             onPointerDown={(e) => onResizePointerDown(e, 'both')}
           >
-            <svg viewBox="0 0 16 16" className="absolute bottom-1 right-1 w-4 h-4 text-white/20 group-hover/resize:text-white/50 transition-colors">
+            <svg viewBox="0 0 16 16" className={`absolute w-4 h-4 transition-colors ${isGroup ? 'bottom-1.5 right-1.5 text-white/30 group-hover/resize:text-white/60' : 'bottom-1 right-1 text-white/20 group-hover/resize:text-white/50'}`}>
               <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" />
               <line x1="8" y1="14" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
               <line x1="12" y1="14" x2="14" y2="12" stroke="currentColor" strokeWidth="1.5" />
             </svg>
           </div>
         </>
-
       )}
     </div>
   )

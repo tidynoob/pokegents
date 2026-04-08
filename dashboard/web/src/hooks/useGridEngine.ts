@@ -592,10 +592,8 @@ export function useGridEngine(
 
   const endDrag = useCallback(() => {
     if (previewLayouts) {
-      // Auto-compact after drag so displaced cards don't stay stranded
-      const compacted = compactUp(previewLayouts, settings.cols)
-      setLayoutsState(compacted)
-      persistLayouts(compacted, settings)
+      setLayoutsState(previewLayouts)
+      persistLayouts(previewLayouts, settings)
     }
     setPreviewLayouts(null)
     setDragState(null)

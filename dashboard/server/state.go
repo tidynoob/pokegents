@@ -27,7 +27,8 @@ type StateManager struct {
 	agents    map[string]*AgentState    // keyed by session_id
 	ephemeral map[string]*EphemeralAgent // keyed by agent_id
 	contexts      map[string]ContextUsage   // keyed by session_id, survives rebuilds
-	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
+	activityFeeds  map[string][]ActivityItem // keyed by session_id, survives rebuilds
+	feedClearedAt  map[string]time.Time     // when UserPromptSubmit last cleared the feed
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
 	agentOrder         []string                  // user-defined display order (session IDs), persisted
@@ -52,6 +53,7 @@ func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir strin
 		ephemeral:        make(map[string]*EphemeralAgent),
 		contexts:          make(map[string]ContextUsage),
 		activityFeeds:     make(map[string][]ActivityItem),
+		feedClearedAt:     make(map[string]time.Time),
 		nameOverrides:    make(map[string]string),
 		sessionIDMap:     make(map[string]string),
 		dataDir:          dataDir,
@@ -601,10 +603,35 @@ func (sm *StateManager) UpdateActivityFeed(sessionID string, transcriptFeed []Ac
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Filter out transcript entries that predate the last feed clear (UserPromptSubmit).
+	// This prevents stale entries from the previous turn from re-appearing.
+	if clearedAt, ok := sm.feedClearedAt[sessionID]; ok {
+		filtered := make([]ActivityItem, 0, len(transcriptFeed))
+		for _, item := range transcriptFeed {
+			if item.Time == "" {
+				filtered = append(filtered, item)
+				continue
+			}
+			// Parse HH:MM:SS time, assume today
+			if t, err := time.ParseInLocation("15:04:05", item.Time, time.Now().Location()); err == nil {
+				now := time.Now()
+				itemTime := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), t.Second(), 0, now.Location())
+				if itemTime.Before(clearedAt) {
+					continue // skip stale entry
+				}
+			}
+			filtered = append(filtered, item)
+		}
+		transcriptFeed = filtered
+	}
+
 	existing := sm.activityFeeds[sessionID]
 
 	// If no existing feed, use the transcript feed directly
 	if len(existing) == 0 {
+		if len(transcriptFeed) == 0 {
+			return
+		}
 		sm.activityFeeds[sessionID] = transcriptFeed
 		if a, ok := sm.agents[sessionID]; ok {
 			a.ActivityFeed = transcriptFeed
@@ -859,6 +886,7 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 		switch evt.HookEventName {
 		case "UserPromptSubmit":
 			feed = nil
+			sm.feedClearedAt[evt.SessionID] = time.Now()
 		case "PreToolUse":
 			toolInput := ""
 			if m, ok := evt.ToolInput.(map[string]any); ok {

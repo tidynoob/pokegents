@@ -5,6 +5,7 @@
 *~
 
 # Build artifacts
+bin/
 dashboard/pokegents-dashboard
 dashboard/web/node_modules/
 dashboard/web/dist/

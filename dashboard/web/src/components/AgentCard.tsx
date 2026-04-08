@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage, assignRole, assignProject, ProjectInfo, RoleInfo } from '../api'
+import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage, assignRole, assignProject, assignTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { POKEMON_SPRITES } from './sprites'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
@@ -176,6 +176,7 @@ interface AgentCardProps {
   cardRef?: (el: HTMLDivElement | null) => void
   projects?: ProjectInfo[]
   roles?: RoleInfo[]
+  existingGroups?: string[]
 }
 
 const HIDE_DETAILS = new Set(['finished', 'session started', 'processing prompt'])
@@ -189,7 +190,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -408,6 +409,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           onCollapse={onCollapse}
           projects={projects}
           roles={roles}
+          existingGroups={existingGroups}
           onAssignStatus={(msg) => { setToast(msg); setTimeout(() => setToast(null), 2500) }}
         />,
         document.body
@@ -516,7 +518,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
   )
 }
 
-function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse, projects, roles, onAssignStatus }: {
+function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse, projects, roles, existingGroups, onAssignStatus }: {
   x: number
   y: number
   agent: AgentState
@@ -527,8 +529,11 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
   onAssignStatus?: (msg: string) => void
   projects?: ProjectInfo[]
   roles?: RoleInfo[]
+  existingGroups?: string[]
 }) {
-  const [submenu, setSubmenu] = useState<'role' | 'project' | null>(null)
+  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | null>(null)
+  const [newGroupName, setNewGroupName] = useState('')
+  const newGroupRef = useRef<HTMLInputElement>(null)
 
   const showStatus = (res: { status: string }, label: string) => {
     if (!onAssignStatus) return
@@ -656,6 +661,68 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
             )}
           </>
         )}
+
+        {/* Group assignment */}
+        <div className="relative">
+          <button
+            onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'group' ? null : 'group') }}
+            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+          >
+            <span className="w-4 text-center">📦</span>
+            {agent.task_group ? `Group: ${agent.task_group}` : 'Assign group'}
+            <span className="ml-auto text-white/30">▸</span>
+          </button>
+          {submenu === 'group' && (
+            <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+              {agent.task_group && (
+                <button
+                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, ''); onAssignStatus?.('Removed from group'); onClose() }}
+                  className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                >
+                  None
+                </button>
+              )}
+              {(existingGroups || []).map(g => (
+                <button
+                  key={g}
+                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, g); onAssignStatus?.(`Group: ${g}`); onClose() }}
+                  className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow' : 'text-white/90'}`}
+                >
+                  {g}
+                </button>
+              ))}
+              <div className="border-t border-white/10 my-1" />
+              <form
+                className="px-2 py-1 flex gap-1"
+                onClick={(e) => e.stopPropagation()}
+                onSubmit={async (e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const name = newGroupName.trim()
+                  if (!name) return
+                  await assignTaskGroup(agent.session_id, name)
+                  onAssignStatus?.(`Group: ${name}`)
+                  onClose()
+                }}
+              >
+                <input
+                  ref={newGroupRef}
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  placeholder="New group..."
+                  className="flex-1 bg-black/30 border border-white/20 rounded px-1.5 py-0.5 text-[7px] font-pixel text-white outline-none focus:border-white/40"
+                  style={{ minWidth: 0 }}
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="text-[7px] font-pixel text-white/60 hover:text-white px-1"
+                >+</button>
+              </form>
+            </div>
+          )}
+        </div>
 
         <div className="border-t border-white/10 my-1" />
         <button
