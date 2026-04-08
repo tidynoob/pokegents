@@ -493,6 +493,17 @@ function PkmnDataPanel({ session, sprite, preview, revivingId, reviveResult, onR
             {session.project || session.profile_name}
           </span>
         )}
+        {session.task_group && (
+          <span
+            className="text-[6px] font-pixel text-white/80 rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+            style={{
+              background: 'rgba(120, 80, 200, 0.5)',
+              border: '1px solid rgba(120, 80, 200, 0.7)',
+            }}
+          >
+            {session.task_group}
+          </span>
+        )}
       </div>
 
       {/* LAST PROMPT box */}

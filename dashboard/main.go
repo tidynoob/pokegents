@@ -36,6 +36,7 @@ func runServe() {
 	// Override from environment
 	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
 		cfg.DataDir = v
+		cfg.SearchDBPath = filepath.Join(v, "search.db")
 	}
 	if v := os.Getenv("DASHBOARD_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
@@ -69,6 +70,7 @@ func runIndex() {
 	cfg := server.DefaultConfig()
 	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
 		cfg.DataDir = v
+		cfg.SearchDBPath = filepath.Join(v, "search.db")
 	}
 
 	state := server.NewStateManager(cfg.DataDir, cfg.ClaudeProjectDir)

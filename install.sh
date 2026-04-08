@@ -48,7 +48,7 @@ echo "✓ Dependencies checked"
 echo ""
 
 # ── 1. Create data directories ──────────────────────────────────────────
-mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages,grid-profiles,activity,activity-lastread}
+mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages,grid-profiles,activity,activity-lastread,ephemeral,ephemeral-pending}
 echo "✓ Data directories ready"
 
 # ── 2. Copy default config (if not present) ──────────────────────────────
@@ -155,6 +155,44 @@ jq --arg hook "$HOOK_CMD" --arg sl "$STATUSLINE_CMD" '
   && mv "${CLAUDE_SETTINGS}.tmp" "$CLAUDE_SETTINGS"
 
 echo "✓ Claude Code hooks configured (merged with existing)"
+
+# Merge ephemeral-track.sh hooks (SubagentStart, SubagentStop, PreToolUse[Agent])
+EPH_CMD="$POKEGENTS_ROOT/hooks/ephemeral-track.sh"
+
+jq --arg eph "$EPH_CMD" '
+  # Entry builder
+  def eph_entry(m): {"matcher": m, "hooks": [{"type": "command", "command": $eph, "timeout": 5}]};
+
+  .hooks //= {} |
+
+  # SubagentStart — new event, create or append
+  (if (.hooks["SubagentStart"] | type) == "array" then
+    if (.hooks["SubagentStart"] | any(.hooks[]?.command == $eph)) then .
+    else .hooks["SubagentStart"] += [eph_entry("")]
+    end
+  else .hooks["SubagentStart"] = [eph_entry("")]
+  end) |
+
+  # SubagentStop — new event, create or append
+  (if (.hooks["SubagentStop"] | type) == "array" then
+    if (.hooks["SubagentStop"] | any(.hooks[]?.command == $eph)) then .
+    else .hooks["SubagentStop"] += [eph_entry("")]
+    end
+  else .hooks["SubagentStop"] = [eph_entry("")]
+  end) |
+
+  # PreToolUse[Agent] — event exists (status-update.sh uses matcher ""); append a
+  # separate entry with matcher "Agent" for ephemeral-track.sh if not already there
+  (if (.hooks["PreToolUse"] | type) == "array" then
+    if (.hooks["PreToolUse"] | any(.hooks[]?.command == $eph)) then .
+    else .hooks["PreToolUse"] += [eph_entry("Agent")]
+    end
+  else .hooks["PreToolUse"] = [eph_entry("Agent")]
+  end)
+' "$CLAUDE_SETTINGS" > "${CLAUDE_SETTINGS}.tmp" \
+  && mv "${CLAUDE_SETTINGS}.tmp" "$CLAUDE_SETTINGS"
+
+echo "✓ Ephemeral agent hooks configured (SubagentStart, SubagentStop, PreToolUse[Agent])"
 
 # ── 5. Install MCP messaging server ─────────────────────────────────────
 if [ -d "$POKEGENTS_ROOT/mcp" ] && [[ "$HAS_NODE" == "true" ]]; then

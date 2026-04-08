@@ -10,6 +10,7 @@ type StatusFile = store.StatusFile
 type Profile = store.Profile
 type Message = store.Message
 type AgentConnection = store.Connection
+type EphemeralAgent = store.EphemeralAgent
 
 // AgentState is the merged view sent to the frontend.
 // This is server-only (not in store) because it combines data from multiple sources.
@@ -43,6 +44,11 @@ type AgentState struct {
 	IsAlive        bool   `json:"is_alive"`
 	DurationSec    int    `json:"duration_sec"`
 	CreatedAt      string `json:"created_at,omitempty"`
+	Model           string `json:"model,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	Ephemeral       bool   `json:"ephemeral,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	SubagentType    string `json:"subagent_type,omitempty"`
 }
 
 // ActivityItem is a single entry in the agent's activity feed.

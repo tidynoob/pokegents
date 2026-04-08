@@ -109,6 +109,15 @@ export async function shutdownAgent(sessionId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/shutdown`, { method: 'POST' })
 }
 
+export async function dismissEphemeral(agentId: string): Promise<void> {
+  await fetch(`${BASE}/ephemeral/${agentId}`, { method: 'DELETE' })
+}
+
+export async function releaseTaskGroup(groupName: string): Promise<{ ok: boolean; count: number }> {
+  const res = await fetch(`${BASE}/task-groups/${encodeURIComponent(groupName)}/release`, { method: 'POST' })
+  return res.json()
+}
+
 export async function sendMessage(from: string, to: string, content: string): Promise<AgentMessage | null> {
   const res = await fetch(`${BASE}/messages`, {
     method: 'POST',
@@ -210,12 +219,16 @@ export interface ProjectInfo {
   name: string
   title: string
   color: [number, number, number]
+  model?: string
+  effort?: string
 }
 
 export interface RoleInfo {
   name: string
   title: string
   emoji: string
+  model?: string
+  effort?: string
 }
 
 export async function fetchProjectList(): Promise<ProjectInfo[]> {

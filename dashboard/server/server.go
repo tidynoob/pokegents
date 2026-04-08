@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,8 +32,9 @@ type Server struct {
 	port      int
 	webDir    string
 
-	pendingResumeSprites   map[string]string // old session_id → sprite name
-	pendingResumeSpriteMu  sync.Mutex
+	pendingResumeSprites    map[string]string // old session_id → sprite name
+	pendingResumeTaskGroups map[string]string // old session_id → task group
+	pendingResumeSpriteMu   sync.Mutex       // guards both pending maps
 }
 
 // Config holds server configuration.
@@ -47,7 +49,7 @@ type Config struct {
 // DefaultConfig returns config with sensible defaults, reading port from ~/.ccsession/config.json.
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
-	dataDir := filepath.Join(home, ".ccsession")
+	dataDir := filepath.Join(home, ".pokegents")
 
 	// Read port from config file
 	port := 7834
@@ -119,7 +121,8 @@ func NewServer(cfg Config) (*Server, error) {
 		mux:                  http.NewServeMux(),
 		port:                 cfg.Port,
 		webDir:               cfg.WebDir,
-		pendingResumeSprites: make(map[string]string),
+		pendingResumeSprites:    make(map[string]string),
+		pendingResumeTaskGroups: make(map[string]string),
 	}
 
 	s.routes()
@@ -141,6 +144,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
+	s.mux.HandleFunc("POST /api/task-groups/{name}/release", s.handleReleaseTaskGroup)
+	s.mux.HandleFunc("GET /api/task-groups/{name}/sessions", s.handleGetTaskGroupSessions)
 	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
 	s.mux.HandleFunc("GET /api/sessions/{id}/preview", s.handleSessionPreview)
 	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
@@ -171,6 +176,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/grid-profiles/{name}", s.handleGetGridProfile)
 	s.mux.HandleFunc("PUT /api/grid-profiles/{name}", s.handleSetGridProfile)
 	s.mux.HandleFunc("DELETE /api/grid-profiles/{name}", s.handleDeleteGridProfile)
+	s.mux.HandleFunc("POST /api/ephemeral", s.handleCreateEphemeral)
+	s.mux.HandleFunc("PUT /api/ephemeral/{id}/complete", s.handleCompleteEphemeral)
+	s.mux.HandleFunc("DELETE /api/ephemeral/{id}", s.handleDeleteEphemeral)
 
 	// Serve frontend static files
 	if s.webDir != "" {
@@ -217,9 +225,9 @@ func (s *Server) Start() error {
 	}
 	go s.watcherLoop()
 
-	// Start search indexer
+	// Start search indexer — sync running session metadata after first index build
 	if s.searchSvc != nil {
-		s.searchSvc.StartBackgroundIndexer(5 * time.Minute)
+		s.searchSvc.StartBackgroundIndexer(5*time.Minute, s.syncSessionMetaToSearch)
 	}
 
 	// Start transcript poller for live trace updates
@@ -316,12 +324,32 @@ func (s *Server) watcherLoop() {
 		case evt.SessionID == "*":
 			// Running directory changed — full reload
 			s.state.ReloadRunning()
+			s.syncSessionMetaToSearch()
 			s.applyPendingResumeSprites()
+			s.applyPendingResumeTaskGroups()
 		case strings.HasPrefix(evt.Path, "status") || strings.HasSuffix(evt.Path, ".json"):
 			// Status file changed
 			s.state.ReloadStatus(evt.Path)
 		}
 		s.eventBus.Publish("state_update", s.state.GetAgents())
+	}
+}
+
+// syncSessionMetaToSearch pushes role/project/task_group/profile from running
+// sessions into the search index so metadata survives after SessionEnd cleanup.
+func (s *Server) syncSessionMetaToSearch() {
+	if s.searchSvc == nil {
+		return
+	}
+	for _, a := range s.state.GetAgents() {
+		if a.Ephemeral {
+			continue
+		}
+		s.searchSvc.UpdateSessionMeta(a.SessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup)
+		// Also update under CCD session ID (running file key may differ from JSONL key)
+		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID {
+			s.searchSvc.UpdateSessionMeta(a.CCDSessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup)
+		}
 	}
 }
 
@@ -363,6 +391,33 @@ func (s *Server) applyPendingResumeSprites() {
 	}
 }
 
+// applyPendingResumeTaskGroups re-assigns task groups to sessions resumed from PC Box.
+func (s *Server) applyPendingResumeTaskGroups() {
+	s.pendingResumeSpriteMu.Lock()
+	if len(s.pendingResumeTaskGroups) == 0 {
+		s.pendingResumeSpriteMu.Unlock()
+		return
+	}
+	pending := make(map[string]string, len(s.pendingResumeTaskGroups))
+	for k, v := range s.pendingResumeTaskGroups {
+		pending[k] = v
+	}
+	s.pendingResumeSpriteMu.Unlock()
+
+	agents := s.state.GetAgents()
+	for oldSID, taskGroup := range pending {
+		for _, a := range agents {
+			if a.SessionID == oldSID || a.CCDSessionID == oldSID {
+				s.state.SetAgentTaskGroup(a.SessionID, taskGroup)
+				s.pendingResumeSpriteMu.Lock()
+				delete(s.pendingResumeTaskGroups, oldSID)
+				s.pendingResumeSpriteMu.Unlock()
+				break
+			}
+		}
+	}
+}
+
 // Stop shuts down all background workers.
 func (s *Server) Stop() {
 	s.storeWatcher.Stop()
@@ -376,7 +431,7 @@ func (s *Server) Stop() {
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -401,6 +456,83 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, agent)
+}
+
+func (s *Server) handleCreateEphemeral(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AgentID         string `json:"agent_id"`
+		AgentType       string `json:"agent_type"`
+		ParentSessionID string `json:"parent_session_id"`
+		Description     string `json:"description"`
+		Prompt          string `json:"prompt"`
+		CWD             string `json:"cwd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.AgentID == "" {
+		http.Error(w, "agent_id required", http.StatusBadRequest)
+		return
+	}
+
+	ea := EphemeralAgent{
+		AgentID:         req.AgentID,
+		AgentType:       req.AgentType,
+		ParentSessionID: req.ParentSessionID,
+		Description:     req.Description,
+		Prompt:          req.Prompt,
+		State:           "running",
+		CWD:             req.CWD,
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := s.state.CreateEphemeral(ea); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.eventBus.Publish("ephemeral_start", map[string]any{
+		"agent_id":   ea.AgentID,
+		"agent_type": ea.AgentType,
+		"parent":     ea.ParentSessionID,
+	})
+	writeJSON(w, map[string]string{"status": "ok", "agent_id": ea.AgentID})
+}
+
+func (s *Server) handleCompleteEphemeral(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	var req struct {
+		LastMessage    string `json:"last_message"`
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.state.CompleteEphemeral(agentID, req.LastMessage, req.TranscriptPath); err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "ephemeral agent not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	s.eventBus.Publish("ephemeral_stop", map[string]any{
+		"agent_id": agentID,
+	})
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleDeleteEphemeral(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if err := s.state.DeleteEphemeral(agentID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
@@ -708,37 +840,69 @@ func (s *Server) enrichDisplayNames(results []SearchResult) {
 func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 
-	// Find profile for this session
+	// Gather metadata from active agent state first, then fall back to search index
+	var profileName, role, project, taskGroup string
+
 	agent := s.state.GetAgent(sessionID)
-	profileName := ""
 	if agent != nil {
 		profileName = agent.ProfileName
+		role = agent.Role
+		project = agent.Project
+		taskGroup = agent.TaskGroup
 	}
 
-	if profileName == "" && s.searchSvc != nil {
-		profileName = s.searchSvc.GetProfileName(sessionID)
-	}
-
-	// Fallback: try to match profile from the session's CWD in the search index
-	if profileName == "" {
-		// Use the search results which have profile_name populated
-		if s.searchSvc != nil {
-			results, err := s.searchSvc.RecentSessions(200)
-			if err == nil {
-				for _, r := range results {
-					if r.SessionID == sessionID {
-						profileName = r.ProfileName
-						break
-					}
-				}
-			}
+	// Fill gaps from search index (has metadata synced while session was active)
+	if s.searchSvc != nil && (profileName == "" || role == "" || project == "") {
+		pn, ro, pr, tg := s.searchSvc.GetSessionMeta(sessionID)
+		if profileName == "" {
+			profileName = pn
+		}
+		if role == "" {
+			role = ro
+		}
+		if project == "" {
+			project = pr
+		}
+		if taskGroup == "" {
+			taskGroup = tg
 		}
 	}
 
-	if profileName == "" {
-		log.Printf("resume: cannot determine profile for session %s", sessionID)
-		http.Error(w, "cannot determine profile for session", http.StatusBadRequest)
+	// Build the pokegent target: prefer role@project, fall back to legacy profile
+	pokegentTarget := profileName
+	if role != "" && project != "" {
+		pokegentTarget = role + "@" + project
+	} else if project != "" {
+		pokegentTarget = "@" + project
+	}
+
+	if pokegentTarget == "" {
+		// No profile found — resume directly via claude CLI without pokegent wrapping
+		log.Printf("resume: no profile for session %s, using bare claude --resume", sessionID)
+		safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)
+		script := fmt.Sprintf(`
+tell application "iTerm2"
+	tell current window
+		create tab with default profile
+		delay 1
+		tell current session
+			write text "claude --resume %s"
+		end tell
+	end tell
+end tell`, safeSession)
+		if err := exec.Command("osascript", "-e", script).Run(); err != nil {
+			http.Error(w, fmt.Sprintf("failed to open iTerm2: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
 		return
+	}
+
+	// Store task group for re-assignment after the resumed session registers
+	if taskGroup != "" {
+		s.pendingResumeSpriteMu.Lock()
+		s.pendingResumeTaskGroups[sessionID] = taskGroup
+		s.pendingResumeSpriteMu.Unlock()
 	}
 
 	// Preserve sprite override: the resumed session will get a new ccd_session_id
@@ -766,7 +930,7 @@ func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	compact := r.URL.Query().Get("compact")
-	if err := s.terminal.ResumeSession(profileName, sessionID, compact); err != nil {
+	if err := s.terminal.ResumeSession(pokegentTarget, sessionID, compact); err != nil {
 		http.Error(w, fmt.Sprintf("failed to open iTerm2: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1210,6 +1374,82 @@ func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
 		s.terminal.CloseSession(itermSID, tty)
 	}()
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleReleaseTaskGroup(w http.ResponseWriter, r *http.Request) {
+	groupName := r.PathValue("name")
+	if groupName == "" {
+		http.Error(w, "missing group name", http.StatusBadRequest)
+		return
+	}
+
+	agents := s.state.GetAgentsByTaskGroup(groupName)
+	if len(agents) == 0 {
+		http.Error(w, "no agents in group", http.StatusNotFound)
+		return
+	}
+
+	var released []string
+	for _, agent := range agents {
+		if agent.Ephemeral {
+			// Dismiss completed ephemerals immediately
+			if agent.State == "done" {
+				s.state.DeleteEphemeral(agent.SessionID)
+			}
+			continue
+		}
+		if agent.TTY == "" {
+			continue
+		}
+		itermSID := agent.ITermSessionID
+		tty := agent.TTY
+		go func() {
+			s.terminal.WriteText(itermSID, tty, "/exit")
+			time.Sleep(2 * time.Second)
+			s.terminal.CloseSession(itermSID, tty)
+		}()
+		released = append(released, agent.SessionID)
+	}
+
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]any{"ok": true, "released": released, "count": len(released)})
+}
+
+func (s *Server) handleGetTaskGroupSessions(w http.ResponseWriter, r *http.Request) {
+	groupName := r.PathValue("name")
+	if groupName == "" {
+		http.Error(w, "missing group name", http.StatusBadRequest)
+		return
+	}
+	if s.searchSvc == nil {
+		http.Error(w, "search unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	results, err := s.searchSvc.SessionsByTaskGroup(groupName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Mark which sessions are currently active
+	activeAgents := s.state.GetAgents()
+	activeIDs := make(map[string]bool, len(activeAgents))
+	for _, a := range activeAgents {
+		activeIDs[a.SessionID] = true
+		if a.CCDSessionID != "" {
+			activeIDs[a.CCDSessionID] = true
+		}
+	}
+
+	type sessionInfo struct {
+		services.SearchResult
+		Active bool `json:"active"`
+	}
+	out := make([]sessionInfo, len(results))
+	for i, r := range results {
+		out[i] = sessionInfo{SearchResult: r, Active: activeIDs[r.SessionID]}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {

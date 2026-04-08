@@ -55,6 +55,15 @@ function TaskGroupPill({ name }: { name: string }) {
   )
 }
 
+function SubagentPill({ type }: { type?: string }) {
+  return (
+    <span
+      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      style={{ background: 'rgba(120, 180, 255, 0.6)', border: '1px solid rgba(120, 180, 255, 0.8)' }}
+    >{type || 'subagent'}</span>
+  )
+}
+
 function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
@@ -163,6 +172,7 @@ interface AgentCardProps {
   isReading?: boolean
   hideSprite?: boolean
   onCollapse?: () => void
+  onDismiss?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
   projects?: ProjectInfo[]
   roles?: RoleInfo[]
@@ -179,7 +189,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, cardRef, projects, roles }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -245,7 +255,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         onContextMenu={handleContextMenu}
         className={`text-left ${pad} cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
           isBusy ? 'gba-card-selected' : 'gba-card'
-        }`}
+        } ${agent.ephemeral ? 'opacity-80' : ''}`}
+        style={agent.ephemeral ? { borderStyle: 'dashed' } : undefined}
         onMouseEnter={() => {
           if (isDone && !flashDismissed) setFlashDismissed(true)
         }}
@@ -275,6 +286,20 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               title="Collapse"
             >
               −
+            </button>
+          </div>
+        )}
+
+        {/* Dismiss button for completed ephemeral subagents */}
+        {onDismiss && agent.ephemeral && isDone && (
+          <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
+            <button
+              onClick={(e) => { e.stopPropagation(); onDismiss() }}
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-white/20 hover:bg-white/40 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white leading-none"
+              style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+              title="Dismiss"
+            >
+              ×
             </button>
           </div>
         )}
@@ -329,9 +354,10 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               <div className="flex flex-col items-end gap-0.5 shrink-0">
                 {!compact && (
                   <>
+                    {agent.ephemeral && <SubagentPill type={agent.subagent_type} />}
                     {agent.task_group && <TaskGroupPill name={agent.task_group} />}
                     {agent.role && <RolePill name={agent.role} />}
-                    <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />
+                    {!agent.ephemeral && <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />}
                   </>
                 )}
               </div>

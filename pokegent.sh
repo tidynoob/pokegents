@@ -338,6 +338,7 @@ HELP
   # ── Read resolved fields ──────────────────────────────────────────────
   local profile_name="" title="" emoji="" r="" g="" b="" cwd="" system_prompt=""
   local _iterm2_profile="" _add_dirs_file="" _skip_perms_override=""
+  local _model="" _effort=""
 
   case "$_resolved_mode" in
     composed|project)
@@ -350,6 +351,8 @@ HELP
       _iterm2_profile=$(jq -r '.iterm2_profile // empty' "$_project_file")
       _add_dirs_file="$_project_file"
       local _context_prompt=$(jq -r '.context_prompt // empty' "$_project_file")
+      _model=$(jq -r '.model // empty' "$_project_file")
+      _effort=$(jq -r '.effort // empty' "$_project_file")
 
       if [[ -n "$_role_file" && -f "$_role_file" ]]; then
         # Composed: role + project
@@ -357,6 +360,10 @@ HELP
         emoji=$(jq -r '.emoji' "$_role_file")
         local _role_prompt=$(jq -r '.system_prompt // empty' "$_role_file")
         _skip_perms_override=$(jq -r '.skip_permissions // "unset"' "$_role_file" 2>/dev/null)
+        local _role_model=$(jq -r '.model // empty' "$_role_file")
+        local _role_effort=$(jq -r '.effort // empty' "$_role_file")
+        [[ -n "$_role_model" ]] && _model="$_role_model"
+        [[ -n "$_role_effort" ]] && _effort="$_role_effort"
 
         # Compose display name and system prompt
         title="${_role_title} — ${title}"
@@ -390,6 +397,8 @@ ${_role_prompt}"
       _iterm2_profile=$(jq -r '.iterm2_profile // empty' "$_profile_file")
       _add_dirs_file="$_profile_file"
       system_prompt=$(jq -r '.system_prompt // empty' "$_profile_file")
+      _model=$(jq -r '.model // empty' "$_profile_file")
+      _effort=$(jq -r '.effort // empty' "$_profile_file")
       profile_name="$_profile_name"
       ;;
   esac
@@ -622,7 +631,9 @@ if last_title: print(last_title)
     --arg iterm_sid "$iterm_sid" \
     --arg created_at "$created_at" \
     --arg task_group "${task_group:-}" \
-    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group}' \
+    --arg model "$_model" \
+    --arg effort "$_effort" \
+    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort}' \
     > "$running_file"
 
   # Build claude args — skip_permissions: role override > legacy profile > global config
@@ -774,7 +785,11 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
     done < <(jq -r '.add_dirs // [] | .[]' "$_add_dirs_file")
   fi
 
-  # Pass through extra args
+  # Model and effort from role/project config
+  [[ -n "$_model" ]] && claude_args+=(--model "$_model")
+  [[ -n "$_effort" ]] && claude_args+=(--effort "$_effort")
+
+  # Pass through extra args (can override model/effort)
   claude_args+=("$@")
 
   # cd and launch

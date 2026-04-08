@@ -70,6 +70,8 @@ type RunningSession struct {
 	Role           string `json:"role,omitempty"`       // role name (empty for legacy/bare project)
 	Project        string `json:"project,omitempty"`    // project name (empty for legacy profiles)
 	TaskGroup      string `json:"task_group,omitempty"` // organizational grouping (e.g. "proxy", "auth-migration")
+	Model          string `json:"model,omitempty"`      // claude model alias or full name (e.g. "sonnet", "haiku")
+	Effort         string `json:"effort,omitempty"`     // reasoning effort level (low, medium, high, max)
 }
 
 // Agent interface implementation for identity resolution.
@@ -101,6 +103,8 @@ type Profile struct {
 	CWD          string `json:"cwd"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	ITermProfile string `json:"iterm2_profile,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Effort       string `json:"effort,omitempty"`
 }
 
 // AppConfig is the global config from ~/.pokegents/config.json.
@@ -123,6 +127,8 @@ type ProjectConfig struct {
 	AddDirs       []string `json:"add_dirs,omitempty"`
 	ContextPrompt string   `json:"context_prompt,omitempty"`
 	ITermProfile  string   `json:"iterm2_profile,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	Effort        string   `json:"effort,omitempty"`
 }
 
 // RoleConfig defines a persona — how the agent behaves.
@@ -133,6 +139,25 @@ type RoleConfig struct {
 	Emoji           string `json:"emoji"`
 	SystemPrompt    string `json:"system_prompt"`
 	SkipPermissions *bool  `json:"skip_permissions,omitempty"` // nil = inherit from config
+	Model           string `json:"model,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+}
+
+// EphemeralAgent represents a Claude Code built-in Agent tool subagent
+// tracked for dashboard visibility. Stored in ~/.pokegents/ephemeral/*.json.
+type EphemeralAgent struct {
+	AgentID         string `json:"agent_id"`                // unique ID from SubagentStart hook
+	AgentType       string `json:"agent_type"`              // Explore, Plan, general-purpose, etc.
+	ParentSessionID string `json:"parent_session_id"`       // CCD session ID of spawning agent
+	Description     string `json:"description,omitempty"`   // short task description
+	Prompt          string `json:"prompt,omitempty"`        // task prompt (truncated)
+	State           string `json:"state"`                   // "running" or "completed"
+	CWD             string `json:"cwd,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	CompletedAt     string `json:"completed_at,omitempty"`
+	LastMessage     string `json:"last_message,omitempty"`  // final result summary
+	TranscriptPath  string `json:"transcript_path,omitempty"`
+	DurationSec     int    `json:"duration_sec,omitempty"`
 }
 
 // Message represents a message between agents.

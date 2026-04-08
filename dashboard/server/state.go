@@ -24,7 +24,8 @@ type StateManager struct {
 	profiles map[string]Profile       // keyed by profile name
 	running  map[string]RunningSession // keyed by session_id
 	statuses map[string]StatusFile     // keyed by session_id
-	agents   map[string]*AgentState    // keyed by session_id
+	agents    map[string]*AgentState    // keyed by session_id
+	ephemeral map[string]*EphemeralAgent // keyed by agent_id
 	contexts      map[string]ContextUsage   // keyed by session_id, survives rebuilds
 	activityFeeds map[string][]ActivityItem // keyed by session_id, survives rebuilds
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
@@ -48,6 +49,7 @@ func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir strin
 		running:          make(map[string]RunningSession),
 		statuses:         make(map[string]StatusFile),
 		agents:           make(map[string]*AgentState),
+		ephemeral:        make(map[string]*EphemeralAgent),
 		contexts:          make(map[string]ContextUsage),
 		activityFeeds:     make(map[string][]ActivityItem),
 		nameOverrides:    make(map[string]string),
@@ -70,6 +72,16 @@ func (sm *StateManager) LoadAll() error {
 	}
 	if err := sm.loadStatuses(); err != nil {
 		return err
+	}
+	if err := sm.loadEphemeral(); err != nil {
+		return err
+	}
+	// Cleanup completed ephemeral agents older than 1 hour on startup
+	if sm.store.Ephemeral != nil {
+		if removed, err := sm.store.Ephemeral.Cleanup(time.Hour); err == nil && removed > 0 {
+			log.Printf("Cleaned up %d stale ephemeral agent(s)", removed)
+			sm.loadEphemeral() // reload after cleanup
+		}
 	}
 	sm.loadNameOverrides()
 	sm.loadSessionIDMap()
@@ -95,18 +107,69 @@ func (sm *StateManager) LoadAll() error {
 	return nil
 }
 
-// GetAgents returns only agents that have an active running session registration.
+// GetAgents returns only agents that have an active running session registration,
+// plus any ephemeral subagents tracked via the Agent tool.
 func (sm *StateManager) GetAgents() []AgentState {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	result := make([]AgentState, 0, len(sm.agents))
+	result := make([]AgentState, 0, len(sm.agents)+len(sm.ephemeral))
 	for _, a := range sm.agents {
 		// Only show agents with a running session file
 		if _, hasRunning := sm.running[a.SessionID]; !hasRunning {
 			continue
 		}
 		result = append(result, *a)
+	}
+
+	// Append ephemeral agents (subagents from Agent tool)
+	for _, ea := range sm.ephemeral {
+		state := "busy"
+		if ea.State == "completed" {
+			state = "done"
+		}
+		a := AgentState{
+			SessionID:       ea.AgentID,
+			ProfileName:     ea.AgentType,
+			DisplayName:     ea.Description,
+			State:           state,
+			Detail:          ea.AgentType + " subagent",
+			CWD:             ea.CWD,
+			LastSummary:     ea.LastMessage,
+			CreatedAt:       ea.CreatedAt,
+			Ephemeral:       true,
+			ParentSessionID: ea.ParentSessionID,
+			SubagentType:    ea.AgentType,
+			IsAlive:         ea.State == "running",
+		}
+		if ea.DurationSec > 0 {
+			a.DurationSec = ea.DurationSec
+		}
+		// Inherit parent's task group, or auto-create one if parent has none
+		if ea.ParentSessionID != "" {
+			for sid, parent := range sm.agents {
+				if parent.CCDSessionID == ea.ParentSessionID || parent.SessionID == ea.ParentSessionID {
+					a.Project = parent.Project
+					a.ProjectColor = parent.ProjectColor
+					if parent.TaskGroup != "" {
+						a.TaskGroup = parent.TaskGroup
+					} else {
+						// Auto-group: create an implicit group so parent and ephemeral are visually linked
+						groupName := parent.DisplayName + " + subagents"
+						a.TaskGroup = groupName
+						// Also tag the parent in the result slice so it ends up in the same group
+						for i := range result {
+							if result[i].SessionID == sid {
+								result[i].TaskGroup = groupName
+								break
+							}
+						}
+					}
+					break
+				}
+			}
+		}
+		result = append(result, a)
 	}
 
 	// Sort by user-defined order. Agents in agentOrder come first (in that order),
@@ -247,6 +310,18 @@ func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
 	return nil
 }
 
+// GetAgentsByTaskGroup returns all agents that belong to the given task group.
+func (sm *StateManager) GetAgentsByTaskGroup(taskGroup string) []AgentState {
+	agents := sm.GetAgents()
+	var result []AgentState
+	for _, a := range agents {
+		if a.TaskGroup == taskGroup {
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
 // composeProfileKey builds the composite profile key from role and project.
 func (sm *StateManager) composeProfileKey(role, project, fallback string) string {
 	if role != "" && project != "" {
@@ -361,6 +436,8 @@ func (sm *StateManager) CleanStale() bool {
 			for _, f := range matches {
 				os.Remove(f)
 			}
+			// Cascade: remove completed ephemeral children
+			sm.cleanupEphemeralsByParentLocked(sid)
 			delete(sm.running, sid)
 			changed = true
 		}
@@ -755,6 +832,8 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 	case "SessionEnd":
 		// Remove from statuses — agent disappears from dashboard
 		delete(sm.statuses, evt.SessionID)
+		// Cascade: remove completed ephemeral children so they don't linger
+		sm.cleanupEphemeralsByParentLocked(evt.SessionID)
 		sm.rebuildAgents()
 		return nil
 	default:
@@ -855,6 +934,20 @@ func (sm *StateManager) loadStatuses() error {
 	return nil
 }
 
+func (sm *StateManager) loadEphemeral() error {
+	if sm.store.Ephemeral == nil {
+		return nil
+	}
+	agents, err := sm.store.Ephemeral.List()
+	if err != nil {
+		return err
+	}
+	for i := range agents {
+		sm.ephemeral[agents[i].AgentID] = &agents[i]
+	}
+	return nil
+}
+
 func (sm *StateManager) loadNameOverrides() {
 	sm.store.Metadata.LoadJSON("name-overrides.json", &sm.nameOverrides)
 }
@@ -894,6 +987,82 @@ func (sm *StateManager) SetAgentOrder(order []string) {
 	defer sm.mu.Unlock()
 	sm.agentOrder = order
 	sm.saveAgentOrder()
+}
+
+// CreateEphemeral registers a new ephemeral subagent in memory and on disk.
+func (sm *StateManager) CreateEphemeral(ea EphemeralAgent) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.store.Ephemeral == nil {
+		return fmt.Errorf("ephemeral store not available")
+	}
+	if err := sm.store.Ephemeral.Create(ea); err != nil {
+		return err
+	}
+	sm.ephemeral[ea.AgentID] = &ea
+	return nil
+}
+
+// CompleteEphemeral marks an ephemeral subagent as completed in memory and on disk.
+func (sm *StateManager) CompleteEphemeral(agentID, lastMessage, transcriptPath string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.store.Ephemeral == nil {
+		return fmt.Errorf("ephemeral store not available")
+	}
+	if err := sm.store.Ephemeral.Complete(agentID, lastMessage, transcriptPath); err != nil {
+		return err
+	}
+	// Update in-memory
+	if ea, ok := sm.ephemeral[agentID]; ok {
+		ea.State = "completed"
+		ea.LastMessage = lastMessage
+		ea.TranscriptPath = transcriptPath
+		ea.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		if ea.CreatedAt != "" {
+			if created, err := time.Parse(time.RFC3339, ea.CreatedAt); err == nil {
+				ea.DurationSec = int(time.Since(created).Seconds())
+			}
+		}
+	}
+	return nil
+}
+
+// DeleteEphemeral removes an ephemeral subagent from memory and disk.
+// Always removes from memory even if the disk file is already gone.
+func (sm *StateManager) DeleteEphemeral(agentID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.store.Ephemeral != nil {
+		// Best-effort disk removal — ignore "not found" errors
+		if err := sm.store.Ephemeral.Delete(agentID); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	delete(sm.ephemeral, agentID)
+	return nil
+}
+
+// cleanupEphemeralsByParentLocked removes completed ephemeral agents for a parent session.
+// Caller must hold sm.mu.
+func (sm *StateManager) cleanupEphemeralsByParentLocked(parentSessionID string) int {
+	if sm.store.Ephemeral == nil {
+		return 0
+	}
+	removed := 0
+	for id, ea := range sm.ephemeral {
+		if ea.ParentSessionID != parentSessionID {
+			continue
+		}
+		if ea.State != "completed" {
+			continue
+		}
+		if err := sm.store.Ephemeral.Delete(id); err == nil {
+			delete(sm.ephemeral, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 // reconcileNameOverrides uses the session ID map to fix name-override entries
@@ -954,23 +1123,40 @@ func (sm *StateManager) rebuildAgents() {
 			State:          "idle",
 		}
 
-		// Enrich from role config (emoji)
+		// Seed model/effort from running session (launch-time snapshot)
+		a.Model = rs.Model
+		a.Effort = rs.Effort
+
+		// Enrich from role config (emoji, model, effort)
 		if rs.Role != "" && sm.store != nil {
 			if role, err := sm.store.Roles.Get(rs.Role); err == nil {
 				a.RoleEmoji = role.Emoji
 				if a.Emoji == "" {
 					a.Emoji = role.Emoji
 				}
+				if role.Model != "" {
+					a.Model = role.Model
+				}
+				if role.Effort != "" {
+					a.Effort = role.Effort
+				}
 			}
 		}
 
-		// Enrich from project config (color)
+		// Enrich from project config (color, model/effort baseline)
 		if rs.Project != "" && sm.store != nil {
 			if proj, err := sm.store.Projects.Get(rs.Project); err == nil {
 				a.ProjectColor = proj.Color
 				a.Color = proj.Color
 				if a.DisplayName == "" {
 					a.DisplayName = proj.Title
+				}
+				// Project provides baseline — only fill if role didn't set
+				if a.Model == "" && proj.Model != "" {
+					a.Model = proj.Model
+				}
+				if a.Effort == "" && proj.Effort != "" {
+					a.Effort = proj.Effort
 				}
 			}
 		}

@@ -2,7 +2,10 @@
 // All file I/O is centralized here — consumers use interfaces, never os.ReadFile directly.
 package store
 
-import "pokegents/dashboard/server/core"
+import (
+	"pokegents/dashboard/server/core"
+	"time"
+)
 
 // Type aliases — canonical definitions live in core/types.go.
 // Store uses these so consumers don't need to import both packages.
@@ -16,6 +19,7 @@ type ActivityEntry = core.ActivityEntry
 type FileEvent = core.FileEvent
 type ProjectConfig = core.ProjectConfig
 type RoleConfig = core.RoleConfig
+type EphemeralAgent = core.EphemeralAgent
 
 // Store aggregates all sub-stores. Pass this to SessionManager, MessageService, etc.
 type Store struct {
@@ -28,6 +32,7 @@ type Store struct {
 	Messages  MessageStore
 	Activity  ActivityStore
 	Metadata  MetadataStore
+	Ephemeral EphemeralStore
 }
 
 // ProjectStore manages project configuration files (~/.pokegents/projects/*.json).
@@ -44,6 +49,22 @@ type RoleStore interface {
 	Get(name string) (*RoleConfig, error)
 	// List returns all roles.
 	List() ([]RoleConfig, error)
+}
+
+// EphemeralStore manages ephemeral subagent files (~/.pokegents/ephemeral/*.json).
+type EphemeralStore interface {
+	// Get returns an ephemeral agent by agent_id.
+	Get(agentID string) (*EphemeralAgent, error)
+	// List returns all ephemeral agents.
+	List() ([]EphemeralAgent, error)
+	// Create writes a new ephemeral agent file.
+	Create(ea EphemeralAgent) error
+	// Complete marks an ephemeral agent as completed.
+	Complete(agentID string, lastMessage string, transcriptPath string) error
+	// Delete removes an ephemeral agent file.
+	Delete(agentID string) error
+	// Cleanup removes completed ephemeral agents older than maxAge.
+	Cleanup(maxAge time.Duration) (int, error)
 }
 
 // MetadataStore manages small JSON metadata files (name overrides, session ID map, agent order).
