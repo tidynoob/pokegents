@@ -1,14 +1,13 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
-import { fetchSessions, focusAgent, fetchConnections, fetchSpriteOverrides, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage } from './types'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
 import { GroupContainer } from './components/GroupContainer'
 import { SessionBrowser } from './components/SessionBrowser'
 import { hashString } from './components/CreatureIcon'
-import { POKEMON_SPRITES } from './components/sprites'
 import { useMessageAnimations, DeliveryOverlay } from './components/MessageAnimations'
 import { useSettings } from './hooks/useSettings'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -184,7 +183,6 @@ export default function App() {
   const [showBrowser, setShowBrowser] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
-  const [spriteOverrides, setSpriteOverrides] = useState<Record<string, string>>({})
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [bottomTab, setBottomTab] = useState<'messages' | 'activity'>('messages')
@@ -331,7 +329,6 @@ export default function App() {
   useEffect(() => {
     fetchSessions().then(setAgents).catch(() => {})
     fetchConnections().then(setConnections).catch(() => {})
-    fetchSpriteOverrides().then(setSpriteOverrides).catch(() => {})
     fetchMessageHistory().then(setMessages).catch(() => {})
     fetchActivity().then(setActivity).catch(() => {})
     fetchProfiles().then(p => setProfiles(p.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
@@ -477,38 +474,18 @@ export default function App() {
   }, [gridEngine.layouts, gridEngine.resizeState, grouped, groupViewModes])
 
 
-  // Map any ID → ccd_session_id (for sprite hashing — matches pokegent.sh which hashes the ccd UUID)
-  // Also map to session_id for agent lookups
-  const resolveToSpriteId = useMemo(() => {
-    const m: Record<string, string> = {}
-    for (const a of agents) {
-      // The sprite ID is the ccd_session_id (what pokegent.sh hashes), fallback to session_id
-      const spriteId = a.ccd_session_id || a.session_id
-      m[a.session_id] = spriteId
-      if (a.ccd_session_id) m[a.ccd_session_id] = spriteId
-    }
-    return (id: string) => m[id] || id
-  }, [agents])
-
-  const resolveId = useMemo(() => {
-    const m: Record<string, string> = {}
-    for (const a of agents) {
-      m[a.session_id] = a.session_id
-      if (a.ccd_session_id && a.ccd_session_id !== a.session_id) m[a.ccd_session_id] = a.session_id
-    }
-    return (id: string) => m[id] || id
-  }, [agents])
-
   const getSpriteForId = useMemo(() => {
-    return (id: string) => {
-      const spriteId = resolveToSpriteId(id)
-      const sessionId = resolveId(id)
-      // Check overrides under both IDs (override may be keyed by either)
-      return spriteOverrides[spriteId] || spriteOverrides[sessionId] || spriteOverrides[id] || POKEMON_SPRITES[hashString(spriteId) % POKEMON_SPRITES.length]
+    const m: Record<string, string> = {}
+    for (const a of agents) {
+      if (a.sprite) {
+        m[a.session_id] = a.sprite
+        if (a.ccd_session_id) m[a.ccd_session_id] = a.sprite
+      }
     }
-  }, [resolveToSpriteId, resolveId, spriteOverrides])
+    return (id: string) => m[id] || 'pokeball'
+  }, [agents])
 
-  const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, spriteOverrides, getSpriteForId)
+  const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, getSpriteForId)
 
   // Build a map of session_id → connected agent info (for icons)
   const agentInfoMap = useMemo(() => {
@@ -837,8 +814,6 @@ export default function App() {
                   pixelH={pixelH}
                   singleCardPixelW={singleCardPixelW}
                   singleCardPixelH={singleCardPixelH}
-                  spriteOverrides={spriteOverrides}
-                  resolveToSpriteId={resolveToSpriteId}
                   readingAgents={readingAgents}
                   projects={projects}
                   roles={roles}
@@ -856,8 +831,7 @@ export default function App() {
                 onClick={() => focusAgent(agent.session_id)}
                 mode={cardMode}
                 connectedAgents={connectedAgentsMap[agent.session_id]}
-                spriteOverride={spriteOverrides[resolveToSpriteId(agent.session_id)] || spriteOverrides[agent.session_id]}
-                spriteSessionId={resolveToSpriteId(agent.session_id)}
+                spriteOverride={agent.sprite}
                 isReading={readingAgents.has(agent.session_id)}
                 hideSprite={hiddenSprites.has(agent.session_id)}
                 projects={projects}

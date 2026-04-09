@@ -12,6 +12,7 @@ export interface AgentState {
   task_group?: string
   model?: string
   effort?: string
+  sprite?: string
   ephemeral?: boolean
   parent_session_id?: string
   subagent_type?: string

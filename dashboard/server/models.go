@@ -46,6 +46,7 @@ type AgentState struct {
 	CreatedAt      string `json:"created_at,omitempty"`
 	Model           string `json:"model,omitempty"`
 	Effort          string `json:"effort,omitempty"`
+	Sprite          string `json:"sprite,omitempty"`
 	Ephemeral       bool   `json:"ephemeral,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	SubagentType    string `json:"subagent_type,omitempty"`

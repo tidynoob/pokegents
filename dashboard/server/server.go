@@ -32,9 +32,8 @@ type Server struct {
 	port      int
 	webDir    string
 
-	pendingResumeSprites    map[string]string // old session_id → sprite name
 	pendingResumeTaskGroups map[string]string // old session_id → task group
-	pendingResumeSpriteMu   sync.Mutex       // guards both pending maps
+	pendingResumeSpriteMu   sync.Mutex       // guards pendingResumeTaskGroups
 }
 
 // Config holds server configuration.
@@ -121,7 +120,6 @@ func NewServer(cfg Config) (*Server, error) {
 		mux:                  http.NewServeMux(),
 		port:                 cfg.Port,
 		webDir:               cfg.WebDir,
-		pendingResumeSprites:    make(map[string]string),
 		pendingResumeTaskGroups: make(map[string]string),
 	}
 
@@ -149,7 +147,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
 	s.mux.HandleFunc("GET /api/sessions/{id}/preview", s.handleSessionPreview)
 	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
-	s.mux.HandleFunc("GET /api/sprite-overrides", s.handleGetSpriteOverrides)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
 	s.mux.HandleFunc("GET /api/projects", s.handleGetProjects)
 	s.mux.HandleFunc("GET /api/roles", s.handleGetRoles)
@@ -325,7 +322,6 @@ func (s *Server) watcherLoop() {
 			// Running directory changed — full reload
 			s.state.ReloadRunning()
 			s.syncSessionMetaToSearch()
-			s.applyPendingResumeSprites()
 			s.applyPendingResumeTaskGroups()
 		case strings.HasPrefix(evt.Path, "status") || strings.HasSuffix(evt.Path, ".json"):
 			// Status file changed
@@ -350,44 +346,6 @@ func (s *Server) syncSessionMetaToSearch() {
 		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID {
 			s.searchSvc.UpdateSessionMeta(a.CCDSessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup)
 		}
-	}
-}
-
-// applyPendingResumeSprites checks if any active agent matches a pending
-// resume sprite (stored when PC BOX resumes a session) and saves the override.
-func (s *Server) applyPendingResumeSprites() {
-	s.pendingResumeSpriteMu.Lock()
-	if len(s.pendingResumeSprites) == 0 {
-		s.pendingResumeSpriteMu.Unlock()
-		return
-	}
-	pending := make(map[string]string, len(s.pendingResumeSprites))
-	for k, v := range s.pendingResumeSprites {
-		pending[k] = v
-	}
-	s.pendingResumeSpriteMu.Unlock()
-
-	agents := s.state.GetAgents()
-	overrides := s.loadSpriteOverrides()
-	changed := false
-	for oldSID, sprite := range pending {
-		for _, a := range agents {
-			if a.SessionID == oldSID || a.CCDSessionID == oldSID {
-				overrides[a.SessionID] = sprite
-				if a.CCDSessionID != "" {
-					overrides[a.CCDSessionID] = sprite
-				}
-				changed = true
-				s.pendingResumeSpriteMu.Lock()
-				delete(s.pendingResumeSprites, oldSID)
-				s.pendingResumeSpriteMu.Unlock()
-				break
-			}
-		}
-	}
-	if changed {
-		data, _ := json.Marshal(overrides)
-		os.WriteFile(s.spriteOverridesPath(), data, 0644)
 	}
 }
 
@@ -809,9 +767,6 @@ func (s *Server) enrichDisplayNames(results []SearchResult) {
 		}
 	}
 
-	// Sprite overrides
-	spriteOverrides := s.loadSpriteOverrides()
-
 	for i := range results {
 		sid := results[i].SessionID
 		if name, ok := activeNames[sid]; ok {
@@ -820,19 +775,6 @@ func (s *Server) enrichDisplayNames(results []SearchResult) {
 			results[i].CustomTitle = name
 		} else if name, ok := reverseMap[sid]; ok {
 			results[i].CustomTitle = name
-		}
-		if sprite, ok := spriteOverrides[sid]; ok {
-			results[i].SpriteOverride = sprite
-		} else {
-			// Check by CCD session ID (overrides may be keyed by either)
-			for ccdSID, claudeSID := range sessionIDMap {
-				if claudeSID == sid {
-					if sprite, ok := spriteOverrides[ccdSID]; ok {
-						results[i].SpriteOverride = sprite
-						break
-					}
-				}
-			}
 		}
 	}
 }
@@ -903,30 +845,6 @@ end tell`, safeSession)
 		s.pendingResumeSpriteMu.Lock()
 		s.pendingResumeTaskGroups[sessionID] = taskGroup
 		s.pendingResumeSpriteMu.Unlock()
-	}
-
-	// Preserve sprite override: the resumed session will get a new ccd_session_id
-	// but the same claude session_id after reconciliation. Store a pending sprite
-	// so we can apply it to the new ccd_session_id when it appears.
-	overrides := s.loadSpriteOverrides()
-	if sprite, ok := overrides[sessionID]; ok {
-		s.pendingResumeSpriteMu.Lock()
-		s.pendingResumeSprites[sessionID] = sprite
-		s.pendingResumeSpriteMu.Unlock()
-	} else {
-		// Check if override exists under a ccd_session_id that maps to this session
-		sessionIDMap := make(map[string]string)
-		s.fileStore.Metadata.LoadJSON("session-id-map.json", &sessionIDMap)
-		for ccdID, claudeID := range sessionIDMap {
-			if claudeID == sessionID {
-				if sprite, ok := overrides[ccdID]; ok {
-					s.pendingResumeSpriteMu.Lock()
-					s.pendingResumeSprites[sessionID] = sprite
-					s.pendingResumeSpriteMu.Unlock()
-					break
-				}
-			}
-		}
 	}
 
 	compact := r.URL.Query().Get("compact")
@@ -1556,24 +1474,8 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-func (s *Server) spriteOverridesPath() string {
-	return filepath.Join(s.state.dataDir, "sprite-overrides.json")
-}
-
-func (s *Server) loadSpriteOverrides() map[string]string {
-	data, err := os.ReadFile(s.spriteOverridesPath())
-	if err != nil {
-		return map[string]string{}
-	}
-	var m map[string]string
-	if json.Unmarshal(data, &m) != nil {
-		return map[string]string{}
-	}
-	return m
-}
-
 func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+	sessionID := s.resolveSessionID(r.PathValue("id"))
 	var body struct {
 		Sprite string `json:"sprite"`
 	}
@@ -1582,16 +1484,11 @@ func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	overrides := s.loadSpriteOverrides()
-	// Store under session_id
-	overrides[sessionID] = body.Sprite
-	// Also store under ccd_session_id so pokegent.sh can find it
-	if agent := s.state.GetAgent(sessionID); agent != nil && agent.CCDSessionID != "" && agent.CCDSessionID != sessionID {
-		overrides[agent.CCDSessionID] = body.Sprite
+	if err := s.state.SetAgentSprite(sessionID, body.Sprite); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
 	}
-	data, _ := json.Marshal(overrides)
-	os.WriteFile(s.spriteOverridesPath(), data, 0644)
-
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -1699,10 +1596,6 @@ func composeTarget(role, project, fallback string) string {
 		return role + "@"
 	}
 	return fallback
-}
-
-func (s *Server) handleGetSpriteOverrides(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.loadSpriteOverrides())
 }
 
 func writeJSON(w http.ResponseWriter, data any) {

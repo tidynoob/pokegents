@@ -10,6 +10,10 @@
 # NOTE: No set -e! Hooks must NEVER crash — a broken hook blocks all Claude operations.
 # Every command that can fail uses 2>/dev/null || fallback instead.
 
+# Ignore SIGINT — when user hits Ctrl+C during a tool, the signal propagates to
+# the process group and would kill this hook before it can write the status file.
+trap '' INT
+
 POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
 STATUS_DIR="$POKEGENTS_DATA/status"
 mkdir -p "$STATUS_DIR"

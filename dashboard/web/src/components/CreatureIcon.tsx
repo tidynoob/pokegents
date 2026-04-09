@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { POKEMON_SPRITES } from './sprites'
 import { SpritePicker } from './SpritePicker'
 import { setSprite } from '../api'
 
@@ -24,13 +23,11 @@ interface CreatureIconProps {
 }
 
 export function CreatureIcon({ sessionId, size = 40, noGlow, doneFlash, spriteOverride, editable, noBg }: CreatureIconProps) {
-  const idx = hashString(sessionId) % POKEMON_SPRITES.length
-  const sprite = spriteOverride || POKEMON_SPRITES[idx]
+  const sprite = spriteOverride || 'pokeball'
   const [showPicker, setShowPicker] = useState(false)
 
   const handleSelect = async (newSprite: string) => {
     await setSprite(sessionId, newSprite)
-    window.location.reload()
   }
 
   return (

@@ -72,6 +72,7 @@ type RunningSession struct {
 	TaskGroup      string `json:"task_group,omitempty"` // organizational grouping (e.g. "proxy", "auth-migration")
 	Model          string `json:"model,omitempty"`      // claude model alias or full name (e.g. "sonnet", "haiku")
 	Effort         string `json:"effort,omitempty"`     // reasoning effort level (low, medium, high, max)
+	Sprite         string `json:"sprite,omitempty"`     // pokemon sprite name (single source of truth)
 }
 
 // Agent interface implementation for identity resolution.

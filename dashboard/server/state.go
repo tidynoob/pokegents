@@ -312,6 +312,24 @@ func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
 	return nil
 }
 
+// SetAgentSprite updates the sprite field on a running agent (single source of truth).
+func (sm *StateManager) SetAgentSprite(sessionID, sprite string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	rs, ok := sm.running[sessionID]
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	rs.Sprite = sprite
+	sm.running[sessionID] = rs
+	sm.store.Running.Update(sessionID, func(r *RunningSession) {
+		r.Sprite = sprite
+	})
+	sm.rebuildAgents()
+	return nil
+}
+
 // GetAgentsByTaskGroup returns all agents that belong to the given task group.
 func (sm *StateManager) GetAgentsByTaskGroup(taskGroup string) []AgentState {
 	agents := sm.GetAgents()
@@ -1154,6 +1172,7 @@ func (sm *StateManager) rebuildAgents() {
 		// Seed model/effort from running session (launch-time snapshot)
 		a.Model = rs.Model
 		a.Effort = rs.Effort
+		a.Sprite = rs.Sprite
 
 		// Enrich from role config (emoji, model, effort)
 		if rs.Role != "" && sm.store != nil {

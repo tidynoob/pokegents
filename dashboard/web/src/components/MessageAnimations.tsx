@@ -1,8 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentMessage } from '../types'
-import { POKEMON_SPRITES } from './sprites'
-import { hashString } from './CreatureIcon'
 
 // ─── Sprite delivery animation ──────────────────────────────────────────
 // The sender's sprite leaves its card, carries a letter to the recipient,
@@ -22,8 +20,7 @@ const DELIVERY_DURATION = 2000 // total ms for out + back
 export function useMessageAnimations(
   messages: AgentMessage[],
   cardRefs: React.MutableRefObject<Map<string, HTMLDivElement>>,
-  spriteOverrides: Record<string, string>,
-  getSpriteForId?: (id: string) => string
+  getSpriteForId: (id: string) => string
 ) {
   const [deliveries, setDeliveries] = useState<DeliveryAnim[]>([])
   const [hiddenSprites, setHiddenSprites] = useState<Set<string>>(new Set())
@@ -34,9 +31,8 @@ export function useMessageAnimations(
   const initialLoadDone = useRef(false)
 
   const getSpriteForSession = useCallback((sessionId: string) => {
-    if (getSpriteForId) return getSpriteForId(sessionId)
-    return spriteOverrides[sessionId] || POKEMON_SPRITES[hashString(sessionId) % POKEMON_SPRITES.length]
-  }, [spriteOverrides, getSpriteForId])
+    return getSpriteForId(sessionId)
+  }, [getSpriteForId])
 
   // Seed on first non-empty messages load — mark all existing as seen
   useEffect(() => {

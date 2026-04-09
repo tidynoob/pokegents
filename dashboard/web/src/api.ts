@@ -82,12 +82,6 @@ export async function setSprite(sessionId: string, sprite: string): Promise<void
   })
 }
 
-export async function fetchSpriteOverrides(): Promise<Record<string, string>> {
-  const res = await fetch(`${BASE}/sprite-overrides`)
-  if (!res.ok) return {}
-  return res.json()
-}
-
 export async function sendPrompt(sessionId: string, prompt: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/prompt`, {
     method: 'POST',

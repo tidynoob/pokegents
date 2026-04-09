@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { SearchResult } from '../types'
 import { search, fetchRecentSessions, fetchSessionPreview } from '../api'
-import { POKEMON_SPRITES } from './sprites'
-import { hashString } from './CreatureIcon'
 
 interface SessionBrowserProps {
   onClose: () => void
@@ -126,7 +124,7 @@ export function SessionBrowser({ onClose, activeSessionIds, onResume }: SessionB
   const selected  = displayList.find(r => r.session_id === selectedId) ?? displayList[0] ?? null
 
   const getSprite = (r: SearchResult) =>
-    r.sprite_override || POKEMON_SPRITES[hashString(r.session_id) % POKEMON_SPRITES.length]
+    r.sprite_override || 'pokeball'
 
   return (
     <div

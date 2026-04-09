@@ -8,6 +8,7 @@
 #   3. SubagentStop → PUT to dashboard /api/ephemeral/{id}/complete
 
 # NOTE: No set -e! Hooks must NEVER crash.
+trap '' INT  # Ignore SIGINT so Ctrl+C doesn't kill the hook mid-write
 
 POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
 EPHEMERAL_DIR="$POKEGENTS_DATA/ephemeral"

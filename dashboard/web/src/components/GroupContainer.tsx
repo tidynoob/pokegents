@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react'
 import { AgentState } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
-import { POKEMON_SPRITES } from './sprites'
 import { focusAgent, releaseTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import type { CardMode } from '../hooks/useGridEngine'
 
@@ -22,8 +21,6 @@ interface GroupContainerProps {
   pixelH: number
   singleCardPixelW?: number
   singleCardPixelH?: number
-  spriteOverrides: Record<string, string>
-  resolveToSpriteId: (id: string) => string
   readingAgents: Set<string>
   projects: ProjectInfo[]
   roles: RoleInfo[]
@@ -63,9 +60,8 @@ function sortMembers(members: AgentState[]): AgentState[] {
   })
 }
 
-function getSprite(agent: AgentState, spriteOverrides: Record<string, string>, resolveToSpriteId: (id: string) => string): string {
-  const spriteId = resolveToSpriteId(agent.session_id)
-  return spriteOverrides[spriteId] || spriteOverrides[agent.session_id] || POKEMON_SPRITES[hashString(spriteId) % POKEMON_SPRITES.length]
+function getSprite(agent: AgentState): string {
+  return agent.sprite || 'pokeball'
 }
 
 const HEADER_H = 32
@@ -101,7 +97,7 @@ function MemberRow({ agent, sprite, isActive, onClick }: {
 export function GroupContainer({
   name, members: rawMembers, viewMode, pageIndex, onSetViewMode, onSetPageIndex, onMinimize,
   cols, cardMode, pixelW, pixelH, singleCardPixelW, singleCardPixelH,
-  spriteOverrides, resolveToSpriteId, readingAgents, projects, roles, existingGroups,
+  readingAgents, projects, roles, existingGroups,
 }: GroupContainerProps) {
   const [confirmRelease, setConfirmRelease] = useState(false)
   const confirmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -138,8 +134,7 @@ export function GroupContainer({
       agent={agent}
       onClick={() => focusAgent(agent.session_id)}
       mode={cardMode}
-      spriteOverride={spriteOverrides[resolveToSpriteId(agent.session_id)] || spriteOverrides[agent.session_id]}
-      spriteSessionId={resolveToSpriteId(agent.session_id)}
+      spriteOverride={agent.sprite}
       isReading={readingAgents.has(agent.session_id)}
       projects={projects}
       roles={roles}
@@ -223,7 +218,7 @@ export function GroupContainer({
           {otherMembers.length > 0 && (
             <div className="shrink-0 flex flex-col gap-px overflow-y-auto" style={{ maxHeight: Math.min(otherMembers.length * 22, 88) }}>
               {otherMembers.map((m) => {
-                const sprite = getSprite(m, spriteOverrides, resolveToSpriteId)
+                const sprite = getSprite(m)
                 const memberIdx = members.findIndex(x => x.session_id === m.session_id)
                 return (
                   <MemberRow

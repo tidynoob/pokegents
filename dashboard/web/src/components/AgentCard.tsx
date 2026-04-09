@@ -4,7 +4,6 @@ import { AgentState } from '../types'
 import { CreatureIcon, hashString } from './CreatureIcon'
 import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage, assignRole, assignProject, assignTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
-import { POKEMON_SPRITES } from './sprites'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
 import { useSpriteAnimation } from './spriteAnimations'
 
@@ -168,7 +167,6 @@ interface AgentCardProps {
   mode: LayoutMode
   connectedAgents?: { session_id: string; emoji: string; display_name: string }[]
   spriteOverride?: string
-  spriteSessionId?: string  // ccd_session_id for consistent sprite hashing (matches pokegent.sh)
   isReading?: boolean
   hideSprite?: boolean
   onCollapse?: () => void
@@ -190,7 +188,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, spriteSessionId, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -318,7 +316,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             {/* Animated sprite + bubbles */}
             <SpriteAnimWrapper state={isDone && !isIdle && ageSeconds < 60 && !flashDismissed ? 'celebrating' : agent.state} compact={compact}>
               <div style={{ opacity: hideSprite ? 0 : 1, transition: 'opacity 0.15s' }}>
-                <CreatureIcon sessionId={spriteSessionId || agent.session_id} size={iconSize} noGlow={compact} doneFlash={false} spriteOverride={spriteOverride} noBg />
+                <CreatureIcon sessionId={agent.session_id} size={iconSize} noGlow={compact} doneFlash={false} spriteOverride={spriteOverride} noBg />
               </div>
               {!compact && <BusyBubble isBusy={isBusy} />}
               {!compact && <DoneBubble isDone={isDone} />}
@@ -418,8 +416,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
       {/* Sprite picker */}
       {showSpritePicker && createPortal(
         <SpritePicker
-          currentSprite={spriteOverride || POKEMON_SPRITES[hashString(agent.session_id) % POKEMON_SPRITES.length]}
-          onSelect={async (sprite) => { await setSprite(agent.session_id, sprite); window.location.reload() }}
+          currentSprite={agent.sprite || 'pokeball'}
+          onSelect={async (sprite) => { await setSprite(agent.session_id, sprite) }}
           onClose={() => setShowSpritePicker(false)}
         />,
         document.body

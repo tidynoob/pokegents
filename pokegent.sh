@@ -533,48 +533,45 @@ if last_title: print(last_title)
 
   # Set tab icon to the agent's Pokemon sprite via a per-session dynamic profile (iTerm2 only)
   local sprite_dir="$POKEGENTS_ROOT/dashboard/web/public/sprites"
-  if [[ "$POKEGENTS_HAS_ITERM" == "true" && -d "$sprite_dir" ]]; then
-    local overrides_file="$POKEGENTS_DATA/sprite-overrides.json"
-    local sprite=""
-    # For resume, use the original session ID for override lookup (the dashboard
-    # stores overrides keyed by the original session_id, not the fresh clone UUID)
-    local sprite_lookup_sid="$session_id"
-    if [[ "$continue_mode" == "true" && -n "$resume_session_id" ]]; then
-      # Find the full session ID that matches the resume prefix
-      if [[ -f "$overrides_file" ]]; then
-        local _full_sid=$(jq -r --arg prefix "$resume_session_id" '
-          keys[] | select(startswith($prefix))
-        ' "$overrides_file" 2>/dev/null | head -1)
-        [[ -n "$_full_sid" ]] && sprite_lookup_sid="$_full_sid"
+  local sprite=""
+
+  # For resume/fork, inherit sprite from original session's running file
+  if [[ "$continue_mode" == "true" && -n "$resume_session_id" ]]; then
+    for rf in "$RUNNING_DIR"/*.json; do
+      [[ -f "$rf" ]] || continue
+      local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
+      local _rf_ccd=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
+      if [[ "$_rf_sid" == "$resume_session_id"* || "$_rf_ccd" == "$resume_session_id"* ]]; then
+        sprite=$(jq -r '.sprite // empty' "$rf" 2>/dev/null)
+        break
       fi
+    done
+  fi
+
+  # If no inherited sprite, pick one randomly (hash of session_id, done ONCE)
+  if [[ -z "$sprite" ]]; then
+    local base_sprites_file="$sprite_dir/_base_sprites.txt"
+    local sprites=()
+    if [[ -f "$base_sprites_file" ]]; then
+      sprites=("${(@f)$(cat "$base_sprites_file")}")
+    else
+      sprites=($(ls "$sprite_dir"/*.png 2>/dev/null | xargs -I{} basename {} .png | sort))
     fi
-    if [[ -f "$overrides_file" ]]; then
-      sprite=$(jq -r --arg sid "$sprite_lookup_sid" '.[$sid] // empty' "$overrides_file" 2>/dev/null)
+    if [[ ${#sprites[@]} -gt 0 ]]; then
+      local h=0
+      local sid_chars="$session_id"
+      for (( i=0; i<${#sid_chars}; i++ )); do
+        local c=$(printf '%d' "'${sid_chars:$i:1}")
+        h=$(( ((h << 5) - h) + c ))
+        h=$(( (h + 2147483648) % 4294967296 - 2147483648 ))
+      done
+      [[ $h -lt 0 ]] && h=$(( -h ))
+      local idx=$(( h % ${#sprites[@]} ))
+      sprite="${sprites[$idx]}"
     fi
-    if [[ -z "$sprite" ]]; then
-      # Use the same base-forms-only sprite list as the dashboard frontend
-      local base_sprites_file="$sprite_dir/_base_sprites.txt"
-      local sprites=()
-      if [[ -f "$base_sprites_file" ]]; then
-        sprites=("${(@f)$(cat "$base_sprites_file")}")
-      else
-        # Fallback: list all PNGs (may include mega/gmax forms)
-        sprites=($(ls "$sprite_dir"/*.png 2>/dev/null | xargs -I{} basename {} .png | sort))
-      fi
-      if [[ ${#sprites[@]} -gt 0 ]]; then
-        # Hash session_id (matches JS hashString: 32-bit signed overflow)
-        local h=0
-        local sid_chars="$sprite_lookup_sid"
-        for (( i=0; i<${#sid_chars}; i++ )); do
-          local c=$(printf '%d' "'${sid_chars:$i:1}")
-          h=$(( ((h << 5) - h) + c ))
-          h=$(( (h + 2147483648) % 4294967296 - 2147483648 ))
-        done
-        [[ $h -lt 0 ]] && h=$(( -h ))
-        local idx=$(( h % ${#sprites[@]} ))
-        sprite="${sprites[$idx]}"
-      fi
-    fi
+  fi
+
+  if [[ "$POKEGENTS_HAS_ITERM" == "true" && -d "$sprite_dir" && -n "$sprite" ]]; then
     if [[ -n "$sprite" && -f "$sprite_dir/${sprite}.png" ]]; then
       local abs_sprite_path="${sprite_dir:A}/${sprite}.png"
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
@@ -633,7 +630,8 @@ if last_title: print(last_title)
     --arg task_group "${task_group:-}" \
     --arg model "$_model" \
     --arg effort "$_effort" \
-    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort}' \
+    --arg sprite "${sprite:-}" \
+    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort, sprite: $sprite}' \
     > "$running_file"
 
   # Build claude args — skip_permissions: role override > legacy profile > global config
@@ -705,11 +703,12 @@ if last_title: print(last_title)
       # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
       local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
-      # Inherit task_group from original session on fork (if not explicitly set)
-      if [[ "$fork_session" == "true" && -z "$task_group" ]]; then
+      # Inherit task_group and sprite from original session on fork (if not explicitly set)
+      if [[ "$fork_session" == "true" ]]; then
         local orig_rf=$(ls "$RUNNING_DIR"/*-${matches[1]}.json 2>/dev/null | head -1)
         if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
-          task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
+          [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
+          [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_rf" 2>/dev/null)
         fi
       fi
 
@@ -726,7 +725,8 @@ if last_title: print(last_title)
         --arg iterm_sid "$iterm_sid" \
         --arg created_at "$created_at" \
         --arg task_group "${task_group:-}" \
-        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group}' \
+        --arg sprite "${sprite:-}" \
+        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, sprite: $sprite}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "
