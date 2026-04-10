@@ -38,37 +38,26 @@ USER_PROMPT=""
 BUSY_SINCE=""
 CLEAR_OUTPUT=false
 
-# Quick reconciliation: if no running file exists for this session ID, try matching
-# by POKEGENTS_SESSION_ID and patch it. This handles --fork-session where SessionStart
-# may not fire but other events do.
-# IMPORTANT: Only match by ccd_session_id field, NOT by session_id field.
-# Matching by session_id would steal the original agent's file when cloning.
+# Quick reconciliation: ensure the running file's claude_session_id (session_id field)
+# matches Claude's actual SESSION_ID. Files are keyed by pokegent_id (no renames needed).
+# Match by POKEGENT_ID env var first (new system), fall back to POKEGENTS_SESSION_ID (legacy).
 RUNNING_DIR_CHECK="$POKEGENTS_DATA/running"
-if [ -d "$RUNNING_DIR_CHECK" ] && [ "$EVENT" != "SessionStart" ] && [ "$EVENT" != "SessionEnd" ]; then
-  HAS_RF=false
-  for _rf in "$RUNNING_DIR_CHECK"/*-"${SESSION_ID}".json; do
-    [ -f "$_rf" ] && HAS_RF=true && break
-  done
-  if [ "$HAS_RF" = "false" ]; then
-    POKEGENTS_SID_CHECK="${POKEGENTS_SESSION_ID:-}"
-    if [ -n "$POKEGENTS_SID_CHECK" ]; then
-      for _rf in "$RUNNING_DIR_CHECK"/*.json; do
-        [ -f "$_rf" ] || continue
-        _RF_CCD=$(jq -r '.ccd_session_id // empty' "$_rf" 2>/dev/null)
-        if [ "$_RF_CCD" = "$POKEGENTS_SID_CHECK" ]; then
-          # Rename to match SESSION_ID — but only if no collision
-          _RF_PROF=$(jq -r '.profile // "unknown"' "$_rf" 2>/dev/null)
-          _NEW_RF="$RUNNING_DIR_CHECK/${_RF_PROF}-${SESSION_ID}.json"
-          if [ "$_rf" != "$_NEW_RF" ] && [ ! -f "$_NEW_RF" ]; then
-            jq --arg sid "$SESSION_ID" '.session_id = $sid' "$_rf" > "${_rf}.tmp" && mv "${_rf}.tmp" "$_rf"
-            mv "$_rf" "$_NEW_RF"
-          fi
-          # If collision (another agent owns that session_id), leave file untouched
-          break
-        fi
-      done
+POKEGENT_ID_CHECK="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-}}"
+if [ -d "$RUNNING_DIR_CHECK" ] && [ "$EVENT" != "SessionStart" ] && [ "$EVENT" != "SessionEnd" ] && [ -n "$POKEGENT_ID_CHECK" ]; then
+  for _rf in "$RUNNING_DIR_CHECK"/*.json; do
+    [ -f "$_rf" ] || continue
+    _RF_PGID=$(jq -r '.pokegent_id // empty' "$_rf" 2>/dev/null)
+    # Fall back to ccd_session_id for old running files without pokegent_id
+    [ -z "$_RF_PGID" ] && _RF_PGID=$(jq -r '.ccd_session_id // empty' "$_rf" 2>/dev/null)
+    if [ "$_RF_PGID" = "$POKEGENT_ID_CHECK" ]; then
+      # Update session_id field to match Claude's actual SESSION_ID (no file rename)
+      _RF_SID=$(jq -r '.session_id // empty' "$_rf" 2>/dev/null)
+      if [ "$_RF_SID" != "$SESSION_ID" ]; then
+        jq --arg sid "$SESSION_ID" '.session_id = $sid' "$_rf" > "${_rf}.tmp" 2>/dev/null && mv "${_rf}.tmp" "$_rf"
+      fi
+      break
     fi
-  fi
+  done
 fi
 
 extract_trace() {
@@ -214,51 +203,41 @@ case "$EVENT" in
     # shouldn't abort the whole hook
     set +e
     RUNNING_DIR="$POKEGENTS_DATA/running"
-    POKEGENTS_SID="${POKEGENTS_SESSION_ID:-}"
+    # Use POKEGENT_ID (new stable ID) with fallback to POKEGENTS_SESSION_ID (legacy)
+    PGID="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-}}"
 
     # Find Claude's PID from session registry
     CLAUDE_PID=""
-    CLAUDE_TTY=""
     for spf in "$HOME/.claude/sessions"/*.json; do
       [ -f "$spf" ] || continue
       SPF_SID=$(jq -r '.sessionId // empty' "$spf" 2>/dev/null)
       if [ "$SPF_SID" = "$SESSION_ID" ]; then
         CLAUDE_PID=$(jq -r '.pid // empty' "$spf" 2>/dev/null)
-        # Get TTY from the PID
-        if [ -n "$CLAUDE_PID" ]; then
-          CLAUDE_TTY=$(ps -p "$CLAUDE_PID" -o tty= 2>/dev/null | sed 's/^/\/dev\//' || echo "")
-        fi
         break
       fi
     done
 
-    # Find matching running file using priority passes:
-    # Pass 1: POKEGENTS_SESSION_ID (most specific — handles fork/clone correctly)
-    # Pass 2: exact session_id match
-    # Pass 3: TTY fallback (only if no better match found)
-    # Separate passes prevent TTY collisions from stealing another agent's file.
+    # Find matching running file — 1-pass match by pokegent_id (no file renames needed)
+    # Files are now named {profile}-{pokegent_id}.json — stable, never renamed.
     if [ -d "$RUNNING_DIR" ]; then
       MATCHED_RF=""
 
-      # Pass 1: POKEGENTS_SESSION_ID — match ONLY against ccd_session_id field
-      # Do NOT match against session_id to avoid stealing the original agent's
-      # file when cloning (the clone's POKEGENTS_SID could match the original's session_id)
-      if [ -z "$MATCHED_RF" ] && [ -n "$POKEGENTS_SID" ]; then
+      if [ -n "$PGID" ]; then
+        # Primary: match pokegent_id field (new system)
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
-          RF_POKEGENTS_SID=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
-          if [ "$RF_POKEGENTS_SID" = "$POKEGENTS_SID" ]; then
+          RF_PGID=$(jq -r '.pokegent_id // empty' "$rf" 2>/dev/null)
+          # Fall back to ccd_session_id for old running files without pokegent_id
+          [ -z "$RF_PGID" ] && RF_PGID=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
+          if [ "$RF_PGID" = "$PGID" ]; then
             MATCHED_RF="$rf"
             break
           fi
         done
       fi
 
-      # Pass 2: exact session_id (only if no POKEGENTS_SESSION_ID — legacy fallback)
-      # When POKEGENTS_SESSION_ID is set, skip this pass to avoid stealing the original
-      # agent's file during --fork-session (clone has POKEGENTS_SID but SESSION_ID may
-      # match the original's running file)
-      if [ -z "$MATCHED_RF" ] && [ -z "$POKEGENTS_SID" ]; then
+      # Legacy fallback: match by session_id field (only if no POKEGENT_ID env var)
+      if [ -z "$MATCHED_RF" ] && [ -z "$PGID" ]; then
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
           RF_SID=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
@@ -269,44 +248,18 @@ case "$EVENT" in
         done
       fi
 
-      # Pass 3: TTY fallback (only if no POKEGENTS_SESSION_ID and no exact match)
-      if [ -z "$MATCHED_RF" ] && [ -z "$POKEGENTS_SID" ] && [ -n "$CLAUDE_TTY" ]; then
-        for rf in "$RUNNING_DIR"/*.json; do
-          [ -f "$rf" ] || continue
-          RF_TTY=$(jq -r '.tty // empty' "$rf" 2>/dev/null)
-          if [ "$RF_TTY" = "$CLAUDE_TTY" ]; then
-            MATCHED_RF="$rf"
-            break
-          fi
-        done
-      fi
-
       if [ -n "$MATCHED_RF" ]; then
-        # Write claude_pid
+        # Update claude_pid and session_id (Claude's conversation ID) — NO file rename
+        _UPDATES=""
         if [ -n "$CLAUDE_PID" ]; then
-          jq --argjson cpid "$CLAUDE_PID" '.claude_pid = $cpid' "$MATCHED_RF" > "${MATCHED_RF}.tmp" && mv "${MATCHED_RF}.tmp" "$MATCHED_RF"
+          _UPDATES="$_UPDATES | .claude_pid = $CLAUDE_PID"
         fi
-        # Patch session_id and rename file — but ONLY if the target doesn't already
-        # exist as another agent's file. Clones share the same conversation session_id
-        # as the original, so renaming would overwrite the original's running file.
-        RF_PROFILE=$(jq -r '.profile // "unknown"' "$MATCHED_RF" 2>/dev/null)
-        NEW_RF="$RUNNING_DIR/${RF_PROFILE}-${SESSION_ID}.json"
-        if [ "$MATCHED_RF" = "$NEW_RF" ]; then
-          # Already correct filename — just patch session_id if needed
-          RF_SID=$(jq -r '.session_id // empty' "$MATCHED_RF" 2>/dev/null)
-          if [ "$RF_SID" != "$SESSION_ID" ]; then
-            jq --arg sid "$SESSION_ID" '.session_id = $sid' "$MATCHED_RF" > "${MATCHED_RF}.tmp" && mv "${MATCHED_RF}.tmp" "$MATCHED_RF"
-          fi
-        elif [ -f "$NEW_RF" ]; then
-          # Target file exists (another agent owns that session_id) — DON'T rename
-          # AND don't patch session_id. Two files with the same session_id causes
-          # map collisions in the dashboard. The clone keeps its ccd_session_id as
-          # its identity; status updates use the status file (keyed by SESSION_ID).
-          : # no-op — leave the file untouched
-        else
-          # Safe to rename — no collision
-          jq --arg sid "$SESSION_ID" '.session_id = $sid' "$MATCHED_RF" > "${MATCHED_RF}.tmp" && mv "${MATCHED_RF}.tmp" "$MATCHED_RF"
-          mv "$MATCHED_RF" "$NEW_RF"
+        RF_SID=$(jq -r '.session_id // empty' "$MATCHED_RF" 2>/dev/null)
+        if [ "$RF_SID" != "$SESSION_ID" ]; then
+          _UPDATES="$_UPDATES | .session_id = \"$SESSION_ID\""
+        fi
+        if [ -n "$_UPDATES" ]; then
+          jq "${_UPDATES# | }" "$MATCHED_RF" > "${MATCHED_RF}.tmp" 2>/dev/null && mv "${MATCHED_RF}.tmp" "$MATCHED_RF"
         fi
       fi
     fi
@@ -314,9 +267,26 @@ case "$EVENT" in
     # activity log, message delivery) must also be crash-resilient.
     ;;
   "SessionEnd")
-    STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"
-    rm -f "$STATUS_FILE"
+    # Clean up status + running files. Try pokegent_id first (new system), fall back to session_id.
+    _PGID_END="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-}}"
+    if [ -n "$_PGID_END" ]; then
+      rm -f "$STATUS_DIR/${_PGID_END}.json"
+    fi
+    # Also try session_id-keyed status file (legacy or status written with SESSION_ID)
+    rm -f "$STATUS_DIR/${SESSION_ID}.json"
     RUNNING_DIR="$POKEGENTS_DATA/running"
+    # Clean running files: match by pokegent_id field (new) or filename pattern (legacy)
+    if [ -n "$_PGID_END" ]; then
+      for rf in "$RUNNING_DIR"/*.json; do
+        [ -f "$rf" ] || continue
+        _RF_PG=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
+        if [ "$_RF_PG" = "$_PGID_END" ]; then
+          rm -f "$rf"
+          break
+        fi
+      done
+    fi
+    # Legacy fallback: remove by session_id filename pattern
     for rf in "$RUNNING_DIR"/*-"${SESSION_ID}".json; do
       [ -f "$rf" ] && rm -f "$rf"
     done
@@ -334,7 +304,9 @@ fi
 # Guard against race conditions: a slow PreToolUse/PostToolUse hook that finishes
 # after a Stop hook should NOT overwrite "done" with "busy".
 # Only UserPromptSubmit can transition out of done/error.
-STATUS_FILE="$STATUS_DIR/${SESSION_ID}.json"
+# Status file keyed by pokegent_id (new) or SESSION_ID (legacy fallback)
+_STATUS_KEY="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
+STATUS_FILE="$STATUS_DIR/${_STATUS_KEY}.json"
 if [ -f "$STATUS_FILE" ] && [ "$STATE" = "busy" ] && [ "$EVENT" != "UserPromptSubmit" ]; then
   CURRENT_FILE_STATE=$(jq -r '.state // ""' "$STATUS_FILE" 2>/dev/null || echo "")
   if [ "$CURRENT_FILE_STATE" = "done" ] || [ "$CURRENT_FILE_STATE" = "error" ] || [ "$CURRENT_FILE_STATE" = "idle" ]; then

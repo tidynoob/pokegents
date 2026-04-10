@@ -539,6 +539,7 @@ ${_role_prompt}"
   local resume_session_id=""
   local fork_session=false
   local task_group=""
+  local inherited_pokegent_id=""
   local filtered_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -561,6 +562,15 @@ ${_role_prompt}"
           shift 2
         else
           echo "Error: --group requires a name argument"
+          return 1
+        fi
+        ;;
+      --pokegent-id)
+        if [[ -n "$2" && "$2" != -* ]]; then
+          inherited_pokegent_id="$2"
+          shift 2
+        else
+          echo "Error: --pokegent-id requires an ID argument"
           return 1
         fi
         ;;
@@ -667,15 +677,19 @@ if last_title: print(last_title)
   echo -ne "\033]0;$display_name\007"
   printf '\e[H\e[2J'
 
-  # Generate session ID
+  # Generate session ID and pokegent_id (stable internal ID)
   local session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  # pokegent_id is the stable internal ID. For new launches it matches session_id.
+  # --pokegent-id flag overrides (used for role/project change identity preservation).
+  local pokegent_id="${inherited_pokegent_id:-$session_id}"
 
   # Set tab icon to the agent's Pokemon sprite via a per-session dynamic profile (iTerm2 only)
   local sprite_dir="$POKEGENTS_ROOT/dashboard/web/public/sprites"
   local sprite=""
 
-  # For resume/fork, inherit sprite from original session's running file
+  # For resume/fork, inherit sprite from original session
   if [[ "$continue_mode" == "true" && -n "$resume_session_id" ]]; then
+    # Check running files first (agent still alive)
     for rf in "$RUNNING_DIR"/*.json; do
       [[ -f "$rf" ]] || continue
       local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
@@ -685,6 +699,11 @@ if last_title: print(last_title)
         break
       fi
     done
+    # Fallback: check dashboard API search index (agent dead, sprite cached)
+    if [[ -z "$sprite" ]]; then
+      local _port=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
+      sprite=$(curl -s --max-time 2 "http://localhost:${_port}/api/sessions/${resume_session_id}/meta" 2>/dev/null | jq -r '.sprite // empty' 2>/dev/null || echo "")
+    fi
   fi
 
   # If no inherited sprite, pick one randomly (hash of session_id, done ONCE)
@@ -697,15 +716,7 @@ if last_title: print(last_title)
       sprites=($(ls "$sprite_dir"/*.png 2>/dev/null | xargs -I{} basename {} .png | sort))
     fi
     if [[ ${#sprites[@]} -gt 0 ]]; then
-      local h=0
-      local sid_chars="$session_id"
-      for (( i=0; i<${#sid_chars}; i++ )); do
-        local c=$(printf '%d' "'${sid_chars:$i:1}")
-        h=$(( ((h << 5) - h) + c ))
-        h=$(( (h + 2147483648) % 4294967296 - 2147483648 ))
-      done
-      [[ $h -lt 0 ]] && h=$(( -h ))
-      local idx=$(( h % ${#sprites[@]} ))
+      local idx=$(( RANDOM % ${#sprites[@]} ))
       sprite="${sprites[$idx]}"
     fi
   fi
@@ -714,8 +725,8 @@ if last_title: print(last_title)
     if [[ -n "$sprite" && -f "$sprite_dir/${sprite}.png" ]]; then
       local abs_sprite_path="${sprite_dir:A}/${sprite}.png"
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
-      local dyn_profile="$dyn_profile_dir/pokegents-session-${session_id}.json"
-      local profile_guid="CCD-SESSION-${session_id}"
+      local dyn_profile="$dyn_profile_dir/pokegents-session-${pokegent_id}.json"
+      local profile_guid="CCD-SESSION-${pokegent_id}"
       # Inherit from the project/profile's iTerm2 profile if it exists in ccd-profiles.json.
       # If not found (or not set), omit "Dynamic Profile Parent Name" entirely — iTerm2
       # will use the default profile, which works on any setup without hardcoded names.
@@ -740,7 +751,7 @@ if last_title: print(last_title)
   fi
 
   # Reset status file to idle (clear stale state from previous run)
-  local status_file="$POKEGENTS_DATA/status/${session_id}.json"
+  local status_file="$POKEGENTS_DATA/status/${pokegent_id}.json"
   jq -n \
     --arg session_id "$session_id" \
     --arg state "idle" \
@@ -751,8 +762,13 @@ if last_title: print(last_title)
     '{session_id: $session_id, state: $state, detail: $detail, cwd: $cwd, timestamp: $timestamp, last_summary: $last_summary}' \
     > "$status_file"
 
-  # Register as running
-  local running_file="$RUNNING_DIR/${profile_name}-${session_id}.json"
+  # Register as running (keyed by pokegent_id for stability — never renamed by hooks)
+  local running_file="$RUNNING_DIR/${profile_name}-${pokegent_id}.json"
+  # Guard: abort if another agent already has this pokegent_id (UUID collision)
+  if [[ -f "$running_file" ]]; then
+    echo "ERROR: Running file already exists for pokegent_id $pokegent_id — aborting to prevent collision."
+    return 1
+  fi
   local iterm_sid="${ITERM_SESSION_ID##*:}"
   local created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   jq -n \
@@ -764,13 +780,14 @@ if last_title: print(last_title)
     --arg tty "$(tty)" \
     --arg name "$display_name" \
     --arg ccd_sid "$session_id" \
+    --arg pokegent_id "$pokegent_id" \
     --arg iterm_sid "$iterm_sid" \
     --arg created_at "$created_at" \
     --arg task_group "${task_group:-}" \
     --arg model "$_model" \
     --arg effort "$_effort" \
     --arg sprite "${sprite:-}" \
-    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort, sprite: $sprite}' \
+    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, pokegent_id: $pokegent_id, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort, sprite: $sprite}' \
     > "$running_file"
 
   # Build claude args — skip_permissions: role override > legacy profile > global config
@@ -863,7 +880,11 @@ if last_title: print(last_title)
         fi
       fi
 
-      running_file="$RUNNING_DIR/${profile_name}-${session_id}.json"
+      # For resume/fork, pokegent_id is always fresh (like ccd_session_id) unless inherited.
+      # Reassign the outer pokegent_id so POKEGENT_ID env var and running file stay in sync.
+      pokegent_id="${inherited_pokegent_id:-$ccd_session_id}"
+
+      running_file="$RUNNING_DIR/${profile_name}-${pokegent_id}.json"
       jq -n \
         --arg profile "$profile_name" \
         --arg role "${_role_name:-}" \
@@ -873,11 +894,12 @@ if last_title: print(last_title)
         --arg tty "$(tty)" \
         --arg name "$display_name" \
         --arg ccd_sid "$ccd_session_id" \
+        --arg pokegent_id "$pokegent_id" \
         --arg iterm_sid "$iterm_sid" \
         --arg created_at "$created_at" \
         --arg task_group "${task_group:-}" \
         --arg sprite "${sprite:-}" \
-        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, sprite: $sprite}' \
+        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, pokegent_id: $pokegent_id, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, sprite: $sprite}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "
@@ -905,7 +927,7 @@ with open(sys.argv[1]) as f:
 
 You are one of several concurrent Claude Code agents managed by pokegents. You can communicate with other agents using MCP tools.
 
-**Your session ID:** ${ccd_session_id:-$session_id}
+**Your session ID:** ${pokegent_id:-${ccd_session_id:-$session_id}}
 
 **Available MCP tools (pokegents-messaging):**
 - \`list_agents\` — see all active agents and their status
@@ -949,7 +971,7 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   # Trap for cleanup on abnormal exit (tab close, SIGHUP, etc.)
   local dyn_profile_cleanup=""
   if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
-    dyn_profile_cleanup="$HOME/Library/Application Support/iTerm2/DynamicProfiles/pokegents-session-${session_id}.json"
+    dyn_profile_cleanup="$HOME/Library/Application Support/iTerm2/DynamicProfiles/pokegents-session-${pokegent_id}.json"
   fi
   trap "rm -f '$running_file' '$dyn_profile_cleanup'" EXIT INT TERM HUP
 
@@ -957,6 +979,7 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   # Falls back to session_id for fresh launches where ccd_session_id isn't set separately.
   POKEGENTS_ROOT="$POKEGENTS_ROOT" POKEGENTS_DATA="$POKEGENTS_DATA" POKEGENTS_PROFILE_NAME="$profile_name" \
     POKEGENTS_SESSION_ID="${ccd_session_id:-$session_id}" \
+    POKEGENT_ID="$pokegent_id" \
     CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude "${claude_args[@]}"
 
   # Disarm trap and clean up explicitly

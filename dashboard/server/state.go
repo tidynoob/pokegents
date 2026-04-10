@@ -208,7 +208,7 @@ func (sm *StateManager) GetAgents() []AgentState {
 	return result
 }
 
-// GetAgent returns a single agent by session ID or CCD session ID.
+// GetAgent returns a single agent by session ID, CCD session ID, or pokegent ID.
 func (sm *StateManager) GetAgent(sessionID string) *AgentState {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -216,9 +216,13 @@ func (sm *StateManager) GetAgent(sessionID string) *AgentState {
 		cp := *a
 		return &cp
 	}
-	// Also check by CCD session ID
+	// Also check by CCD session ID or pokegent_id
 	for _, a := range sm.agents {
 		if a.CCDSessionID != "" && a.CCDSessionID == sessionID {
+			cp := *a
+			return &cp
+		}
+		if a.PokegentID != "" && a.PokegentID == sessionID {
 			cp := *a
 			return &cp
 		}
@@ -771,8 +775,19 @@ func (sm *StateManager) ReloadStatus(path string) {
 	base := strings.TrimSuffix(filepath.Base(path), ".json")
 	sf, err := sm.store.Status.Get(base)
 	if err != nil || sf == nil {
-		// File was deleted or unreadable — remove from statuses
-		delete(sm.statuses, base)
+		// File was deleted or unreadable — remove from statuses.
+		// base may be a pokegent_id (new) or session_id (legacy), so try both.
+		if _, ok := sm.statuses[base]; ok {
+			delete(sm.statuses, base)
+		} else {
+			// base is a pokegent_id but map is keyed by session_id — scan to find it
+			for sid, existingSF := range sm.statuses {
+				if existingSF.SessionID == base {
+					delete(sm.statuses, sid)
+					break
+				}
+			}
+		}
 	} else {
 		sm.statuses[sf.SessionID] = *sf
 	}
@@ -1139,12 +1154,24 @@ func (sm *StateManager) rebuildAgents() {
 	now := time.Now()
 	agents := make(map[string]*AgentState)
 
-	// Build session ID map from running files (CCD UUID → Claude session ID)
+	// Build session ID map from running files (CCD UUID / pokegent_id → Claude session ID)
 	mapChanged := false
 	for sid, rs := range sm.running {
 		if rs.CCDSessionID != "" && rs.CCDSessionID != sid {
 			if sm.sessionIDMap[rs.CCDSessionID] != sid {
 				sm.sessionIDMap[rs.CCDSessionID] = sid
+				mapChanged = true
+			}
+		}
+		// Also map pokegent_id → Claude session ID (pokegent_id may differ from ccd_session_id
+		// when inherited via --pokegent-id flag for role/project changes)
+		pgID := rs.PokegentID
+		if pgID == "" {
+			pgID = rs.CCDSessionID
+		}
+		if pgID != "" && pgID != sid && pgID != rs.CCDSessionID {
+			if sm.sessionIDMap[pgID] != sid {
+				sm.sessionIDMap[pgID] = sid
 				mapChanged = true
 			}
 		}
@@ -1155,9 +1182,16 @@ func (sm *StateManager) rebuildAgents() {
 
 	// Start with running sessions as the base
 	for sid, rs := range sm.running {
+		// Resolve pokegent_id with fallback to ccd_session_id for old running files
+		pokegentID := rs.PokegentID
+		if pokegentID == "" {
+			pokegentID = rs.CCDSessionID
+		}
+
 		a := &AgentState{
 			SessionID:      sid,
 			CCDSessionID:   rs.CCDSessionID,
+			PokegentID:     pokegentID,
 			ProfileName:    rs.Profile,
 			Role:           rs.Role,
 			Project:        rs.Project,

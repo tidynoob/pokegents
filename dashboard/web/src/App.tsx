@@ -480,6 +480,7 @@ export default function App() {
       if (a.sprite) {
         m[a.session_id] = a.sprite
         if (a.ccd_session_id) m[a.ccd_session_id] = a.sprite
+        if (a.pokegent_id) m[a.pokegent_id] = a.sprite
       }
     }
     return (id: string) => m[id] || 'pokeball'
@@ -487,13 +488,16 @@ export default function App() {
 
   const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, getSpriteForId)
 
-  // Build a map of session_id → connected agent info (for icons)
+  // Build a map of session_id / pokegent_id → connected agent info (for icons)
   const agentInfoMap = useMemo(() => {
     const m: Record<string, { session_id: string; emoji: string; display_name: string }> = {}
     for (const a of agents) {
       m[a.session_id] = { session_id: a.session_id, emoji: a.emoji, display_name: a.display_name || a.profile_name }
       if (a.ccd_session_id && a.ccd_session_id !== a.session_id) {
         m[a.ccd_session_id] = m[a.session_id]
+      }
+      if (a.pokegent_id && a.pokegent_id !== a.session_id && a.pokegent_id !== a.ccd_session_id) {
+        m[a.pokegent_id] = m[a.session_id]
       }
     }
     return m
