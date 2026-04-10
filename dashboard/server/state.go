@@ -252,14 +252,18 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 	// JSONL custom-title is written by server.go persistCustomTitle() which
 	// also updates the search index. Don't duplicate the write here.
 
-	// Store name override under session ID
-	sm.nameOverrides[sessionID] = newName
-
-	// For clones: also store under CCDSessionID if different, so the
-	// override survives even if the search index uses a different ID
-	if rs, ok := sm.running[sessionID]; ok && rs.CCDSessionID != "" && rs.CCDSessionID != sessionID {
-		sm.nameOverrides[rs.CCDSessionID] = newName
+	// Store name override under pokegent_id (stable, survives fork/resume)
+	// Also store under session_id for backward compat lookups
+	if rs, ok := sm.running[sessionID]; ok {
+		pgID := rs.PokegentID
+		if pgID == "" {
+			pgID = rs.CCDSessionID
+		}
+		if pgID != "" {
+			sm.nameOverrides[pgID] = newName
+		}
 	}
+	sm.nameOverrides[sessionID] = newName
 	sm.saveNameOverrides()
 }
 
@@ -1255,13 +1259,11 @@ func (sm *StateManager) rebuildAgents() {
 			}
 		}
 
-		// Apply persistent name override (survives session restarts)
-		if override, ok := sm.nameOverrides[sid]; ok {
+		// Apply persistent name override — check pokegent_id first (stable), then session_id
+		if override, ok := sm.nameOverrides[pokegentID]; ok {
 			a.DisplayName = override
-		} else if rs.CCDSessionID != "" {
-			if override, ok := sm.nameOverrides[rs.CCDSessionID]; ok {
-				a.DisplayName = override
-			}
+		} else if override, ok := sm.nameOverrides[sid]; ok {
+			a.DisplayName = override
 		}
 
 		// Check PID liveness

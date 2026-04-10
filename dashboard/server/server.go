@@ -342,11 +342,7 @@ func (s *Server) syncSessionMetaToSearch() {
 		if a.Ephemeral {
 			continue
 		}
-		s.searchSvc.UpdateSessionMeta(a.SessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup, a.Sprite)
-		// Also update under CCD session ID (running file key may differ from JSONL key)
-		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID {
-			s.searchSvc.UpdateSessionMeta(a.CCDSessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup, a.Sprite)
-		}
+		s.searchSvc.UpdateSessionMeta(a.SessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup, a.Sprite, a.PokegentID)
 	}
 }
 
