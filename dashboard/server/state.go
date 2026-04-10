@@ -32,6 +32,7 @@ type StateManager struct {
 	nameOverrides map[string]string         // keyed by session_id, persisted to disk
 	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
 	agentOrder         []string                  // user-defined display order (session IDs), persisted
+	identities         map[string]*AgentIdentity  // keyed by pokegent_id, persistent identity store
 	pendingRelaunches  map[string]string         // session_id → pokegent command to run when idle
 
 	dataDir          string // ~/.ccsession — kept for paths not yet migrated to store
@@ -54,6 +55,7 @@ func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir strin
 		contexts:          make(map[string]ContextUsage),
 		activityFeeds:     make(map[string][]ActivityItem),
 		feedClearedAt:     make(map[string]time.Time),
+		identities:       make(map[string]*AgentIdentity),
 		nameOverrides:    make(map[string]string),
 		sessionIDMap:     make(map[string]string),
 		dataDir:          dataDir,
@@ -67,6 +69,9 @@ func (sm *StateManager) LoadAll() error {
 	defer sm.mu.Unlock()
 
 	if err := sm.loadProfiles(); err != nil {
+		return err
+	}
+	if err := sm.loadIdentities(); err != nil {
 		return err
 	}
 	if err := sm.loadRunning(); err != nil {
@@ -262,6 +267,15 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 		if pgID != "" {
 			sm.nameOverrides[pgID] = newName
 		}
+		// Also persist to identity store
+		if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
+			sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
+				id.DisplayName = newName
+			})
+			if ident, ok := sm.identities[pgid]; ok {
+				ident.DisplayName = newName
+			}
+		}
 	}
 	sm.nameOverrides[sessionID] = newName
 	sm.saveNameOverrides()
@@ -280,6 +294,15 @@ func (sm *StateManager) SetAgentRole(sessionID, role string) {
 			r.Role = role
 			r.Profile = rs.Profile
 		})
+		// Also persist to identity store
+		if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
+			sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
+				id.Role = role
+			})
+			if ident, ok := sm.identities[pgid]; ok {
+				ident.Role = role
+			}
+		}
 	}
 	sm.rebuildAgents()
 }
@@ -297,6 +320,15 @@ func (sm *StateManager) SetAgentProject(sessionID, project string) {
 			r.Project = project
 			r.Profile = rs.Profile
 		})
+		// Also persist to identity store
+		if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
+			sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
+				id.Project = project
+			})
+			if ident, ok := sm.identities[pgid]; ok {
+				ident.Project = project
+			}
+		}
 	}
 	sm.rebuildAgents()
 }
@@ -316,6 +348,15 @@ func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
 	sm.store.Running.Update(sessionID, func(r *RunningSession) {
 		r.TaskGroup = taskGroup
 	})
+	// Also persist to identity store
+	if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
+		sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
+			id.TaskGroup = taskGroup
+		})
+		if ident, ok := sm.identities[pgid]; ok {
+			ident.TaskGroup = taskGroup
+		}
+	}
 	sm.rebuildAgents()
 	return nil
 }
@@ -334,7 +375,50 @@ func (sm *StateManager) SetAgentSprite(sessionID, sprite string) error {
 	sm.store.Running.Update(sessionID, func(r *RunningSession) {
 		r.Sprite = sprite
 	})
+	// Also persist to identity store
+	if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
+		sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
+			id.Sprite = sprite
+		})
+		if ident, ok := sm.identities[pgid]; ok {
+			ident.Sprite = sprite
+		}
+	}
 	sm.rebuildAgents()
+	return nil
+}
+
+// getPokegentID returns the pokegent_id for a session, or empty string if not found.
+func (sm *StateManager) getPokegentID(sessionID string) string {
+	if rs, ok := sm.running[sessionID]; ok {
+		return rs.GetPokegentID()
+	}
+	return ""
+}
+
+// GetIdentity returns the persistent identity for a pokegent_id.
+func (sm *StateManager) GetIdentity(pokegentID string) *AgentIdentity {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if ident, ok := sm.identities[pokegentID]; ok {
+		cp := *ident
+		return &cp
+	}
+	return nil
+}
+
+// SaveIdentity persists an agent identity to disk and updates the in-memory cache.
+func (sm *StateManager) SaveIdentity(identity AgentIdentity) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.store.Agents == nil {
+		return fmt.Errorf("agent identity store not available")
+	}
+	if err := sm.store.Agents.Save(identity); err != nil {
+		return err
+	}
+	cp := identity
+	sm.identities[identity.PokegentID] = &cp
 	return nil
 }
 
@@ -1013,6 +1097,20 @@ func (sm *StateManager) loadEphemeral() error {
 	return nil
 }
 
+func (sm *StateManager) loadIdentities() error {
+	if sm.store.Agents == nil {
+		return nil
+	}
+	agents, err := sm.store.Agents.List()
+	if err != nil {
+		return err
+	}
+	for i := range agents {
+		sm.identities[agents[i].PokegentID] = &agents[i]
+	}
+	return nil
+}
+
 func (sm *StateManager) loadNameOverrides() {
 	sm.store.Metadata.LoadJSON("name-overrides.json", &sm.nameOverrides)
 }
@@ -1264,6 +1362,35 @@ func (sm *StateManager) rebuildAgents() {
 			a.DisplayName = override
 		} else if override, ok := sm.nameOverrides[sid]; ok {
 			a.DisplayName = override
+		}
+
+		// Merge persistent identity (source of truth for display/config fields)
+		pgid := rs.GetPokegentID()
+		if ident, ok := sm.identities[pgid]; ok {
+			if ident.DisplayName != "" {
+				a.DisplayName = ident.DisplayName
+			}
+			if ident.Sprite != "" {
+				a.Sprite = ident.Sprite
+			}
+			if ident.Role != "" {
+				a.Role = ident.Role
+			}
+			if ident.Project != "" {
+				a.Project = ident.Project
+			}
+			if ident.TaskGroup != "" {
+				a.TaskGroup = ident.TaskGroup
+			}
+			if ident.Model != "" {
+				a.Model = ident.Model
+			}
+			if ident.Effort != "" {
+				a.Effort = ident.Effort
+			}
+			if ident.CreatedAt != "" {
+				a.CreatedAt = ident.CreatedAt
+			}
 		}
 
 		// Check PID liveness

@@ -56,6 +56,21 @@ type SessionIdentity struct {
 
 // --- Data types (shared across store, services, and server) ---
 
+// AgentIdentity is the persistent identity for an agent, stored in ~/.pokegents/agents/{pokegent_id}.json.
+// Unlike RunningSession (ephemeral, deleted on exit), identity files are never deleted automatically.
+type AgentIdentity struct {
+	PokegentID  string `json:"pokegent_id"`
+	DisplayName string `json:"display_name"`
+	Sprite      string `json:"sprite,omitempty"`
+	Role        string `json:"role,omitempty"`
+	Project     string `json:"project,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	TaskGroup   string `json:"task_group,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Effort      string `json:"effort,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+}
+
 // RunningSession is the data stored in ~/.pokegents/running/*.json.
 type RunningSession struct {
 	Profile        string `json:"profile"`

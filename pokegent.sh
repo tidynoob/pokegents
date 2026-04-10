@@ -687,19 +687,35 @@ if last_title: print(last_title)
   local sprite_dir="$POKEGENTS_ROOT/dashboard/web/public/sprites"
   local sprite=""
 
-  # For resume/fork, inherit sprite from original session
+  # For resume/fork, inherit sprite from identity file or running file
   if [[ "$continue_mode" == "true" && -n "$resume_session_id" ]]; then
-    # Check running files first (agent still alive)
-    for rf in "$RUNNING_DIR"/*.json; do
-      [[ -f "$rf" ]] || continue
-      local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
-      local _rf_ccd=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
-      if [[ "$_rf_sid" == "$resume_session_id"* || "$_rf_ccd" == "$resume_session_id"* ]]; then
-        sprite=$(jq -r '.sprite // empty' "$rf" 2>/dev/null)
+    # Check identity files first (persistent, source of truth)
+    for af in "$POKEGENTS_DATA/agents"/*.json(N); do
+      local _af_pgid=$(jq -r '.pokegent_id // empty' "$af" 2>/dev/null)
+      if [[ "$_af_pgid" == "$resume_session_id"* ]]; then
+        sprite=$(jq -r '.sprite // empty' "$af" 2>/dev/null)
         break
       fi
     done
-    # Fallback: check dashboard API search index (agent dead, sprite cached)
+    # Check running files (agent still alive, or pre-migration)
+    if [[ -z "$sprite" ]]; then
+      for rf in "$RUNNING_DIR"/*.json; do
+        [[ -f "$rf" ]] || continue
+        local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
+        local _rf_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
+        if [[ "$_rf_sid" == "$resume_session_id"* || "$_rf_pgid" == "$resume_session_id"* ]]; then
+          # Get sprite from identity file if available
+          local _id_file="$POKEGENTS_DATA/agents/${_rf_pgid}.json"
+          if [[ -f "$_id_file" ]]; then
+            sprite=$(jq -r '.sprite // empty' "$_id_file" 2>/dev/null)
+          fi
+          # Fallback to running file
+          [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$rf" 2>/dev/null)
+          break
+        fi
+      done
+    fi
+    # Last resort: check dashboard API (search index cache)
     if [[ -z "$sprite" ]]; then
       local _port=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
       sprite=$(curl -s --max-time 2 "http://localhost:${_port}/api/sessions/${resume_session_id}/meta" 2>/dev/null | jq -r '.sprite // empty' 2>/dev/null || echo "")
@@ -771,23 +787,53 @@ if last_title: print(last_title)
   fi
   local iterm_sid="${ITERM_SESSION_ID##*:}"
   local created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Write persistent agent identity (never deleted — survives session end)
+  local agents_dir="$POKEGENTS_DATA/agents"
+  mkdir -p "$agents_dir"
+  local identity_file="$agents_dir/${pokegent_id}.json"
+  if [[ -f "$identity_file" ]]; then
+    # Update existing identity (role/project change via --pokegent-id)
+    jq \
+      --arg name "$display_name" \
+      --arg role "${_role_name:-}" \
+      --arg project "${_project_name:-}" \
+      --arg profile "$profile_name" \
+      --arg model "$_model" \
+      --arg effort "$_effort" \
+      --arg sprite "${sprite:-}" \
+      --arg task_group "${task_group:-}" \
+      '. + {display_name: $name, role: $role, project: $project, profile: $profile, model: $model, effort: $effort}
+       | if $sprite != "" then .sprite = $sprite else . end
+       | if $task_group != "" then .task_group = $task_group else . end' \
+      "$identity_file" > "${identity_file}.tmp" && mv "${identity_file}.tmp" "$identity_file"
+  else
+    # Create new identity
+    jq -n \
+      --arg pokegent_id "$pokegent_id" \
+      --arg name "$display_name" \
+      --arg sprite "${sprite:-}" \
+      --arg role "${_role_name:-}" \
+      --arg project "${_project_name:-}" \
+      --arg profile "$profile_name" \
+      --arg task_group "${task_group:-}" \
+      --arg model "$_model" \
+      --arg effort "$_effort" \
+      --arg created_at "$created_at" \
+      '{pokegent_id: $pokegent_id, display_name: $name, sprite: $sprite, role: $role, project: $project, profile: $profile, task_group: $task_group, model: $model, effort: $effort, created_at: $created_at}' \
+      > "$identity_file"
+  fi
+
+  # Write ephemeral running file (process state only — deleted on exit)
   jq -n \
+    --arg pokegent_id "$pokegent_id" \
     --arg profile "$profile_name" \
-    --arg role "${_role_name:-}" \
-    --arg project "${_project_name:-}" \
     --arg sid "$session_id" \
+    --arg ccd_sid "$session_id" \
     --arg pid "$$" \
     --arg tty "$(tty)" \
-    --arg name "$display_name" \
-    --arg ccd_sid "$session_id" \
-    --arg pokegent_id "$pokegent_id" \
     --arg iterm_sid "$iterm_sid" \
-    --arg created_at "$created_at" \
-    --arg task_group "${task_group:-}" \
-    --arg model "$_model" \
-    --arg effort "$_effort" \
-    --arg sprite "${sprite:-}" \
-    '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, pokegent_id: $pokegent_id, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, model: $model, effort: $effort, sprite: $sprite}' \
+    '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, ccd_session_id: $ccd_sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
     > "$running_file"
 
   # Build claude args — skip_permissions: role override > legacy profile > global config
@@ -871,35 +917,68 @@ if last_title: print(last_title)
       # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
       local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
-      # Inherit task_group and sprite from original session on fork (if not explicitly set)
+      # Inherit task_group and sprite from original's identity file first, then running file
       if [[ "$fork_session" == "true" ]]; then
+        # Check identity file of original agent (by scanning running files for pokegent_id)
         local orig_rf=$(ls "$RUNNING_DIR"/*-${matches[1]}.json 2>/dev/null | head -1)
+        local orig_pgid=""
         if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
+          orig_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$orig_rf" 2>/dev/null)
+        fi
+        local orig_identity="$POKEGENTS_DATA/agents/${orig_pgid}.json"
+        if [[ -n "$orig_pgid" && -f "$orig_identity" ]]; then
+          [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_identity" 2>/dev/null)
+          [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_identity" 2>/dev/null)
+        elif [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
+          # Fallback: read from running file (pre-migration agents)
           [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
           [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_rf" 2>/dev/null)
         fi
       fi
 
       # For resume/fork, pokegent_id is always fresh (like ccd_session_id) unless inherited.
-      # Reassign the outer pokegent_id so POKEGENT_ID env var and running file stay in sync.
       pokegent_id="${inherited_pokegent_id:-$ccd_session_id}"
 
+      # Write persistent identity file
+      local identity_file="$POKEGENTS_DATA/agents/${pokegent_id}.json"
+      mkdir -p "$POKEGENTS_DATA/agents"
+      if [[ -f "$identity_file" ]]; then
+        jq \
+          --arg name "$display_name" \
+          --arg role "${_role_name:-}" \
+          --arg project "${_project_name:-}" \
+          --arg profile "$profile_name" \
+          --arg sprite "${sprite:-}" \
+          --arg task_group "${task_group:-}" \
+          '. + {display_name: $name, role: $role, project: $project, profile: $profile}
+           | if $sprite != "" then .sprite = $sprite else . end
+           | if $task_group != "" then .task_group = $task_group else . end' \
+          "$identity_file" > "${identity_file}.tmp" && mv "${identity_file}.tmp" "$identity_file"
+      else
+        jq -n \
+          --arg pokegent_id "$pokegent_id" \
+          --arg name "$display_name" \
+          --arg sprite "${sprite:-}" \
+          --arg role "${_role_name:-}" \
+          --arg project "${_project_name:-}" \
+          --arg profile "$profile_name" \
+          --arg task_group "${task_group:-}" \
+          --arg created_at "$created_at" \
+          '{pokegent_id: $pokegent_id, display_name: $name, sprite: $sprite, role: $role, project: $project, profile: $profile, task_group: $task_group, created_at: $created_at}' \
+          > "$identity_file"
+      fi
+
+      # Write ephemeral running file (process state only)
       running_file="$RUNNING_DIR/${profile_name}-${pokegent_id}.json"
       jq -n \
+        --arg pokegent_id "$pokegent_id" \
         --arg profile "$profile_name" \
-        --arg role "${_role_name:-}" \
-        --arg project "${_project_name:-}" \
         --arg sid "$session_id" \
+        --arg ccd_sid "$ccd_session_id" \
         --arg pid "$$" \
         --arg tty "$(tty)" \
-        --arg name "$display_name" \
-        --arg ccd_sid "$ccd_session_id" \
-        --arg pokegent_id "$pokegent_id" \
         --arg iterm_sid "$iterm_sid" \
-        --arg created_at "$created_at" \
-        --arg task_group "${task_group:-}" \
-        --arg sprite "${sprite:-}" \
-        '{profile: $profile, role: $role, project: $project, session_id: $sid, pid: ($pid|tonumber), tty: $tty, display_name: $name, ccd_session_id: $ccd_sid, pokegent_id: $pokegent_id, iterm_session_id: $iterm_sid, created_at: $created_at, task_group: $task_group, sprite: $sprite}' \
+        '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, ccd_session_id: $ccd_sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "

@@ -28,6 +28,7 @@ func NewFileStore(dataDir string) *Store {
 		Projects:  &FileProjectStore{dir: filepath.Join(dataDir, "projects")},
 		Roles:     &FileRoleStore{dir: filepath.Join(dataDir, "roles")},
 		Ephemeral: &FileEphemeralStore{dir: filepath.Join(dataDir, "ephemeral")},
+		Agents:    &FileAgentIdentityStore{dir: filepath.Join(dataDir, "agents")},
 	}
 }
 

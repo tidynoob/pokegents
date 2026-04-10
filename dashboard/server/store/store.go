@@ -20,6 +20,7 @@ type FileEvent = core.FileEvent
 type ProjectConfig = core.ProjectConfig
 type RoleConfig = core.RoleConfig
 type EphemeralAgent = core.EphemeralAgent
+type AgentIdentity = core.AgentIdentity
 
 // Store aggregates all sub-stores. Pass this to SessionManager, MessageService, etc.
 type Store struct {
@@ -33,6 +34,7 @@ type Store struct {
 	Activity  ActivityStore
 	Metadata  MetadataStore
 	Ephemeral EphemeralStore
+	Agents    AgentIdentityStore
 }
 
 // ProjectStore manages project configuration files (~/.pokegents/projects/*.json).
@@ -65,6 +67,18 @@ type EphemeralStore interface {
 	Delete(agentID string) error
 	// Cleanup removes completed ephemeral agents older than maxAge.
 	Cleanup(maxAge time.Duration) (int, error)
+}
+
+// AgentIdentityStore manages persistent agent identity files (~/.pokegents/agents/*.json).
+type AgentIdentityStore interface {
+	// Get returns an agent identity by pokegent_id.
+	Get(pokegentID string) (*AgentIdentity, error)
+	// List returns all agent identities.
+	List() ([]AgentIdentity, error)
+	// Save writes an agent identity file.
+	Save(identity AgentIdentity) error
+	// Update atomically reads, modifies, and writes an agent identity.
+	Update(pokegentID string, fn func(*AgentIdentity)) error
 }
 
 // MetadataStore manages small JSON metadata files (name overrides, session ID map, agent order).

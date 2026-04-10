@@ -11,6 +11,7 @@ type Profile = store.Profile
 type Message = store.Message
 type AgentConnection = store.Connection
 type EphemeralAgent = store.EphemeralAgent
+type AgentIdentity = store.AgentIdentity
 
 // AgentState is the merged view sent to the frontend.
 // This is server-only (not in store) because it combines data from multiple sources.
