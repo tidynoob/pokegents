@@ -51,15 +51,52 @@ type FileRunningStore struct {
 	dir string
 }
 
+// findRunningFile finds a running file by any ID (pokegent_id, session_id, or ccd_session_id).
+// Tries filename glob first (fast), then falls back to content scan.
+func (s *FileRunningStore) findRunningFile(id string) (string, error) {
+	// Try filename pattern first (works for both old session_id and new pokegent_id naming)
+	pattern := filepath.Join(s.dir, "*-"+id+".json")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) > 0 {
+		return matches[0], nil
+	}
+	// Fallback: scan file contents for pokegent_id, ccd_session_id, or session_id match
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return "", fmt.Errorf("running session %s not found", id)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rf struct {
+			SessionID    string `json:"session_id"`
+			CCDSessionID string `json:"ccd_session_id"`
+			PokegentID   string `json:"pokegent_id"`
+		}
+		if json.Unmarshal(data, &rf) != nil {
+			continue
+		}
+		if rf.PokegentID == id || rf.CCDSessionID == id || rf.SessionID == id {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("running session %s not found", id)
+}
+
 func (s *FileRunningStore) Get(sessionID string) (*RunningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pattern := filepath.Join(s.dir, "*-"+sessionID+".json")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("running session %s not found", sessionID)
+	path, err := s.findRunningFile(sessionID)
+	if err != nil {
+		return nil, err
 	}
-	return s.readFile(matches[0])
+	return s.readFile(path)
 }
 
 func (s *FileRunningStore) GetByCCDSessionID(ccdSessionID string) (*RunningSession, error) {
@@ -77,7 +114,8 @@ func (s *FileRunningStore) GetByCCDSessionID(ccdSessionID string) (*RunningSessi
 		if err != nil {
 			continue
 		}
-		if rs.CCDSessionID == ccdSessionID {
+		// Check both pokegent_id and ccd_session_id (pokegent_id is the new preferred ID)
+		if rs.PokegentID == ccdSessionID || rs.CCDSessionID == ccdSessionID {
 			return rs, nil
 		}
 	}
@@ -112,19 +150,23 @@ func (s *FileRunningStore) Create(rs RunningSession) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, rs.Profile+"-"+rs.SessionID+".json")
+	// Use pokegent_id for filename if available (stable, never renamed), fall back to session_id
+	fileKey := rs.PokegentID
+	if fileKey == "" {
+		fileKey = rs.SessionID
+	}
+	path := filepath.Join(s.dir, rs.Profile+"-"+fileKey+".json")
 	return atomicWrite(path, data, 0644)
 }
 
 func (s *FileRunningStore) Update(sessionID string, fn func(*RunningSession)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pattern := filepath.Join(s.dir, "*-"+sessionID+".json")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
-		return fmt.Errorf("running session %s not found", sessionID)
+	path, err := s.findRunningFile(sessionID)
+	if err != nil {
+		return err
 	}
-	rs, err := s.readFile(matches[0])
+	rs, err := s.readFile(path)
 	if err != nil {
 		return err
 	}
@@ -133,25 +175,26 @@ func (s *FileRunningStore) Update(sessionID string, fn func(*RunningSession)) er
 	if err != nil {
 		return err
 	}
-	// If session_id changed (reconciliation), rename the file too
-	newPath := filepath.Join(s.dir, rs.Profile+"-"+rs.SessionID+".json")
-	if err := atomicWrite(matches[0], data, 0644); err != nil {
-		return err
-	}
-	if matches[0] != newPath {
-		return os.Rename(matches[0], newPath)
-	}
-	return nil
+	// Files are now keyed by pokegent_id — no rename needed on session_id change.
+	// Just update content in place.
+	return atomicWrite(path, data, 0644)
 }
 
 func (s *FileRunningStore) Delete(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pattern := filepath.Join(s.dir, "*-"+sessionID+".json")
-	matches, _ := filepath.Glob(pattern)
-	for _, f := range matches {
-		os.Remove(f)
+	// Try finding by any ID type (pokegent_id, session_id, ccd_session_id)
+	path, err := s.findRunningFile(sessionID)
+	if err != nil {
+		// Also try the legacy filename pattern as last resort
+		pattern := filepath.Join(s.dir, "*-"+sessionID+".json")
+		matches, _ := filepath.Glob(pattern)
+		for _, f := range matches {
+			os.Remove(f)
+		}
+		return nil
 	}
+	os.Remove(path)
 	return nil
 }
 

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
 import { fetchSessions, focusAgent, fetchConnections, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
-import { AgentState, AgentConnection, AgentMessage } from './types'
+import { AgentState, AgentConnection, AgentMessage, stableId } from './types'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
 import { GroupContainer } from './components/GroupContainer'
@@ -209,7 +209,7 @@ export default function App() {
     collapsedInitialized.current = true
     try {
       const saved: string[] = JSON.parse(localStorage.getItem('pokegents-collapsed') || '[]')
-      const validIds = new Set(agents.map(a => a.session_id))
+      const validIds = new Set(agents.map(a => stableId(a)))
       const restored = saved.filter(id => validIds.has(id))
       if (restored.length > 0) {
         setCollapsedIds(new Set(restored))
@@ -272,12 +272,13 @@ export default function App() {
         const inactive = a.state === 'idle' || a.state === 'done'
         const active = a.state === 'busy' || a.state === 'needs_input'
 
-        if (inactive && age >= AUTO_COLLAPSE_MS && !manualExpandRef.current.has(a.session_id)) {
-          toCollapse.push(a.session_id)
+        const aid = stableId(a)
+        if (inactive && age >= AUTO_COLLAPSE_MS && !manualExpandRef.current.has(aid)) {
+          toCollapse.push(aid)
         }
         if (active) {
-          toExpand.push(a.session_id)
-          manualExpandRef.current.delete(a.session_id); persistManualExpand() // reset manual flag when agent becomes active
+          toExpand.push(aid)
+          manualExpandRef.current.delete(aid); persistManualExpand() // reset manual flag when agent becomes active
         }
       }
 
@@ -298,7 +299,7 @@ export default function App() {
             (groupViewModes[a.task_group] || 'collapsed') === 'collapsed') {
           // Find index of this agent in its group
           const members = agents.filter(m => m.task_group === a.task_group)
-          const idx = members.findIndex(m => m.session_id === a.session_id)
+          const idx = members.findIndex(m => stableId(m) === stableId(a))
           groupUpdates[a.task_group] = Math.max(idx, 0)
         }
       }
@@ -417,8 +418,8 @@ export default function App() {
   }, [agents])
 
   // Ungrouped: filter collapsed for pokéball bubbles
-  const visibleUngrouped = useMemo(() => ungrouped.filter(a => !collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
-  const collapsedAgents = useMemo(() => ungrouped.filter(a => collapsedIds.has(a.session_id)), [ungrouped, collapsedIds])
+  const visibleUngrouped = useMemo(() => ungrouped.filter(a => !collapsedIds.has(stableId(a))), [ungrouped, collapsedIds])
+  const collapsedAgents = useMemo(() => ungrouped.filter(a => collapsedIds.has(stableId(a))), [ungrouped, collapsedIds])
 
   const existingGroupNames = useMemo(() => Object.keys(grouped).sort(), [grouped])
 
@@ -437,7 +438,7 @@ export default function App() {
       }
     }
     for (const a of visibleUngrouped) {
-      ids.push(a.session_id)
+      ids.push(stableId(a))
     }
     return ids
   }, [grouped, visibleUngrouped, groupViewModes])
@@ -480,6 +481,7 @@ export default function App() {
       if (a.sprite) {
         m[a.session_id] = a.sprite
         if (a.ccd_session_id) m[a.ccd_session_id] = a.sprite
+        if (a.pokegent_id) m[a.pokegent_id] = a.sprite
       }
     }
     return (id: string) => m[id] || 'pokeball'
@@ -487,13 +489,16 @@ export default function App() {
 
   const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, getSpriteForId)
 
-  // Build a map of session_id → connected agent info (for icons)
+  // Build a map of session_id / pokegent_id → connected agent info (for icons)
   const agentInfoMap = useMemo(() => {
     const m: Record<string, { session_id: string; emoji: string; display_name: string }> = {}
     for (const a of agents) {
       m[a.session_id] = { session_id: a.session_id, emoji: a.emoji, display_name: a.display_name || a.profile_name }
       if (a.ccd_session_id && a.ccd_session_id !== a.session_id) {
         m[a.ccd_session_id] = m[a.session_id]
+      }
+      if (a.pokegent_id && a.pokegent_id !== a.session_id && a.pokegent_id !== a.ccd_session_id) {
+        m[a.pokegent_id] = m[a.session_id]
       }
     }
     return m
@@ -537,10 +542,14 @@ export default function App() {
   }, [showBrowser])
 
 
-  // Agent lookup for rendering cards in GridContainer (includes all agents for group members)
+  // Agent lookup for rendering cards in GridContainer — keyed by stableId (pokegent_id)
+  // and also by session_id for backward compat with grid layouts saved before migration
   const agentMap = useMemo(() => {
     const m: Record<string, AgentState> = {}
-    for (const a of agents) m[a.session_id] = a
+    for (const a of agents) {
+      m[stableId(a)] = a
+      if (a.session_id !== stableId(a)) m[a.session_id] = a
+    }
     return m
   }, [agents])
 
@@ -613,18 +622,19 @@ export default function App() {
             )
           })}
           {collapsedAgents.map(agent => {
-            const sprite = getSpriteForId(agent.session_id)
+            const aid = stableId(agent)
+            const sprite = getSpriteForId(aid)
             return (
               <CollapsedBubble
-                key={agent.session_id}
+                key={aid}
                 agent={agent}
                 sprite={sprite}
                 bubbleRef={(el) => {
-                  if (el) bubbleRefs.current.set(agent.session_id, el)
-                  else bubbleRefs.current.delete(agent.session_id)
+                  if (el) bubbleRefs.current.set(aid, el)
+                  else bubbleRefs.current.delete(aid)
                 }}
                 onExpand={() => {
-                  const bubbleEl = bubbleRefs.current.get(agent.session_id)
+                  const bubbleEl = bubbleRefs.current.get(aid)
                   if (bubbleEl) {
                     const bubbleRect = bubbleEl.getBoundingClientRect()
                     const bubbleSource = {
@@ -632,7 +642,7 @@ export default function App() {
                       y: bubbleRect.top + bubbleRect.height / 2,
                     }
                     // Compute where the card will land using grid engine
-                    const existingLayout = gridEngine.layouts[agent.session_id]
+                    const existingLayout = gridEngine.layouts[aid]
                     const targetRect = existingLayout
                       ? gridEngine.gridRectToPixels(existingLayout)
                       : (() => {
@@ -652,13 +662,13 @@ export default function App() {
                           return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
                         })()
                     const doExpand = () => {
-                      manualExpandRef.current.add(agent.session_id); persistManualExpand()
-                      setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
+                      manualExpandRef.current.add(aid); persistManualExpand()
+                      setCollapsedIds(prev => { const next = new Set(prev); next.delete(aid); return next })
                     }
-                    triggerDeploy(agent.session_id, sprite, bubbleSource, targetRect, () => {}, doExpand)
+                    triggerDeploy(aid, sprite, bubbleSource, targetRect, () => {}, doExpand)
                   } else {
-                    manualExpandRef.current.add(agent.session_id); persistManualExpand()
-                    setCollapsedIds(prev => { const next = new Set(prev); next.delete(agent.session_id); return next })
+                    manualExpandRef.current.add(aid); persistManualExpand()
+                    setCollapsedIds(prev => { const next = new Set(prev); next.delete(aid); return next })
                   }
                 }}
               />
@@ -825,21 +835,22 @@ export default function App() {
             // Regular agent card
             const agent = agentMap[id]
             if (!agent) return null
+            const aid = stableId(agent)
             return (
               <AgentCard
                 agent={agent}
-                onClick={() => focusAgent(agent.session_id)}
+                onClick={() => focusAgent(aid)}
                 mode={cardMode}
-                connectedAgents={connectedAgentsMap[agent.session_id]}
+                connectedAgents={connectedAgentsMap[aid] || connectedAgentsMap[agent.session_id]}
                 spriteOverride={agent.sprite}
-                isReading={readingAgents.has(agent.session_id)}
-                hideSprite={hiddenSprites.has(agent.session_id)}
+                isReading={readingAgents.has(aid) || readingAgents.has(agent.session_id)}
+                hideSprite={hiddenSprites.has(aid) || hiddenSprites.has(agent.session_id)}
                 projects={projects}
                 roles={roles}
-                onDismiss={agent.ephemeral ? () => dismissEphemeral(agent.session_id) : undefined}
+                onDismiss={agent.ephemeral ? () => dismissEphemeral(aid) : undefined}
                 existingGroups={existingGroupNames}
                 onCollapse={() => {
-                  const cardEl = cardRefs.current.get(agent.session_id)
+                  const cardEl = cardRefs.current.get(aid)
                   if (cardEl) {
                     const spriteEl = cardEl.querySelector('.creature-sprite') as HTMLElement | null
                     const spriteRect = spriteEl?.getBoundingClientRect()
@@ -852,23 +863,21 @@ export default function App() {
                     )
                     const spriteCx = spriteRect ? spriteRect.left + spriteRect.width / 2 : cardRect.left + cardRect.width - 40
                     const spriteCy = spriteRect ? spriteRect.top + spriteRect.height / 2 : cardRect.top + 32
-                    const sprite = getSpriteForId(agent.session_id)
+                    const sprite = getSpriteForId(aid)
                     const existingBubbles = bubbleRefs.current.size
                     const bubbleTarget = { x: 12 + existingBubbles * 36 + 16, y: showHeader ? 56 : 16 }
-                    triggerRecall(agent.session_id, sprite, animRect, bubbleTarget, () => {
-                      setCollapsedIds(prev => new Set([...prev, agent.session_id]))
+                    triggerRecall(aid, sprite, animRect, bubbleTarget, () => {
+                      setCollapsedIds(prev => new Set([...prev, aid]))
                     }, { spriteCx, spriteCy })
                   } else {
-                    setCollapsedIds(prev => new Set([...prev, agent.session_id]))
+                    setCollapsedIds(prev => new Set([...prev, aid]))
                   }
                 }}
                 cardRef={(el) => {
                   if (el) {
-                    cardRefs.current.set(agent.session_id, el)
-                    if (agent.ccd_session_id && agent.ccd_session_id !== agent.session_id) cardRefs.current.set(agent.ccd_session_id, el)
+                    cardRefs.current.set(aid, el)
                   } else {
-                    cardRefs.current.delete(agent.session_id)
-                    if (agent.ccd_session_id) cardRefs.current.delete(agent.ccd_session_id)
+                    cardRefs.current.delete(aid)
                   }
                 }}
               />

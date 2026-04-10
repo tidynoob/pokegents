@@ -17,6 +17,7 @@ type EphemeralAgent = store.EphemeralAgent
 type AgentState struct {
 	SessionID    string `json:"session_id"`
 	CCDSessionID string `json:"ccd_session_id,omitempty"`
+	PokegentID   string `json:"pokegent_id,omitempty"`
 	ProfileName  string `json:"profile_name"`
 	Role         string `json:"role,omitempty"`
 	Project      string `json:"project,omitempty"`

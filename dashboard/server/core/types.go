@@ -65,6 +65,7 @@ type RunningSession struct {
 	TTY            string `json:"tty"`
 	DisplayName    string `json:"display_name"`
 	CCDSessionID   string `json:"ccd_session_id,omitempty"`
+	PokegentID     string `json:"pokegent_id,omitempty"`
 	ITermSessionID string `json:"iterm_session_id,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
 	Role           string `json:"role,omitempty"`       // role name (empty for legacy/bare project)
@@ -78,6 +79,12 @@ type RunningSession struct {
 // Agent interface implementation for identity resolution.
 func (rs *RunningSession) GetSessionID() string    { return rs.SessionID }
 func (rs *RunningSession) GetCCDSessionID() string { return rs.CCDSessionID }
+func (rs *RunningSession) GetPokegentID() string {
+	if rs.PokegentID != "" {
+		return rs.PokegentID
+	}
+	return rs.CCDSessionID
+}
 func (rs *RunningSession) GetDisplayName() string  { return rs.DisplayName }
 func (rs *RunningSession) GetTTY() string          { return rs.TTY }
 

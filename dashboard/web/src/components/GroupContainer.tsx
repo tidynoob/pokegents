@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { AgentState } from '../types'
+import { AgentState, stableId } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
 import { focusAgent, releaseTaskGroup, ProjectInfo, RoleInfo } from '../api'
@@ -130,12 +130,12 @@ export function GroupContainer({
 
   const renderCard = (agent: AgentState) => (
     <AgentCard
-      key={agent.session_id}
+      key={stableId(agent)}
       agent={agent}
-      onClick={() => focusAgent(agent.session_id)}
+      onClick={() => focusAgent(stableId(agent))}
       mode={cardMode}
       spriteOverride={agent.sprite}
-      isReading={readingAgents.has(agent.session_id)}
+      isReading={readingAgents.has(stableId(agent)) || readingAgents.has(agent.session_id)}
       projects={projects}
       roles={roles}
       existingGroups={existingGroups}
@@ -219,10 +219,10 @@ export function GroupContainer({
             <div className="shrink-0 flex flex-col gap-px overflow-y-auto" style={{ maxHeight: Math.min(otherMembers.length * 22, 88) }}>
               {otherMembers.map((m) => {
                 const sprite = getSprite(m)
-                const memberIdx = members.findIndex(x => x.session_id === m.session_id)
+                const memberIdx = members.findIndex(x => stableId(x) === stableId(m))
                 return (
                   <MemberRow
-                    key={m.session_id}
+                    key={stableId(m)}
                     agent={m}
                     sprite={sprite}
                     isActive={false}
@@ -247,7 +247,7 @@ export function GroupContainer({
           }}
         >
           {members.map(agent => (
-            <div key={agent.session_id} className="min-w-0" style={{ height: innerCardH }}>
+            <div key={stableId(agent)} className="min-w-0" style={{ height: innerCardH }}>
               {renderCard(agent)}
             </div>
           ))}

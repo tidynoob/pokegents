@@ -1,6 +1,7 @@
 export interface AgentState {
   session_id: string
   ccd_session_id?: string
+  pokegent_id?: string
   profile_name: string
   display_name: string
   emoji: string
@@ -58,7 +59,9 @@ export interface SearchResult {
   timestamp: string
   cwd: string
   git_branch: string
+  sprite?: string
   sprite_override?: string
+  pokegent_id?: string
 }
 
 export interface SearchResponse {
@@ -67,6 +70,11 @@ export interface SearchResponse {
 }
 
 export type AgentStatus = 'running' | 'idle' | 'error' | 'permission' | 'waiting' | 'started' | 'ended'
+
+/** Stable identity for an agent — pokegent_id is the primary, falls back to ccd_session_id then session_id. */
+export function stableId(a: AgentState): string {
+  return a.pokegent_id || a.ccd_session_id || a.session_id
+}
 
 export interface AgentMessage {
   id: string

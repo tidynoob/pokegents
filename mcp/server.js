@@ -89,7 +89,7 @@ function resolveSelf(agents) {
   if (!hint) return null;
   const me = resolveAgent(agents, hint.slice(0, 8));
   if (me) {
-    selfCCDSessionId = me.ccd_session_id || me.session_id;
+    selfCCDSessionId = me.pokegent_id || me.pokegent_id || me.ccd_session_id || me.session_id;
   }
   return me;
 }
@@ -208,6 +208,8 @@ function fileResolveAgent(agents, idPrefix) {
     (a) =>
       a.session_id === idPrefix ||
       a.session_id.startsWith(idPrefix) ||
+      (a.pokegent_id && a.pokegent_id === idPrefix) ||
+      (a.pokegent_id && a.pokegent_id.startsWith(idPrefix)) ||
       (a.ccd_session_id && a.ccd_session_id === idPrefix) ||
       (a.ccd_session_id && a.ccd_session_id.startsWith(idPrefix))
   ) || null;
@@ -260,7 +262,7 @@ function resolveAgent(agents, idPrefix) {
 // ── Helper: get my session ID ───────────────────────────────────────────
 
 function getMySessionId() {
-  return process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+  return process.env.POKEGENT_ID || process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
 }
 
 // ── MCP Server ──────────────────────────────────────────────────────────
@@ -278,7 +280,7 @@ server.tool(
   async () => {
     const agents = await getCachedAgents();
     const lines = agents.map((a) => {
-      const id = (a.ccd_session_id || a.session_id).slice(0, 8);
+      const id = (a.pokegent_id || a.ccd_session_id || a.session_id).slice(0, 8);
       const group = a.task_group ? ` (group: ${a.task_group})` : "";
       const task = a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : "";
 
@@ -325,7 +327,7 @@ server.tool(
     // Budget check (local, no network)
     const agents = await getCachedAgents();
     const fromAgent = resolveSelf(agents) || resolveAgent(agents, fromHint);
-    const fromId = fromAgent ? (fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
+    const fromId = fromAgent ? (fromAgent.pokegent_id || fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
@@ -381,7 +383,7 @@ server.tool(
             }],
           };
         }
-        toId = toAgent.ccd_session_id || toAgent.session_id;
+        toId = toAgent.pokegent_id || toAgent.ccd_session_id || toAgent.session_id;
         toName = toAgent.display_name || toAgent.profile_name;
         const fromName = fromAgent ? (fromAgent.display_name || fromAgent.profile_name) : fromId;
         fileSendMessage(fromId, fromName, toId, toName, content);
@@ -416,7 +418,7 @@ server.tool(
     // Resolve own ID (cached after first call)
     const agents = await getCachedAgents();
     const me = resolveSelf(agents) || resolveAgent(agents, my_session_id || sessionIdEnv.slice(0, 8));
-    const sessionId = me ? (me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
+    const sessionId = me ? (me.pokegent_id || me.pokegent_id || me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
 
     // Consume messages (API or file fallback) — single round-trip
     let messages;
@@ -511,7 +513,7 @@ server.tool(
       let result = `Spawned ${profile} in a new iTerm2 tab.`;
 
       if (newAgent && name) {
-        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         try {
           await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/rename`, {
             method: "POST",
@@ -523,12 +525,12 @@ server.tool(
           result = `Spawned ${profile} [${sid.slice(0, 8)}] (rename to "${name}" failed).`;
         }
       } else if (newAgent) {
-        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         result = `Spawned ${profile} [${sid.slice(0, 8)}].`;
       }
 
       if (newAgent && task_group) {
-        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         try {
           await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
             method: "POST",
@@ -542,12 +544,12 @@ server.tool(
       }
 
       if (newAgent && message) {
-        const toId = newAgent.ccd_session_id || newAgent.session_id;
+        const toId = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         const toName = name || newAgent.display_name || newAgent.profile_name;
         const sessionIdEnv = getMySessionId();
         const agents = await getCachedAgents();
         const me = resolveSelf(agents);
-        const fromId = me ? (me.ccd_session_id || me.session_id) : sessionIdEnv;
+        const fromId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : sessionIdEnv;
         const fromName = me ? (me.display_name || me.profile_name) : fromId;
         try {
           await apiCall("/api/messages", {
@@ -594,7 +596,7 @@ server.tool(
       const agents = await getCachedAgents();
       const me = resolveSelf(agents);
       if (me) {
-        targetId = me.ccd_session_id || me.session_id;
+        targetId = me.pokegent_id || me.ccd_session_id || me.session_id;
       } else {
         targetId = getMySessionId();
       }
@@ -603,7 +605,7 @@ server.tool(
       const agents = await getCachedAgents();
       const match = resolveAgent(agents, targetId);
       if (match) {
-        targetId = match.ccd_session_id || match.session_id;
+        targetId = match.pokegent_id || match.ccd_session_id || match.session_id;
       }
     }
 
@@ -777,7 +779,7 @@ server.tool(
       let result = `Resumed session ${fullSessionId.slice(0, 8)}.`;
 
       if (newAgent && task_group) {
-        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         try {
           await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
             method: "POST",
@@ -791,12 +793,12 @@ server.tool(
       }
 
       if (newAgent && message) {
-        const toId = newAgent.ccd_session_id || newAgent.session_id;
+        const toId = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         const toName = newAgent.display_name || newAgent.profile_name;
         const sessionIdEnv = getMySessionId();
         const agents = await getCachedAgents();
         const me = resolveSelf(agents);
-        const fromId = me ? (me.ccd_session_id || me.session_id) : sessionIdEnv;
+        const fromId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : sessionIdEnv;
         try {
           await apiCall("/api/messages", {
             method: "POST",
@@ -813,7 +815,7 @@ server.tool(
       }
 
       if (newAgent) {
-        const sid = newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
         result += ` New session ID: ${sid.slice(0, 8)}.`;
       }
 

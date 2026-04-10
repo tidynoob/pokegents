@@ -138,9 +138,9 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
     await launchProfile(profile)
 
     // Poll for the new agent, wait for session ID to stabilize, then set sprite + name
-    const wantSprite = sprite
+    const wantSprite = displaySprite
     const wantName = name.trim()
-    if (wantSprite || wantName) {
+    {
       let lastSeenId = ''
       let stableCount = 0
       for (let i = 0; i < 40; i++) {

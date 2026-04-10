@@ -135,6 +135,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/focus", s.handleFocusSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/rename", s.handleRenameSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/sprite", s.handleSetSprite)
+	s.mux.HandleFunc("GET /api/sessions/{id}/meta", s.handleGetSessionMeta)
 	s.mux.HandleFunc("POST /api/sessions/{id}/role", s.handleSetRole)
 	s.mux.HandleFunc("POST /api/sessions/{id}/project", s.handleSetProject)
 	s.mux.HandleFunc("POST /api/sessions/{id}/task-group", s.handleSetTaskGroup)
@@ -341,11 +342,7 @@ func (s *Server) syncSessionMetaToSearch() {
 		if a.Ephemeral {
 			continue
 		}
-		s.searchSvc.UpdateSessionMeta(a.SessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup)
-		// Also update under CCD session ID (running file key may differ from JSONL key)
-		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID {
-			s.searchSvc.UpdateSessionMeta(a.CCDSessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup)
-		}
+		s.searchSvc.UpdateSessionMeta(a.SessionID, a.ProfileName, a.Role, a.Project, a.TaskGroup, a.Sprite, a.PokegentID)
 	}
 }
 
@@ -491,6 +488,33 @@ func (s *Server) handleDeleteEphemeral(w http.ResponseWriter, r *http.Request) {
 	}
 	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleGetSessionMeta(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	// Check active agent first
+	if agent := s.state.GetAgent(sessionID); agent != nil {
+		writeJSON(w, map[string]string{
+			"sprite":    agent.Sprite,
+			"role":      agent.Role,
+			"project":   agent.Project,
+			"task_group": agent.TaskGroup,
+		})
+		return
+	}
+	// Fall back to search index
+	if s.searchSvc != nil {
+		pn, ro, pr, tg, sp := s.searchSvc.GetSessionMeta(sessionID)
+		writeJSON(w, map[string]string{
+			"sprite":       sp,
+			"role":         ro,
+			"project":      pr,
+			"task_group":   tg,
+			"profile_name": pn,
+		})
+		return
+	}
+	writeJSON(w, map[string]string{})
 }
 
 func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
@@ -795,8 +819,8 @@ func (s *Server) handleResumeSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fill gaps from search index (has metadata synced while session was active)
-	if s.searchSvc != nil && (profileName == "" || role == "" || project == "") {
-		pn, ro, pr, tg := s.searchSvc.GetSessionMeta(sessionID)
+	if s.searchSvc != nil {
+		pn, ro, pr, tg, _ := s.searchSvc.GetSessionMeta(sessionID)
 		if profileName == "" {
 			profileName = pn
 		}
@@ -1159,25 +1183,18 @@ func (s *Server) handleConsumePending(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, msgs)
 }
 
-// resolveSessionID maps a CCD session ID (or prefix) to the Claude session ID.
-// Messages are stored under Claude session IDs, but agents may only know their CCD session ID.
+// resolveSessionID maps any agent ID (pokegent_id, session_id, ccd_session_id, or prefix)
+// to the Claude session ID used as the primary map key.
 func (s *Server) resolveSessionID(id string) string {
-	// First check if it directly matches a known agent's session_id
-	agents := s.state.GetAgents()
-	for _, a := range agents {
-		if a.SessionID == id || strings.HasPrefix(a.SessionID, id) {
-			return a.SessionID
+	// Single pass: check all three ID fields per agent
+	for _, a := range s.state.GetAgents() {
+		for _, candidate := range []string{a.SessionID, a.PokegentID, a.CCDSessionID} {
+			if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
+				return a.SessionID
+			}
 		}
 	}
-	// Try matching against ccd_session_id
-	for _, a := range agents {
-		if a.CCDSessionID != "" && a.CCDSessionID != a.SessionID &&
-			(a.CCDSessionID == id || strings.HasPrefix(a.CCDSessionID, id)) {
-			return a.SessionID
-		}
-	}
-	// Last resort: scan running files for ccd_session_id field
-	// (covers cases where the in-memory state lost the mapping)
+	// Fallback: scan running files (covers stale in-memory state)
 	runningDir := filepath.Join(s.state.dataDir, "running")
 	entries, err := os.ReadDir(runningDir)
 	if err == nil {
@@ -1192,15 +1209,18 @@ func (s *Server) resolveSessionID(id string) string {
 			var rf struct {
 				SessionID    string `json:"session_id"`
 				CCDSessionID string `json:"ccd_session_id"`
+				PokegentID   string `json:"pokegent_id"`
 			}
-			if json.Unmarshal(data, &rf) == nil && rf.CCDSessionID != "" {
-				if rf.CCDSessionID == id || strings.HasPrefix(rf.CCDSessionID, id) {
-					return rf.SessionID
+			if json.Unmarshal(data, &rf) == nil {
+				for _, candidate := range []string{rf.PokegentID, rf.CCDSessionID, rf.SessionID} {
+					if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
+						return rf.SessionID
+					}
 				}
 			}
 		}
 	}
-	// Final fallback: check if a mailbox directory starts with the prefix
+	// Last resort: check mailbox directories
 	msgDir := filepath.Join(s.state.dataDir, "messages")
 	msgEntries, err := os.ReadDir(msgDir)
 	if err == nil {
@@ -1213,24 +1233,18 @@ func (s *Server) resolveSessionID(id string) string {
 	return id
 }
 
-// resolveToCCDSessionID maps any session ID (Claude or CCD, full or prefix) to
-// the agent's CCD session ID. Used for message mailbox routing since CCD session
-// IDs are unique per agent (even clones), unlike Claude session IDs which are shared.
+// resolveToCCDSessionID maps any agent ID to the CCD session ID used for mailbox routing.
+// CCD session IDs are unique per agent (even clones), unlike Claude session IDs.
 func (s *Server) resolveToCCDSessionID(id string) string {
-	agents := s.state.GetAgents()
-	// Check by ccd_session_id first (direct match)
-	for _, a := range agents {
-		if a.CCDSessionID != "" && (a.CCDSessionID == id || strings.HasPrefix(a.CCDSessionID, id)) {
-			return a.CCDSessionID
-		}
-	}
-	// Check by session_id → return ccd_session_id
-	for _, a := range agents {
-		if a.SessionID == id || strings.HasPrefix(a.SessionID, id) {
-			if a.CCDSessionID != "" {
-				return a.CCDSessionID
+	for _, a := range s.state.GetAgents() {
+		for _, candidate := range []string{a.PokegentID, a.CCDSessionID, a.SessionID} {
+			if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
+				// Return the most specific unique ID for mailbox routing
+				if a.CCDSessionID != "" {
+					return a.CCDSessionID
+				}
+				return a.SessionID
 			}
-			return a.SessionID // fallback: no ccd_session_id
 		}
 	}
 	return id
@@ -1490,7 +1504,78 @@ func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.eventBus.Publish("state_update", s.state.GetAgents())
+
+	// Update iTerm2 Dynamic Profile icon so the tab icon matches immediately
+	s.updateITermSprite(sessionID, body.Sprite)
+
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// updateITermSprite updates the iTerm2 Dynamic Profile icon for a session.
+// iTerm2 watches ~/Library/Application Support/iTerm2/DynamicProfiles/ and
+// picks up changes automatically.
+func (s *Server) updateITermSprite(sessionID, sprite string) {
+	home, _ := os.UserHomeDir()
+	dynProfileDir := filepath.Join(home, "Library", "Application Support", "iTerm2", "DynamicProfiles")
+
+	// Dynamic Profile is now named by pokegent_id (stable). Try pokegent_id first,
+	// then ccd_session_id, then session_id for backward compat.
+	agent := s.state.GetAgent(sessionID)
+	dynProfile := ""
+	for _, candidate := range []string{
+		func() string { if agent != nil && agent.PokegentID != "" { return agent.PokegentID }; return "" }(),
+		func() string { if agent != nil && agent.CCDSessionID != "" { return agent.CCDSessionID }; return "" }(),
+		sessionID,
+	} {
+		if candidate == "" {
+			continue
+		}
+		p := filepath.Join(dynProfileDir, "pokegents-session-"+candidate+".json")
+		if _, err := os.Stat(p); err == nil {
+			dynProfile = p
+			break
+		}
+	}
+	if dynProfile == "" {
+		log.Printf("updateITermSprite: no dynamic profile for %s", sessionID)
+		return
+	}
+
+	// Read existing profile to preserve Name, Guid, parent
+	data, err := os.ReadFile(dynProfile)
+	if err != nil {
+		return
+	}
+	var profile map[string]any
+	if json.Unmarshal(data, &profile) != nil {
+		return
+	}
+
+	profiles, ok := profile["Profiles"].([]any)
+	if !ok || len(profiles) == 0 {
+		return
+	}
+	p, ok := profiles[0].(map[string]any)
+	if !ok {
+		return
+	}
+
+	// Build absolute path to sprite PNG
+	spritePath := filepath.Join(s.webDir, "sprites", sprite+".png")
+	if absPath, err := filepath.Abs(spritePath); err == nil {
+		spritePath = absPath
+	}
+
+	p["Icon"] = 2 // custom icon
+	p["Custom Icon Path"] = spritePath
+	profiles[0] = p
+	profile["Profiles"] = profiles
+
+	updated, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(dynProfile, updated, 0644)
 }
 
 func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
@@ -1568,7 +1653,16 @@ func (s *Server) relaunchIfIdle(sessionID string) string {
 		project = agent.ProfileName
 	}
 	target := composeTarget(agent.Role, project, agent.ProfileName)
+	// Pass --pokegent-id to preserve identity (sprite, grid position, task group, mailbox)
+	// across role/project changes
+	pokegentID := agent.PokegentID
+	if pokegentID == "" {
+		pokegentID = agent.CCDSessionID
+	}
 	cmd := fmt.Sprintf("pokegent %s -r %s", target, sessionID)
+	if pokegentID != "" {
+		cmd += fmt.Sprintf(" --pokegent-id %s", pokegentID)
+	}
 
 	if agent.State == "done" || agent.State == "idle" {
 		if agent.ITermSessionID != "" || agent.TTY != "" {
