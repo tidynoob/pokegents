@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.0 — 2026-04-09
+
+### Sprite System Refactor (BREAKING)
+- Sprites are now stored once in the running file (`"sprite": "jirachi"`) and read everywhere
+- No more hash-based sprite derivation -- sprites are randomly assigned on first launch, then persistent
+- Sprite picker updates running file + iTerm2 Dynamic Profile live (no reload needed)
+- New Agent launcher sprite selection now persists correctly
+
+**Migration required for existing users:**
+```bash
+git pull origin main
+./scripts/migrate-sprites.sh    # backfills sprite field into running files + search DB
+pokegent dashboard build        # rebuild and restart
+```
+
+Historical PC Box sessions without sprites will show as pokeball. Active agents will keep their current sprites.
+
+### Other Changes
+- Grid: TIDY UP and RESET buttons, ghost layout pruning, auto-compact fixes
+- Groups: context menu to assign/create groups, drag-to-group, compact member rows
+- Activity feed: fixed stale entries re-appearing after new prompt
+- Resume: PC Box shows RESUME vs COMPACT buttons for auto-compact choice
+- Hooks: SIGINT trap so Ctrl+C doesn't kill hooks mid-write
+- Task grouping (PR #3), subagent tracking (PR #4), resume fixes (PR #5) from Angel
+
 ## v0.3.0 — 2026-04-03
 
 ### Grid System Redesign
