@@ -124,7 +124,7 @@ export function SessionBrowser({ onClose, activeSessionIds, onResume }: SessionB
   const selected  = displayList.find(r => r.session_id === selectedId) ?? displayList[0] ?? null
 
   const getSprite = (r: SearchResult) =>
-    r.sprite || r.sprite_override || 'pokeball'
+    r.sprite || r.sprite_override || POKEMON_SPRITES[hashString(r.session_id) % POKEMON_SPRITES.length]
 
   return (
     <div
