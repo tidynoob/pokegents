@@ -480,7 +480,7 @@ server.tool(
       const res = await fetch(`${DASHBOARD_URL}/api/launch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile }),
+        body: JSON.stringify({ profile, task_group: task_group || undefined }),
       });
       if (!res.ok) {
         const err = await res.text();

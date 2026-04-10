@@ -33,6 +33,122 @@ pokegent() {
   local POKEGENTS_ITERM_RESTORE=$(jq -r '.iterm2_restore_profile // "Default"' "$POKEGENTS_CONFIG" 2>/dev/null || echo "Default")
   export POKEGENTS_DASHBOARD_URL="http://localhost:$POKEGENTS_PORT"
 
+  # Resolve a project name by alias. Checks each project's "aliases" array.
+  # Prints the canonical project filename (without .json) if found, empty otherwise.
+  _pokegent_resolve_project_alias() {
+    local _alias="$1"
+    for _pf in "$PROJECTS_DIR"/*.json(N); do
+      local _match=$(jq -r --arg a "$_alias" '(.aliases // [])[] | select(. == $a)' "$_pf" 2>/dev/null)
+      if [[ -n "$_match" ]]; then
+        basename "$_pf" .json
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  # Search JSONL custom-titles for a term. Prints "session_id\ttitle" lines.
+  # Args: $1=search_term, $2+=directories to search
+  _pokegent_search_jsonl_titles() {
+    local _term="$1"; shift
+    python3 -c "
+import json, os, sys, glob
+term = sys.argv[1].lower()
+seen = set()
+for d in sys.argv[2:]:
+    for f in sorted(glob.glob(os.path.join(d, '*.jsonl')), key=os.path.getmtime, reverse=True):
+        sid = os.path.basename(f).replace('.jsonl', '')
+        if sid in seen:
+            continue
+        seen.add(sid)
+        last_title = ''
+        try:
+            with open(f) as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                        if obj.get('type') == 'custom-title':
+                            last_title = obj.get('customTitle', '')
+                    except: pass
+        except: continue
+        if last_title and term in last_title.lower():
+            print(f'{sid}\t{last_title}')
+" "$_term" "$@" 2>/dev/null
+  }
+
+  # Search sessions by name (case-insensitive substring match).
+  # Prints tab-separated "session_id\ttitle" lines to stdout.
+  # Args: $1=search_term, $2=cwd (for project dir scoping)
+  _pokegent_search_by_name() {
+    local _term="$1" _cwd="$2"
+
+    # 1. Search name-overrides.json (dashboard renames — highest priority)
+    local _overrides_file="$POKEGENTS_DATA/name-overrides.json"
+    if [[ -f "$_overrides_file" ]]; then
+      local _override_results=$(jq -r --arg term "$_term" '
+        to_entries[] | select(.value | test($term; "i")) | "\(.key)\t\(.value)"
+      ' "$_overrides_file" 2>/dev/null)
+      if [[ -n "$_override_results" ]]; then
+        echo "$_override_results"
+        return 0
+      fi
+    fi
+
+    # 2. Search JSONL custom-titles (scoped to project dir first, widen if no matches)
+    local _proj_dir_base="$(echo "$_cwd" | sed 's|/|-|g; s|^|/|; s|^/||; s|_|-|g')"
+    local _search_dirs=()
+    for pdir in "$HOME/.claude/projects/"${_proj_dir_base}*(N/); do
+      _search_dirs+=("$pdir")
+    done
+
+    local _title_results=""
+    if [[ ${#_search_dirs[@]} -gt 0 ]]; then
+      _title_results=$(_pokegent_search_jsonl_titles "$_term" "${_search_dirs[@]}")
+    fi
+    # Widen to all project dirs if scoped search found nothing
+    if [[ -z "$_title_results" ]]; then
+      _search_dirs=()
+      for pdir in "$HOME/.claude/projects/"*(N/); do
+        _search_dirs+=("$pdir")
+      done
+      _title_results=$(_pokegent_search_jsonl_titles "$_term" "${_search_dirs[@]}")
+    fi
+    [[ -n "$_title_results" ]] && echo "$_title_results"
+  }
+
+  # Resolve name search results to a single session ID.
+  # Sets resume_session_id on success. Returns 1 on failure (0 matches or ambiguous).
+  # Args: $1=search_term, $2=cwd
+  _pokegent_resolve_name() {
+    local _term="$1" _cwd="$2"
+    local _match_ids=() _match_labels=()
+
+    while IFS=$'\t' read -r _sid _label; do
+      [[ -n "$_sid" ]] && _match_ids+=("$_sid") && _match_labels+=("$_label")
+    done < <(_pokegent_search_by_name "$_term" "$_cwd")
+
+    local _unique_ids=("${(@u)_match_ids}")
+    if [[ ${#_unique_ids[@]} -eq 0 ]]; then
+      echo "No session found with name matching '$_term'"
+      return 1
+    elif [[ ${#_unique_ids[@]} -eq 1 ]]; then
+      echo "Matched session: ${_match_labels[1]:-${_unique_ids[1]}} (${_unique_ids[1]:0:8})"
+      resume_session_id="${_unique_ids[1]}"
+      return 0
+    else
+      echo "Multiple sessions match '$_term':"
+      local _shown=()
+      for i in {1..${#_match_ids[@]}}; do
+        if (( ! ${_shown[(Ie)${_match_ids[$i]}]} )); then
+          echo "  ${_match_ids[$i]:0:8}  ${_match_labels[$i]:-${_match_ids[$i]}}"
+          _shown+=("${_match_ids[$i]}")
+        fi
+      done
+      echo "Use a session ID prefix to disambiguate."
+      return 1
+    fi
+  }
+
   # Clean up stale running session files
   for rf in "$RUNNING_DIR"/*.json(N); do
     local rf_claude_pid=$(jq -r '.claude_pid // empty' "$rf" 2>/dev/null)
@@ -278,9 +394,16 @@ HELP
     if [[ -n "$_project_name" ]]; then
       _project_file="$PROJECTS_DIR/${_project_name}.json"
       if [[ ! -f "$_project_file" ]]; then
-        echo "Unknown project: $_project_name"
-        echo "Run 'pokegent projects' to see available projects."
-        return 1
+        # Try alias resolution
+        local _canonical=$(_pokegent_resolve_project_alias "$_project_name")
+        if [[ -n "$_canonical" ]]; then
+          _project_name="$_canonical"
+          _project_file="$PROJECTS_DIR/${_project_name}.json"
+        else
+          echo "Unknown project: $_project_name"
+          echo "Run 'pokegent projects' to see available projects."
+          return 1
+        fi
       fi
     else
       # role@ with no project — use default
@@ -303,7 +426,7 @@ HELP
     fi
     _resolved_mode="legacy"
   else
-    # Resolution order: project > legacy profile > role
+    # Resolution order: project > project alias > legacy profile > role
     if [[ -f "$PROJECTS_DIR/${_arg}.json" ]]; then
       _project_name="$_arg"
       _project_file="$PROJECTS_DIR/${_project_name}.json"
@@ -312,6 +435,10 @@ HELP
       if [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
         echo "Note: Using project '$_arg'. To use legacy profile: pokegent --legacy $_arg"
       fi
+    elif _canonical=$(_pokegent_resolve_project_alias "$_arg") && [[ -n "$_canonical" ]]; then
+      _project_name="$_canonical"
+      _project_file="$PROJECTS_DIR/${_project_name}.json"
+      _resolved_mode="project"
     elif [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
       _profile_name="$_arg"
       _profile_file="$PROFILES_DIR/${_profile_name}.json"
@@ -454,6 +581,12 @@ ${_role_prompt}"
   done
   set -- "${filtered_args[@]}"
 
+  # If resume_session_id doesn't look like a UUID/hex prefix, resolve by name search.
+  # This lets users do: pokegent coord -r "Coordinator" instead of pokegent coord -r 0af628c3
+  if [[ "$continue_mode" == "true" && -n "$resume_session_id" && ! "$resume_session_id" =~ ^[0-9a-fA-F-]+$ ]]; then
+    _pokegent_resolve_name "$resume_session_id" "$cwd" || return 1
+  fi
+
   # For resume-by-ID, resolve the display name. Priority:
   # 1. name-overrides.json (dashboard renames — highest priority, Claude can't overwrite)
   # 2. JSONL custom-title (Claude's built-in title)
@@ -507,7 +640,13 @@ if last_title: print(last_title)
       [[ "$rf_profile" == "$profile_name" ]] && ((dup_count++))
     done
     if [[ $dup_count -gt 0 ]]; then
-      display_name="${display_name} (clone)"
+      if [[ -n "$task_group" ]]; then
+        # Use task group for semantic disambiguation: "Coordinator — Pokegents (auth-migration)"
+        display_name="${display_name} (${task_group})"
+      else
+        # Number duplicates: "Coordinator — Pokegents (2)", "Coordinator — Pokegents (3)"
+        display_name="${display_name} ($((dup_count + 1)))"
+      fi
     fi
   fi
 
@@ -668,9 +807,21 @@ if last_title: print(last_title)
         done
       fi
       if [[ ${#matches[@]} -eq 0 ]]; then
-        echo "No session found matching '$resume_session_id'"
-        rm -f "$running_file"
-        return 1
+        # UUID prefix matched nothing — fall back to name search
+        if _pokegent_resolve_name "$resume_session_id" "$cwd"; then
+          # Re-resolve: resume_session_id is now a full UUID from name search
+          for pdir in "$HOME/.claude/projects/"${project_dir_base}*(N/) "$HOME/.claude/projects/"*(N/); do
+            for sf in "$pdir"/${resume_session_id}*.jsonl(N); do
+              matches+=($(basename "$sf" .jsonl))
+              match_dirs+=("$pdir")
+            done
+            [[ ${#matches[@]} -gt 0 ]] && break
+          done
+        fi
+        if [[ ${#matches[@]} -eq 0 ]]; then
+          rm -f "$running_file"
+          return 1
+        fi
       elif [[ ${#matches[@]} -gt 1 ]]; then
         # Deduplicate: same session ID can appear in multiple project dirs (e.g. worktrees).
         # If all matches resolve to the same session ID, it's not truly ambiguous.

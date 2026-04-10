@@ -18,7 +18,8 @@ type TerminalIntegration interface {
 	// compact: "yes" to auto-compact, "no" to skip, "" to let user decide.
 	ResumeSession(profile, sessionID, compact string) error
 	// LaunchProfile opens a new tab and starts a fresh pokegents session for the given profile.
-	LaunchProfile(profile, itermProfile string) error
+	// taskGroup is optional — if non-empty, passed as --group to pokegent for auto-naming.
+	LaunchProfile(profile, itermProfile, taskGroup string) error
 	// IsAvailable reports whether the terminal integration is functional
 	// on the current platform.
 	IsAvailable() bool

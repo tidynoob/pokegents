@@ -523,7 +523,7 @@ func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown profile", http.StatusNotFound)
 		return
 	}
-	if err := s.terminal.LaunchProfile(name, profile.ITermProfile); err != nil {
+	if err := s.terminal.LaunchProfile(name, profile.ITermProfile, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -535,7 +535,8 @@ func (s *Server) handleLaunchProfile(w http.ResponseWriter, r *http.Request) {
 // the shell handles resolution.
 func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Profile string `json:"profile"`
+		Profile   string `json:"profile"`
+		TaskGroup string `json:"task_group,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Profile == "" {
 		http.Error(w, "missing profile", http.StatusBadRequest)
@@ -546,7 +547,7 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	if p := s.state.GetProfile(body.Profile); p != nil {
 		itermProfile = p.ITermProfile
 	}
-	if err := s.terminal.LaunchProfile(body.Profile, itermProfile); err != nil {
+	if err := s.terminal.LaunchProfile(body.Profile, itermProfile, body.TaskGroup); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

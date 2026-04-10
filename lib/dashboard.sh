@@ -38,7 +38,12 @@ _pokegent_list_projects() {
     local title=$(jq -r '.title' "$f")
     local cwd=$(jq -r '.cwd' "$f")
     local r=$(jq -r '.color[0]' "$f") g=$(jq -r '.color[1]' "$f") b=$(jq -r '.color[2]' "$f")
-    printf "  %-12s %-20s [%s,%s,%s]  %s\n" "$pname" "$title" "$r" "$g" "$b" "$cwd"
+    local aliases=$(jq -r '(.aliases // []) | join(", ")' "$f" 2>/dev/null)
+    if [[ -n "$aliases" ]]; then
+      printf "  %-12s %-20s [%s,%s,%s]  %s  (aliases: %s)\n" "$pname" "$title" "$r" "$g" "$b" "$cwd" "$aliases"
+    else
+      printf "  %-12s %-20s [%s,%s,%s]  %s\n" "$pname" "$title" "$r" "$g" "$b" "$cwd"
+    fi
   done
   [[ "$_found" == "false" ]] && echo "  (none — create with: pokegent edit project <name>)"
 }
