@@ -81,12 +81,17 @@ end tell`, safeProfile, safeSID)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
-func (t *ITerm2Terminal) LaunchProfile(profile, itermProfile string) error {
+func (t *ITerm2Terminal) LaunchProfile(profile, itermProfile, taskGroup string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	createTab := `create tab with default profile`
 	if itermProfile != "" {
 		safeITermProf := strings.ReplaceAll(itermProfile, `"`, `\"`)
 		createTab = fmt.Sprintf(`create tab with profile "%s"`, safeITermProf)
+	}
+	cmd := fmt.Sprintf("pokegent %s", safeProfile)
+	if taskGroup != "" {
+		safeGroup := strings.ReplaceAll(taskGroup, `"`, `\"`)
+		cmd = fmt.Sprintf("pokegent %s --group %s", safeProfile, safeGroup)
 	}
 	script := fmt.Sprintf(`
 tell application "iTerm2"
@@ -94,10 +99,10 @@ tell application "iTerm2"
 		%s
 		delay 1
 		tell current session
-			write text "pokegent %s"
+			write text "%s"
 		end tell
 	end tell
-end tell`, createTab, safeProfile)
+end tell`, createTab, cmd)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
