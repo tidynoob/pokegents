@@ -453,8 +453,9 @@ export default function App() {
   const showHeader = gridEngine.cellH >= 140
   const isCompact = gridEngine.cellH < 120
 
-  // Auto-adjust expanded group height when width changes (user manual resize)
-  // Mental model: group height in grid units = cardRows * singleH (always exact)
+  // Auto-adjust expanded group height ONLY when width changes (not on every layout update).
+  // Without this guard, manually resizing a group shorter would snap back immediately.
+  const groupWidths = useRef<Record<string, number>>({})
   useEffect(() => {
     for (const [groupName, members] of Object.entries(grouped)) {
       if ((groupViewModes[groupName] || 'collapsed') !== 'expanded') continue
@@ -462,6 +463,11 @@ export default function App() {
       const rect = gridEngine.layouts[groupId]
       const singleRect = groupSingleRects.current[groupName]
       if (!rect || !singleRect) continue
+
+      const prevW = groupWidths.current[groupName]
+      groupWidths.current[groupName] = rect.w
+      // Only auto-adjust when width actually changed (affects column count → row count)
+      if (prevW === undefined || prevW === rect.w) continue
 
       const cols = Math.max(1, Math.floor(rect.w / singleRect.w))
       const rows = Math.ceil(members.length / cols)
@@ -472,7 +478,7 @@ export default function App() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gridEngine.layouts, gridEngine.resizeState, grouped, groupViewModes])
+  }, [gridEngine.layouts, grouped, groupViewModes])
 
 
   const getSpriteForId = useMemo(() => {
@@ -679,20 +685,6 @@ export default function App() {
           <div className="flex-1" />
           <div className="flex items-center gap-2">
             <button
-              onClick={() => gridEngine.compactUp()}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
-              title="Move cards up to fill gaps"
-            >
-              TIDY UP
-            </button>
-            <button
-              onClick={() => gridEngine.resetSizes()}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
-              title="Reset all cards to default size"
-            >
-              RESET
-            </button>
-            <button
               onClick={() => setShowLauncher(true)}
               className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
             >
@@ -721,6 +713,8 @@ export default function App() {
                   onClose={() => setShowSettings(false)}
                   onTestMessaging={triggerTestDelivery}
                   onGridDragging={setGridSliderDragging}
+                  onTidyUp={() => gridEngine.compactUp()}
+                  onResetPositions={() => gridEngine.resetSizes()}
                 />
               )}
             </div>
@@ -789,8 +783,9 @@ export default function App() {
                           gridEngine.resizeItem(id, saved.w, saved.h)
                         }
                       } else {
-                        // Default: single column, height = memberCount * singleH
-                        gridEngine.resizeItem(id, rect.w, members.length * rect.h)
+                        // Default: single column, height = memberCount * singleH, capped to visible grid
+                        const expandedH = Math.min(members.length * rect.h, gridEngine.settings.rows)
+                        gridEngine.resizeItem(id, rect.w, expandedH)
                       }
                     } else if (mode === 'single') {
                       // Save expanded rect for next time

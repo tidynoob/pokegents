@@ -149,13 +149,13 @@ export function GroupContainer({
     <div
       className="rounded-lg h-full flex flex-col overflow-hidden min-w-0"
       style={{
-        background: `rgba(${r}, ${g}, ${b}, 0.10)`,
-        border: `1px solid rgba(${r}, ${g}, ${b}, 0.40)`,
-        borderLeft: `3px solid rgba(${r}, ${g}, ${b}, 0.75)`,
+        background: `rgba(${r}, ${g}, ${b}, 0.20)`,
+        border: `1px solid rgba(${r}, ${g}, ${b}, 0.55)`,
+        borderLeft: `3px solid rgba(${r}, ${g}, ${b}, 0.85)`,
       }}
     >
       {/* Header bar */}
-      <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H }}>
+      <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H, background: `rgba(${r}, ${g}, ${b}, 0.15)` }}>
         <button
           className="text-[9px] text-white/50 hover:text-white/80 transition-colors px-0.5"
           onClick={(e) => { e.stopPropagation(); onSetViewMode(viewMode === 'single' ? 'expanded' : 'single') }}
@@ -163,8 +163,7 @@ export function GroupContainer({
         >{viewMode === 'single' ? '▶' : '▼'}</button>
 
         <span
-          className="text-[7px] font-pixel pixel-shadow uppercase truncate"
-          style={{ color: `rgb(${r}, ${g}, ${b})` }}
+          className="text-[7px] font-pixel pixel-shadow uppercase truncate text-white"
         >{name}</span>
         <span className="text-[7px] font-pixel text-white/40 shrink-0">{members.length}</span>
 

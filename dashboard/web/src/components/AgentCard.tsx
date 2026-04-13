@@ -548,12 +548,16 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
     return () => document.removeEventListener('keydown', keyHandler)
   }, [onClose, submenu])
 
+  const menuWidth = 200
+  const subMenuWidth = 150
+  const flipSub = x + menuWidth + subMenuWidth > window.innerWidth
   const menuStyle: React.CSSProperties = {
     position: 'fixed',
-    left: Math.min(x, window.innerWidth - 200),
+    left: flipSub ? Math.max(0, x - menuWidth) : Math.min(x, window.innerWidth - menuWidth),
     top: Math.min(y, window.innerHeight - 300),
     zIndex: 10000,
   }
+  const subPos = flipSub ? 'right-full mr-1' : 'left-full ml-1'
 
   const items = [
     { label: 'Go to terminal', icon: '⌨', action: () => { focusAgent(agent.session_id); onClose() } },
@@ -600,7 +604,7 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
                   <span className="ml-auto text-white/30">▸</span>
                 </button>
                 {submenu === 'role' && (
-                  <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
                     {agent.role && (
                       <button
                         onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, ''); showStatus(res, 'no role'); onClose() }}
@@ -634,7 +638,7 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
                   <span className="ml-auto text-white/30">▸</span>
                 </button>
                 {submenu === 'project' && (
-                  <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
                     {agent.project && (
                       <button
                         onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, ''); showStatus(res, 'no project'); onClose() }}
@@ -671,7 +675,7 @@ function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollaps
             <span className="ml-auto text-white/30">▸</span>
           </button>
           {submenu === 'group' && (
-            <div className="absolute left-full top-0 ml-1 gba-panel py-1 min-w-[140px]">
+            <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
               {agent.task_group && (
                 <button
                   onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, ''); onAssignStatus?.('Removed from group'); onClose() }}

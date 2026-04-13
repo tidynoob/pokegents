@@ -4,7 +4,9 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,10 +25,21 @@ func (t *ITerm2Terminal) IsAvailable() bool {
 
 func (t *ITerm2Terminal) FocusSession(itermSessionID, tty string) error {
 	script := buildFocusScript(itermSessionID, tty)
-	return exec.Command("osascript", "-e", script).Run()
+	err := exec.Command("osascript", "-e", script).Run()
+	// Focus the target window via SkyLight private API (runs as separate process, fast)
+	if focusWindowBin != "true" {
+		if pidBytes, pidErr := exec.Command("pgrep", "-x", "iTerm2").Output(); pidErr == nil {
+			pid := strings.TrimSpace(string(pidBytes))
+			exec.Command(focusWindowBin, pid, "0").Run()
+		}
+	}
+	return err
 }
 
 func (t *ITerm2Terminal) WriteText(itermSessionID, tty, text string) error {
+	// Collapse newlines to spaces — multi-line text triggers iTerm2 paste bracketing
+	// which shows "[Pasted Text: X lines]" and waits for manual confirmation
+	text = strings.Join(strings.Fields(text), " ")
 	script := buildWriteScript(itermSessionID, tty, text)
 	return exec.Command("osascript", "-e", script).Run()
 }
@@ -138,37 +151,54 @@ func buildFocusScript(itermSessionID, tty string) string {
 	safeTTY := strings.ReplaceAll(tty, `"`, `\"`)
 	return fmt.Sprintf(`
 tell application "iTerm2"
-	activate
 	set targetID to "%s"
 	set targetTTY to "%s"
+	set targetWinIdx to -1
 	repeat with w in windows
 		repeat with t in tabs of w
 			repeat with s in sessions of t
 				if targetID is not "" and (id of s) = targetID then
-					set index of w to 1
 					tell t to select
 					tell s to select
-					return
+					set targetWinIdx to index of w
 				end if
 			end repeat
 		end repeat
 	end repeat
-	-- Fallback: match by TTY (legacy sessions without iterm_session_id)
-	if targetTTY is not "" then
+	-- Fallback: match by TTY
+	if targetWinIdx = -1 and targetTTY is not "" then
 		repeat with w in windows
 			repeat with t in tabs of w
 				repeat with s in sessions of t
 					if tty of s = targetTTY then
-						set index of w to 1
 						tell t to select
 						tell s to select
-						return
+						set targetWinIdx to index of w
 					end if
 				end repeat
 			end repeat
 		end repeat
 	end if
+	if targetWinIdx = -1 then return
+	-- Make target iTerm's frontmost window within iTerm
+	set index of window targetWinIdx to 1
 end tell`, itermSessionID, safeTTY)
+}
+
+var focusWindowBin string
+
+func init() {
+	// Resolve the focus-window helper path relative to the executable
+	exe, err := os.Executable()
+	if err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "helpers", "focus-window")
+		if _, err := os.Stat(candidate); err == nil {
+			focusWindowBin = candidate
+		}
+	}
+	if focusWindowBin == "" {
+		focusWindowBin = "true" // no-op fallback
+	}
 }
 
 // buildWriteScript returns an AppleScript that types text into the correct iTerm2 session.

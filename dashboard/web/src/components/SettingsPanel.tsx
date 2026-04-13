@@ -9,6 +9,8 @@ interface SettingsPanelProps {
   onClose: () => void
   onTestMessaging?: () => void
   onGridDragging?: (dragging: boolean) => void
+  onTidyUp?: () => void
+  onResetPositions?: () => void
 }
 
 function Slider({ label, value, min, max, step, unit, onChange, onDragStart, onDragEnd }: {
@@ -87,7 +89,7 @@ function OptionGroup<T extends string>({ label, value, options, onChange }: {
   )
 }
 
-export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging, onGridDragging }: SettingsPanelProps) {
+export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging, onGridDragging, onTidyUp, onResetPositions }: SettingsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -213,6 +215,28 @@ export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, 
           checked={settings.scanlines}
           onChange={v => onChange({ scanlines: v })}
         />
+
+        {/* Grid Actions */}
+        <div className="flex gap-2">
+          {onTidyUp && (
+            <button
+              onClick={onTidyUp}
+              className="flex-1 gba-button text-[7px] font-pixel px-3 py-2 transition-colors"
+              title="Move cards up to fill gaps"
+            >
+              TIDY UP CARDS
+            </button>
+          )}
+          {onResetPositions && (
+            <button
+              onClick={onResetPositions}
+              className="flex-1 gba-button text-[7px] font-pixel px-3 py-2 transition-colors"
+              title="Reset all cards to default size and repack"
+            >
+              RESET POSITIONS
+            </button>
+          )}
+        </div>
 
         {/* Test Messaging */}
         {onTestMessaging && (

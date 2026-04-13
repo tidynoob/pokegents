@@ -11,6 +11,10 @@ function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
         a[i].last_summary !== b[i].last_summary ||
         a[i].user_prompt !== b[i].user_prompt ||
         a[i].display_name !== b[i].display_name ||
+        a[i].sprite !== b[i].sprite ||
+        a[i].task_group !== b[i].task_group ||
+        a[i].role !== b[i].role ||
+        a[i].project !== b[i].project ||
         a[i].busy_since !== b[i].busy_since ||
         a[i].context_tokens !== b[i].context_tokens ||
         (a[i].recent_actions?.length || 0) !== (b[i].recent_actions?.length || 0) ||
