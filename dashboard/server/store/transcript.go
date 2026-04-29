@@ -216,6 +216,7 @@ type TranscriptEntry struct {
 type ContentBlock struct {
 	Type  string `json:"type"` // "text", "thinking", "tool_use"
 	Text  string `json:"text,omitempty"`
+	ID    string `json:"id,omitempty"`    // tool_use block ID (matches tool_result.tool_use_id)
 	Name  string `json:"name,omitempty"`  // tool name
 	Input string `json:"input,omitempty"` // tool input summary (first 200 chars of JSON)
 }
@@ -432,6 +433,7 @@ func (tr *TranscriptReader) parseAssistantEntry(raw map[string]any, uuid, timest
 				entry.Blocks = append(entry.Blocks, ContentBlock{Type: "thinking", Text: t})
 			}
 		case "tool_use":
+			blockID, _ := m["id"].(string)
 			name, _ := m["name"].(string)
 			inputSummary := ""
 			if input, ok := m["input"].(map[string]any); ok {
@@ -441,7 +443,7 @@ func (tr *TranscriptReader) parseAssistantEntry(raw map[string]any, uuid, timest
 					inputSummary = inputSummary[:200] + "..."
 				}
 			}
-			entry.Blocks = append(entry.Blocks, ContentBlock{Type: "tool_use", Name: name, Input: inputSummary})
+			entry.Blocks = append(entry.Blocks, ContentBlock{Type: "tool_use", ID: blockID, Name: name, Input: inputSummary})
 		}
 	}
 

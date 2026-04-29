@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ProjectInfo, RoleInfo, launchProfile, sendMessage, setSprite, renameAgent, fetchSessions } from '../api'
+import { ProjectInfo, RoleInfo, launchPokegent, sendMessage, setSprite, renameAgent, fetchSessions } from '../api'
 import { AgentState } from '../types'
 import { POKEMON_SPRITES } from './sprites'
 import { SpritePicker } from './SpritePicker'
@@ -88,6 +88,13 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
   const [sprite, setSelectedSprite] = useState('')
   const [showSpritePicker, setShowSpritePicker] = useState(false)
   const [launching, setLaunching] = useState(false)
+  const [iface, setIface] = useState<'iterm2' | 'chat'>(() => {
+    try { return (localStorage.getItem('pokegents-launch-interface') as 'iterm2' | 'chat') || 'iterm2' }
+    catch { return 'iterm2' }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('pokegents-launch-interface', iface) } catch { /* ignore */ }
+  }, [iface])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -123,44 +130,42 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
     if (!canLaunch || launching) return
     setLaunching(true)
 
-    // Snapshot current agent IDs so we can detect the new one
-    const existingIds = new Set(agents.map(a => a.session_id))
-
-    let profile = ''
-    if (selectedRole && selectedProject) {
-      profile = `${selectedRole}@${selectedProject}`
-    } else if (selectedProject) {
-      profile = `@${selectedProject}`
-    } else if (selectedRole) {
-      profile = `${selectedRole}@`
-    }
-
-    await launchProfile(profile)
-
-    // Poll for the new agent, wait for session ID to stabilize, then set sprite + name
     const wantSprite = displaySprite
     const wantName = name.trim()
+
+    let resp
+    try {
+      // Unified launch — server mints pokegent_id and pre-writes the running
+      // file before invoking the launcher. Returns the pokegent_id we can use
+      // to apply sprite/name overrides without polling-by-exclusion.
+      resp = await launchPokegent({
+        role: selectedRole || undefined,
+        project: selectedProject || undefined,
+        name: wantName || undefined,
+        sprite: wantSprite || undefined,
+        task_group: undefined,
+        interface: iface,
+      })
+    } catch (err) {
+      console.error('launch failed', err)
+      alert(`Launch failed: ${err instanceof Error ? err.message : String(err)}`)
+      setLaunching(false)
+      return
+    }
+
+    // Wait for pokegent.sh to overwrite the placeholder with real session info,
+    // then apply user's name + sprite. Keyed by pokegent_id from launch response —
+    // no more polling-by-exclusion.
+    const pokegentId = resp.pokegent_id
     {
-      let lastSeenId = ''
-      let stableCount = 0
       for (let i = 0; i < 40; i++) {
         await new Promise(r => setTimeout(r, 500))
         const fresh = await fetchSessions()
-        const newAgent = fresh.find(a => !existingIds.has(a.session_id))
+        const newAgent = fresh.find(a => a.pokegent_id === pokegentId && a.session_id && a.is_alive)
         if (newAgent) {
-          // Wait for session_id to stabilize (hook reconciliation may change it)
-          if (newAgent.session_id === lastSeenId) {
-            stableCount++
-          } else {
-            lastSeenId = newAgent.session_id
-            stableCount = 0
-          }
-          // Stable for 2 polls (1s) — safe to set
-          if (stableCount >= 2) {
-            if (wantSprite) await setSprite(newAgent.session_id, wantSprite)
-            if (wantName) await renameAgent(newAgent.session_id, wantName)
-            break
-          }
+          if (wantSprite) await setSprite(newAgent.session_id, wantSprite)
+          if (wantName) await renameAgent(newAgent.session_id, wantName)
+          break
         }
       }
     }
@@ -190,6 +195,30 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
         <div className="flex items-center justify-between">
           <h3 className="text-[9px] font-pixel text-white pixel-shadow">NEW AGENT</h3>
           <button onClick={onClose} className="gba-button text-[6px] font-pixel px-2 py-1">CANCEL</button>
+        </div>
+
+        {/* Interface picker — iTerm2 (Claude Code in a tab) vs Chat (ACP panel). */}
+        <div>
+          <label className="text-[7px] font-pixel text-white/50 pixel-shadow block mb-1.5">INTERFACE</label>
+          <div className="flex gap-1">
+            {(['iterm2', 'chat'] as const).map(opt => (
+              <button
+                key={opt}
+                onClick={() => setIface(opt)}
+                className={`flex-1 text-[7px] font-pixel px-2 py-1.5 rounded transition-colors ${
+                  iface === opt ? 'bg-accent-blue text-white' : 'bg-white/10 text-white/50 hover:bg-white/20'
+                }`}
+                style={{
+                  boxShadow: iface === opt
+                    ? 'inset 1px 1px 0 rgba(255,255,255,0.2), inset -1px -1px 0 rgba(0,0,0,0.2)'
+                    : 'none',
+                  textShadow: '1px 1px 0 rgba(0,0,0,0.4)',
+                }}
+              >
+                {opt === 'iterm2' ? 'ITERM2' : 'CHAT'}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Name & Pokemon */}

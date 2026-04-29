@@ -2,21 +2,17 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { renameAgent, focusAgent, checkAgentMessages, spawnClone, shutdownAgent, setSprite, sendPrompt, uploadImage, assignRole, assignProject, assignTaskGroup, ProjectInfo, RoleInfo } from '../api'
+import { renameAgent, focusAgent, setSprite, sendPrompt, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
 import { useSpriteAnimation } from './spriteAnimations'
+import { PromptInput } from './PromptInput'
+import { AgentMenu } from './AgentMenu'
+import { formatElapsed } from '../utils/elapsed'
+import { renderMiniMarkdown } from '../utils/miniMarkdown'
+import { useRuntimeCapabilities, capsFor } from '../utils/runtimes'
 
-function renderMiniMarkdown(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-}
-
-function ProfilePill({ name, color }: { name: string; color?: [number, number, number] }) {
+export function ProfilePill({ name, color }: { name: string; color?: [number, number, number] }) {
   const [r, g, b] = color || [100, 100, 100]
   return (
     <span
@@ -26,7 +22,7 @@ function ProfilePill({ name, color }: { name: string; color?: [number, number, n
   )
 }
 
-function RolePill({ name }: { name: string }) {
+export function RolePill({ name }: { name: string }) {
   return (
     <span className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
       style={{ background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.2)' }}
@@ -43,7 +39,7 @@ export const GROUP_COLORS: [number, number, number][] = [
   [80, 120, 200],  // blue
 ]
 
-function TaskGroupPill({ name }: { name: string }) {
+export function TaskGroupPill({ name }: { name: string }) {
   const idx = Math.abs(hashString(name)) % GROUP_COLORS.length
   const [r, g, b] = GROUP_COLORS[idx]
   return (
@@ -63,7 +59,7 @@ function SubagentPill({ type }: { type?: string }) {
   )
 }
 
-function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
+export function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
   if (!ctxWindow && !tokens) {
     return (
       <div className="flex items-center gap-1.5 mt-1">
@@ -98,67 +94,6 @@ function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: numb
   )
 }
 
-function QuickInput({ sessionId, onFocus, onBlur }: { sessionId: string; onFocus?: () => void; onBlur?: () => void }) {
-  const [value, setValue] = useState('')
-  const [sending, setSending] = useState(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!value.trim() || sending) return
-    setSending(true)
-    await sendPrompt(sessionId, value.trim())
-    setValue('')
-    setSending(false)
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
-  }
-
-  const handlePaste = async (e: React.ClipboardEvent) => {
-    const items = e.clipboardData.items
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault()
-        const blob = item.getAsFile()
-        if (!blob) continue
-        const result = await uploadImage(sessionId, blob)
-        if (result) {
-          setValue(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + `[Image: ${result.path}]` + ' ')
-        }
-        return
-      }
-    }
-  }
-
-  return (
-    <form onSubmit={handleSubmit} onClick={(e) => e.stopPropagation()} data-no-drag className="mt-1.5 shrink-0">
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onFocus={onFocus}
-        onBlur={onBlur}
-        onPaste={handlePaste}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            handleSubmit(e)
-          }
-        }}
-        onInput={(e) => {
-          const t = e.currentTarget
-          t.style.height = 'auto'
-          t.style.height = Math.min(t.scrollHeight, 80) + 'px'
-        }}
-        rows={1}
-        placeholder="What will you do?"
-        className="w-full gba-dialog text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 text-gba-dialog-border placeholder:text-gba-dialog-border/30 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border"
-        style={{ minHeight: 28 }}
-      />
-    </form>
-  )
-}
-
 type LayoutMode = 'standard' | 'compact' | 'compact-minimal'
 
 interface AgentCardProps {
@@ -175,6 +110,9 @@ interface AgentCardProps {
   projects?: ProjectInfo[]
   roles?: RoleInfo[]
   existingGroups?: string[]
+  /** When true, shows a brief accent-blue glow ring to indicate this card's
+   *  chat panel is active on the right. */
+  glowActive?: boolean
 }
 
 const HIDE_DETAILS = new Set(['finished', 'session started', 'processing prompt'])
@@ -188,7 +126,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -212,6 +150,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const [flashDismissed, setFlashDismissed] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const allCaps = useRuntimeCapabilities()
+  const caps = capsFor(allCaps, agent.interface)
 
   useEffect(() => {
     if (editing) {
@@ -245,17 +185,25 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
 
   const iconSize = compact ? 20 : 32
   const textSize = 'text-[10px]'
-  const pad = compact ? 'px-2 py-1.5' : 'p-4'
+  // In compact mode padding stays tight — there's not enough vertical space
+  // for the user's preferred padding. Standard mode honours --card-padding.
+  const cardStyle: React.CSSProperties = compact
+    ? { padding: '6px 8px' }
+    : { padding: 'var(--card-padding, 16px)' }
 
   return (
     <>
       <div
         ref={cardRef ? (el) => cardRef(el) : undefined}
         onContextMenu={handleContextMenu}
-        className={`text-left ${pad} cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
+        className={`text-left cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
           isBusy ? 'gba-card-selected' : 'gba-card'
         } ${agent.ephemeral ? 'opacity-80' : ''}`}
-        style={agent.ephemeral ? { borderStyle: 'dashed' } : undefined}
+        style={{
+          ...cardStyle,
+          ...(agent.ephemeral ? { borderStyle: 'dashed' } : {}),
+          ...(glowActive ? { boxShadow: '0 0 0 2px rgba(88,160,216,0.7), 0 0 12px rgba(88,160,216,0.3)' } : {}),
+        }}
         onMouseEnter={() => {
           if (isDone && !flashDismissed) setFlashDismissed(true)
         }}
@@ -367,11 +315,11 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         {/* Last prompt — shown in standard modes */}
         {showPrompt && agent.user_prompt && (
           <div
-            className="rounded-md px-3 py-1.5 mb-1 shrink-0 overflow-hidden"
-            style={{ background: 'rgba(0, 0, 0, 0.40)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)' }}
+            className="rounded-md px-3 py-0.5 mb-1 shrink-0 overflow-hidden"
+            style={{ background: 'rgba(0, 0, 0, 0.40)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)', fontSize: 'var(--output-font-size, 11px)' }}
           >
-            <div className="text-[10px] font-mono text-white/50 italic line-clamp-2 leading-snug">
-              <span className="text-[7px] font-pixel not-italic text-accent-blue bg-accent-blue/20 px-1 py-0.5 rounded mr-1.5 inline-block align-middle pixel-shadow">CMD</span>
+            <div className="font-mono text-white/50 truncate leading-snug">
+              <span className="text-amber-300/60 mr-1">&gt;</span>
               {agent.user_prompt}
             </div>
           </div>
@@ -391,16 +339,22 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         />
         {/* Quick command input */}
         {showInput && (
-          <QuickInput sessionId={agent.session_id} />
+          <PromptInput
+            sessionId={agent.session_id}
+            onSend={(text) => sendPrompt(agent.session_id, text)}
+            variant="card"
+            maxHeight={80}
+          />
         )}
       </div>
 
       {/* Right-click context menu */}
       {menuOpen && createPortal(
-        <ContextMenu
+        <AgentMenu
           x={menuPos.x}
           y={menuPos.y}
           agent={agent}
+          capabilities={caps}
           onClose={() => setMenuOpen(false)}
           onRename={() => { setMenuOpen(false); setEditValue(title); setEditing(true) }}
           onChangeSprite={() => { setMenuOpen(false); setShowSpritePicker(true) }}
@@ -424,14 +378,6 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
       )}
     </>
   )
-}
-
-function formatElapsed(lastUpdated?: string): string {
-  if (!lastUpdated) return ''
-  const secs = Math.max(0, (Date.now() - new Date(lastUpdated).getTime()) / 1000)
-  if (secs < 60) return `${Math.floor(secs)}s`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m`
-  return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
 }
 
 function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText, compact, outputH, textSize }: {
@@ -464,17 +410,29 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
         ref={scrollRef}
         data-no-drag
         className={`rounded-md ${compact ? 'px-2 py-1.5' : 'px-3 py-2'} h-full overflow-y-auto overflow-x-hidden cursor-pointer hover:brightness-110`}
-        style={{ background: 'rgba(0, 0, 0, 0.45)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)' }}
-        onClick={(e) => { e.stopPropagation(); focusAgent(agent.session_id) }}
+        style={{ background: 'rgba(0, 0, 0, 0.45)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)', fontSize: 'var(--output-font-size, 11px)' }}
+        onClick={(e) => {
+          e.stopPropagation()
+          // Route by interface — chat-backed agents don't have an iTerm tab to
+          // focus, so open the chat panel via the same CustomEvent the migrate
+          // flow uses. iTerm2 agents fall through to focusAgent as before.
+          if (agent.interface === 'chat') {
+            window.dispatchEvent(new CustomEvent('open-chat-panel', {
+              detail: { pokegentId: agent.pokegent_id || agent.session_id },
+            }))
+          } else {
+            focusAgent(agent.session_id)
+          }
+        }}
       >
       {isCompacting ? (
-        <div className="text-[10px] font-mono text-accent-yellow/80 animate-pulse">
+        <div className="font-mono text-accent-yellow/80 animate-pulse">
           Compacting conversation history...
         </div>
       ) : isBusy && feed && feed.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           {feed.map((item, i) => (
-            <div key={i} className={`text-[10px] font-mono leading-snug truncate ${
+            <div key={i} className={`font-mono leading-snug truncate ${
               i === feed.length - 1 ? (
                 item.type === 'tool' ? 'text-accent-yellow' : 'text-white/90'
               ) : (
@@ -489,18 +447,18 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
         </div>
       ) : outputText ? (
         <div
-          className={`text-[10px] font-mono leading-relaxed whitespace-pre-wrap ${
+          className={`font-mono leading-relaxed whitespace-pre-wrap ${
             isDone ? 'text-accent-green/80' : 'text-white/70'
           } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-black/20`}
         >
           <span dangerouslySetInnerHTML={{ __html: renderMiniMarkdown(outputText) }} />
         </div>
       ) : isError ? (
-        <div className="text-[10px] font-mono text-accent-orange">
+        <div className="font-mono text-accent-orange">
           ! {agent.detail || 'API error - reprompt to retry'}
         </div>
       ) : (
-        <div className="text-[10px] font-mono text-white/20">
+        <div className="font-mono text-white/20">
           {isBusy ? 'Working...' : 'No output yet'}
         </div>
       )}
@@ -516,226 +474,3 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
   )
 }
 
-function ContextMenu({ x, y, agent, onClose, onRename, onChangeSprite, onCollapse, projects, roles, existingGroups, onAssignStatus }: {
-  x: number
-  y: number
-  agent: AgentState
-  onClose: () => void
-  onRename: () => void
-  onChangeSprite: () => void
-  onCollapse?: () => void
-  onAssignStatus?: (msg: string) => void
-  projects?: ProjectInfo[]
-  roles?: RoleInfo[]
-  existingGroups?: string[]
-}) {
-  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | null>(null)
-  const [newGroupName, setNewGroupName] = useState('')
-  const newGroupRef = useRef<HTMLInputElement>(null)
-
-  const showStatus = (res: { status: string }, label: string) => {
-    if (!onAssignStatus) return
-    if (res.status === 'relaunching') onAssignStatus(`Relaunching as ${label}...`)
-    else if (res.status === 'queued') onAssignStatus(`Queued — ${label} on idle`)
-    else if (res.status === 'updated') onAssignStatus(`Set ${label}`)
-  }
-
-  useEffect(() => {
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { if (submenu) setSubmenu(null); else onClose() }
-    }
-    document.addEventListener('keydown', keyHandler)
-    return () => document.removeEventListener('keydown', keyHandler)
-  }, [onClose, submenu])
-
-  const menuWidth = 200
-  const subMenuWidth = 150
-  const flipSub = x + menuWidth + subMenuWidth > window.innerWidth
-  const menuStyle: React.CSSProperties = {
-    position: 'fixed',
-    left: flipSub ? Math.max(0, x - menuWidth) : Math.min(x, window.innerWidth - menuWidth),
-    top: Math.min(y, window.innerHeight - 300),
-    zIndex: 10000,
-  }
-  const subPos = flipSub ? 'right-full mr-1' : 'left-full ml-1'
-
-  const items = [
-    { label: 'Go to terminal', icon: '⌨', action: () => { focusAgent(agent.session_id); onClose() } },
-    { label: 'Check messages', icon: '💬', action: () => { checkAgentMessages(agent.session_id); onClose() } },
-    { label: 'Rename', icon: '✏️', action: onRename },
-    { label: 'Change pokemon', icon: '🔄', action: onChangeSprite },
-    { label: 'Spawn clone', icon: '🧬', action: () => { spawnClone(agent.session_id); onClose() } },
-    ...(onCollapse ? [{ label: 'Collapse', icon: '📌', action: () => { onCollapse(); onClose() } }] : []),
-  ]
-
-  return (
-    <>
-      <div
-        className="fixed inset-0"
-        style={{ zIndex: 9999 }}
-        onClick={onClose}
-        onContextMenu={(e) => { e.preventDefault(); onClose() }}
-      />
-      <div style={menuStyle}>
-        <div className="gba-panel py-1 min-w-[190px]">
-        {items.map((item) => (
-          <button
-            key={item.label}
-            onClick={(e) => { e.stopPropagation(); item.action() }}
-            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
-          >
-            <span className="w-4 text-center">{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
-
-        {/* Role/Project assignment */}
-        {(roles && roles.length > 0 || projects && projects.length > 0) && (
-          <>
-            <div className="border-t border-white/10 my-1" />
-            {roles && roles.length > 0 && (
-              <div className="relative">
-                <button
-                  onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'role' ? null : 'role') }}
-                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
-                >
-                  <span className="w-4 text-center">🎭</span>
-                  {agent.role ? `Role: ${agent.role}` : 'Assign role'}
-                  <span className="ml-auto text-white/30">▸</span>
-                </button>
-                {submenu === 'role' && (
-                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
-                    {agent.role && (
-                      <button
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, ''); showStatus(res, 'no role'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
-                      >
-                        None
-                      </button>
-                    )}
-                    {roles.map(r => (
-                      <button
-                        key={r.name}
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, r.name); showStatus(res, r.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow' : 'text-white/90'}`}
-                      >
-                        <span>{r.emoji}</span>
-                        <span>{r.title}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {projects && projects.length > 0 && (
-              <div className="relative">
-                <button
-                  onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'project' ? null : 'project') }}
-                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
-                >
-                  <span className="w-4 text-center">📁</span>
-                  {agent.project ? `Project: ${agent.project}` : 'Assign project'}
-                  <span className="ml-auto text-white/30">▸</span>
-                </button>
-                {submenu === 'project' && (
-                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
-                    {agent.project && (
-                      <button
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, ''); showStatus(res, 'no project'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
-                      >
-                        None
-                      </button>
-                    )}
-                    {projects.map(p => (
-                      <button
-                        key={p.name}
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, p.name); showStatus(res, p.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow' : 'text-white/90'}`}
-                      >
-                        <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${p.color[0]},${p.color[1]},${p.color[2]})` }} />
-                        <span>{p.title}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Group assignment */}
-        <div className="relative">
-          <button
-            onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'group' ? null : 'group') }}
-            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
-          >
-            <span className="w-4 text-center">📦</span>
-            {agent.task_group ? `Group: ${agent.task_group}` : 'Assign group'}
-            <span className="ml-auto text-white/30">▸</span>
-          </button>
-          {submenu === 'group' && (
-            <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
-              {agent.task_group && (
-                <button
-                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, ''); onAssignStatus?.('Removed from group'); onClose() }}
-                  className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
-                >
-                  None
-                </button>
-              )}
-              {(existingGroups || []).map(g => (
-                <button
-                  key={g}
-                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, g); onAssignStatus?.(`Group: ${g}`); onClose() }}
-                  className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow' : 'text-white/90'}`}
-                >
-                  {g}
-                </button>
-              ))}
-              <div className="border-t border-white/10 my-1" />
-              <form
-                className="px-2 py-1 flex gap-1"
-                onClick={(e) => e.stopPropagation()}
-                onSubmit={async (e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  const name = newGroupName.trim()
-                  if (!name) return
-                  await assignTaskGroup(agent.session_id, name)
-                  onAssignStatus?.(`Group: ${name}`)
-                  onClose()
-                }}
-              >
-                <input
-                  ref={newGroupRef}
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  placeholder="New group..."
-                  className="flex-1 bg-black/30 border border-white/20 rounded px-1.5 py-0.5 text-[7px] font-pixel text-white outline-none focus:border-white/40"
-                  style={{ minWidth: 0 }}
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  className="text-[7px] font-pixel text-white/60 hover:text-white px-1"
-                >+</button>
-              </form>
-            </div>
-          )}
-        </div>
-
-        <div className="border-t border-white/10 my-1" />
-        <button
-          onClick={(e) => { e.stopPropagation(); shutdownAgent(agent.session_id); onClose() }}
-          className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-accent-red hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
-        >
-          <span className="w-4 text-center">⏻</span>
-          Release
-        </button>
-        </div>
-      </div>
-    </>
-  )
-}

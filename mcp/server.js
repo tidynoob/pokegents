@@ -89,7 +89,7 @@ function resolveSelf(agents) {
   if (!hint) return null;
   const me = resolveAgent(agents, hint.slice(0, 8));
   if (me) {
-    selfCCDSessionId = me.pokegent_id || me.pokegent_id || me.ccd_session_id || me.session_id;
+    selfCCDSessionId = me.pokegent_id || me.ccd_session_id || me.session_id;
   }
   return me;
 }
@@ -418,7 +418,7 @@ server.tool(
     // Resolve own ID (cached after first call)
     const agents = await getCachedAgents();
     const me = resolveSelf(agents) || resolveAgent(agents, my_session_id || sessionIdEnv.slice(0, 8));
-    const sessionId = me ? (me.pokegent_id || me.pokegent_id || me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
+    const sessionId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
 
     // Consume messages (API or file fallback) — single round-trip
     let messages;

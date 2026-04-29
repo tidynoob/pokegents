@@ -33,6 +33,13 @@ export function useSSE() {
   const esRef = useRef<EventSource | null>(null)
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Track when we last heard ANYTHING from the server (event or ping). If
+  // 30s elapses with nothing — half-dead socket, OS sleep/wake, proxy timeout
+  // — force a reconnect. EventSource's own `onerror` only fires for hard
+  // network failures and misses these silent stalls.
+  const lastSeen = useRef<number>(Date.now())
+  const watchdog = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const connect = useCallback(() => {
     if (esRef.current) {
       esRef.current.close()
@@ -40,10 +47,17 @@ export function useSSE() {
 
     const es = new EventSource('/api/events')
     esRef.current = es
+    lastSeen.current = Date.now()
 
-    es.onopen = () => setConnected(true)
+    es.onopen = () => {
+      setConnected(true)
+      lastSeen.current = Date.now()
+    }
+
+    const touch = () => { lastSeen.current = Date.now() }
 
     es.addEventListener('state_update', (e) => {
+      touch()
       try {
         const data = JSON.parse(e.data) as AgentState[]
         setAgents(prev => agentsEqual(prev, data) ? prev : data)
@@ -51,16 +65,22 @@ export function useSSE() {
     })
 
     es.addEventListener('connections_update', (e) => {
+      touch()
       try {
         setConnections(JSON.parse(e.data) as AgentConnection[])
       } catch { /* ignore */ }
     })
 
     es.addEventListener('new_message', (e) => {
+      touch()
       try {
         setNewMessage(JSON.parse(e.data) as AgentMessage)
       } catch { /* ignore */ }
     })
+
+    // Server sends `event: ping` every 10s. We don't act on it — its only
+    // job is to refresh `lastSeen` so the watchdog knows the stream is alive.
+    es.addEventListener('ping', touch)
 
     es.onerror = () => {
       setConnected(false)
@@ -68,6 +88,22 @@ export function useSSE() {
       reconnectTimeout.current = setTimeout(connect, 3000)
     }
   }, [])
+
+  // Watchdog: if no event/ping in 30s, force-reconnect. The server pings
+  // every 10s, so 30s gives ~3 missed pings before we treat the stream as
+  // dead. Lowers the chance of a "stuck UI until shift+refresh" by a lot.
+  useEffect(() => {
+    watchdog.current = setInterval(() => {
+      if (Date.now() - lastSeen.current > 30000) {
+        setConnected(false)
+        esRef.current?.close()
+        connect()
+      }
+    }, 5000)
+    return () => {
+      if (watchdog.current) clearInterval(watchdog.current)
+    }
+  }, [connect])
 
   useEffect(() => {
     connect()

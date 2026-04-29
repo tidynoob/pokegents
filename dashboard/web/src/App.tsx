@@ -1,12 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
-import { fetchSessions, focusAgent, fetchConnections, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, launchProfile, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
+import { fetchSessions, focusAgent, fetchConnections, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
 import { AgentState, AgentConnection, AgentMessage, stableId } from './types'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
 import { GroupContainer } from './components/GroupContainer'
 import { SessionBrowser } from './components/SessionBrowser'
+import { TownView } from './components/TownView'
+import { ChatPanel } from './components/ChatPanel'
 import { hashString } from './components/CreatureIcon'
 import { useMessageAnimations, DeliveryOverlay } from './components/MessageAnimations'
 import { useSettings } from './hooks/useSettings'
@@ -182,6 +184,88 @@ export default function App() {
   const [connections, setConnections] = useState<AgentConnection[]>([])
   const [showBrowser, setShowBrowser] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  // chatAgentId is the pokegent_id of the chat-backed agent whose ChatPanel
+  // is open on the right. Persisted across reloads so the panel re-opens.
+  const [chatAgentId, setChatAgentId] = useState<string | null>(() => {
+    try { return localStorage.getItem('pokegents-chat-agent') || null } catch { return null }
+  })
+  useEffect(() => {
+    try {
+      if (chatAgentId) localStorage.setItem('pokegents-chat-agent', chatAgentId)
+      else localStorage.removeItem('pokegents-chat-agent')
+    } catch { /* ignore */ }
+  }, [chatAgentId])
+  // Auto-open ChatPanel when an agent is migrated to chat — fired by AgentCard.
+  // Also fires on re-click of the same chat card (the card's inner output area
+  // stopPropagates, so the GridCell's onClick never reaches App — everything
+  // routes through this custom event instead).
+  const chatAgentIdRef = useRef(chatAgentId)
+  chatAgentIdRef.current = chatAgentId
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { pokegentId?: string }
+      if (!detail?.pokegentId) return
+      if (chatAgentIdRef.current === detail.pokegentId) {
+        // Same agent re-clicked — ping the panel to flash.
+        window.dispatchEvent(new Event('chat-panel-ping'))
+      } else {
+        setChatAgentId(detail.pokegentId)
+      }
+    }
+    window.addEventListener('open-chat-panel', handler)
+    return () => window.removeEventListener('open-chat-panel', handler)
+  }, [])
+  // Auto-close the chat panel when the targeted agent is no longer chat-backed.
+  // Covers two cases: (1) user migrated away from chat → we should close the
+  // panel; (2) localStorage has a stale chatAgentId from a previous session
+  // pointing at an iterm2 agent → don't render an SSE-subscribed panel that
+  // 404s. We only clear AFTER the agents list has loaded so a transient
+  // empty agentMap on first paint doesn't nuke a valid chat panel.
+  useEffect(() => {
+    if (!chatAgentId || agents.length === 0) return
+    const target = agents.find(a =>
+      (a.pokegent_id && a.pokegent_id === chatAgentId) ||
+      a.session_id === chatAgentId,
+    )
+    if (target && target.interface !== 'chat') setChatAgentId(null)
+  }, [chatAgentId, agents])
+  // Resizable chat panel — drag the divider between grid and panel to reflow.
+  // Persisted to localStorage so the user's preferred width survives reloads.
+  const [chatPanelWidth, setChatPanelWidth] = useState<number>(() => {
+    try {
+      const v = parseInt(localStorage.getItem('pokegents-chat-panel-width') || '', 10)
+      if (Number.isFinite(v) && v >= 280 && v <= 1400) return v
+    } catch { /* ignore */ }
+    return 520
+  })
+  useEffect(() => {
+    try { localStorage.setItem('pokegents-chat-panel-width', String(chatPanelWidth)) } catch { /* ignore */ }
+  }, [chatPanelWidth])
+  const dragWidthRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const onChatDividerPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault()
+    dragWidthRef.current = { startX: e.clientX, startWidth: chatPanelWidth }
+    const onMove = (ev: PointerEvent) => {
+      const ref = dragWidthRef.current
+      if (!ref) return
+      // Drag right → divider moves right → panel shrinks (its left edge moves right).
+      // Convention: width = startWidth - dx (so dragging RIGHT makes panel narrower).
+      const dx = ev.clientX - ref.startX
+      const next = Math.max(280, Math.min(window.innerWidth - 200, ref.startWidth - dx))
+      setChatPanelWidth(next)
+    }
+    const onUp = () => {
+      dragWidthRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
   const settingsRef = useRef<HTMLDivElement>(null)
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [activity, setActivity] = useState<ActivityEntry[]>([])
@@ -189,9 +273,17 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useState(false)
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
-  const [groupViewModes, setGroupViewModes] = useState<Record<string, 'collapsed' | 'single' | 'expanded'>>(() => {
+  // 'expanded' was supported when groups could span multiple grid cells. In
+  // flow mode every cell is 1×1, so expanded is gone — any persisted value of
+  // 'expanded' is silently treated as 'single'.
+  const [groupViewModes, setGroupViewModes] = useState<Record<string, 'collapsed' | 'single'>>(() => {
     try {
-      return JSON.parse(localStorage.getItem('pokegents-group-view-modes') || '{}')
+      const raw = JSON.parse(localStorage.getItem('pokegents-group-view-modes') || '{}')
+      const out: Record<string, 'collapsed' | 'single'> = {}
+      for (const [k, v] of Object.entries(raw)) {
+        out[k] = v === 'collapsed' ? 'collapsed' : 'single'
+      }
+      return out
     } catch { return {} }
   })
   const [groupPageIndex, setGroupPageIndex] = useState<Record<string, number>>({})
@@ -321,8 +413,6 @@ export default function App() {
   const msgLogRef = useRef<HTMLDivElement>(null)
   const actLogRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map())
-  const groupSingleRects = useRef<Record<string, { w: number; h: number }>>({})
-  const groupExpandedRects = useRef<Record<string, { w: number; h: number }>>({})
   // useMessageAnimations moved below getSpriteForId (needs it as dependency)
   // Layout computed after gridIds (below)
   // showHeader computed after layout (below)
@@ -429,9 +519,10 @@ export default function App() {
     [grouped, groupViewModes]
   )
 
-  // Grid IDs: open group virtual IDs + ungrouped agent IDs
+  // Grid IDs: town (optional) + open group virtual IDs + ungrouped agent IDs.
   const gridIds = useMemo(() => {
     const ids: string[] = []
+    if (settings.showTownCard) ids.push('town')
     for (const groupName of Object.keys(grouped).sort()) {
       if ((groupViewModes[groupName] || 'collapsed') !== 'collapsed') {
         ids.push(`group:${groupName}`)
@@ -441,44 +532,19 @@ export default function App() {
       ids.push(stableId(a))
     }
     return ids
-  }, [grouped, visibleUngrouped, groupViewModes])
+  }, [grouped, visibleUngrouped, groupViewModes, settings.showTownCard])
 
+  // Flow-grid density knobs. Cards are uniform 1×1 cells; cardsPerRow drives
+  // CSS grid columns, cardsPerCol determines how many rows fit before scroll.
+  // Drag reorders the array; the rest just falls out of CSS.
   const gridEngine = useGridEngine(gridIds, {
-    rows: settings.gridRows,
-    cols: settings.gridCols,
-    defaultCardW: settings.defaultCardW ?? 2,
-    defaultCardH: settings.defaultCardH ?? 2,
+    cardsPerRow: settings.cardsPerRow ?? 3,
+    cardsPerCol: settings.cardsPerCol ?? 3,
+    gap: settings.cardGap ?? 8,
   })
   // Show header when cells are tall enough for standard mode
   const showHeader = gridEngine.cellH >= 140
   const isCompact = gridEngine.cellH < 120
-
-  // Auto-adjust expanded group height ONLY when width changes (not on every layout update).
-  // Without this guard, manually resizing a group shorter would snap back immediately.
-  const groupWidths = useRef<Record<string, number>>({})
-  useEffect(() => {
-    for (const [groupName, members] of Object.entries(grouped)) {
-      if ((groupViewModes[groupName] || 'collapsed') !== 'expanded') continue
-      const groupId = `group:${groupName}`
-      const rect = gridEngine.layouts[groupId]
-      const singleRect = groupSingleRects.current[groupName]
-      if (!rect || !singleRect) continue
-
-      const prevW = groupWidths.current[groupName]
-      groupWidths.current[groupName] = rect.w
-      // Only auto-adjust when width actually changed (affects column count → row count)
-      if (prevW === undefined || prevW === rect.w) continue
-
-      const cols = Math.max(1, Math.floor(rect.w / singleRect.w))
-      const rows = Math.ceil(members.length / cols)
-      const neededH = rows * singleRect.h
-
-      if (rect.h !== neededH) {
-        gridEngine.resizeItem(groupId, rect.w, neededH)
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gridEngine.layouts, grouped, groupViewModes])
 
 
   const getSpriteForId = useMemo(() => {
@@ -562,8 +628,8 @@ export default function App() {
   return (
     <>
     <div className="h-screen flex flex-col p-3 overflow-hidden relative z-10">
-      {/* Header — hidden in compact mode */}
-      {showHeader && (
+      {/* Header — always visible */}
+      {(
         <div className="flex items-center shrink-0 mb-2">
           <div className="flex items-center gap-3">
             <h1 className="text-[10px] font-pixel text-white pixel-shadow">POKéGENTS</h1>
@@ -600,24 +666,17 @@ export default function App() {
                       y: bubbleRect.top + bubbleRect.height / 2,
                     }
                     const groupId = `group:${groupName}`
-                    const existingLayout = gridEngine.layouts[groupId]
-                    const targetRect = existingLayout
-                      ? gridEngine.gridRectToPixels(existingLayout)
-                      : (() => {
-                          const { defaultCardW: w, defaultCardH: h, cols } = gridEngine.settings
-                          const occupied = { ...gridEngine.layouts }
-                          for (let row = 1; row <= 100; row++) {
-                            for (let col = 1; col <= cols - w + 1; col++) {
-                              const candidate = { col, row, w, h }
-                              const fits = !Object.values(occupied).some(r =>
-                                r.col < candidate.col + candidate.w && r.col + r.w > candidate.col &&
-                                r.row < candidate.row + candidate.h && r.row + r.h > candidate.row
-                              )
-                              if (fits) return gridEngine.gridRectToPixels(candidate)
-                            }
-                          }
-                          return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
-                        })()
+                    // Card lands at its current index in the flow order — or
+                    // at the end if not yet placed. Either way it's a single
+                    // 1×1 cell, so the geometry is just (col, row) from index.
+                    const cpr = gridEngine.settings.cardsPerRow
+                    const idx = gridEngine.indexOf(groupId)
+                    const landingIdx = idx >= 0 ? idx : gridEngine.order.length
+                    const targetRect = gridEngine.gridRectToPixels({
+                      col: (landingIdx % cpr) + 1,
+                      row: Math.floor(landingIdx / cpr) + 1,
+                      w: 1, h: 1,
+                    })
                     triggerDeploy(groupId, sprite, bubbleSource, targetRect, () => {},
                       () => setGroupViewModes(prev => ({ ...prev, [groupName]: 'single' })))
                   } else {
@@ -647,26 +706,16 @@ export default function App() {
                       x: bubbleRect.left + bubbleRect.width / 2,
                       y: bubbleRect.top + bubbleRect.height / 2,
                     }
-                    // Compute where the card will land using grid engine
-                    const existingLayout = gridEngine.layouts[aid]
-                    const targetRect = existingLayout
-                      ? gridEngine.gridRectToPixels(existingLayout)
-                      : (() => {
-                          // Estimate: place temporarily to get the position
-                          const { defaultCardW: w, defaultCardH: h, cols } = gridEngine.settings
-                          const occupied = { ...gridEngine.layouts }
-                          for (let row = 1; row <= 100; row++) {
-                            for (let col = 1; col <= cols - w + 1; col++) {
-                              const candidate = { col, row, w, h }
-                              const fits = !Object.values(occupied).some(r =>
-                                r.col < candidate.col + candidate.w && r.col + r.w > candidate.col &&
-                                r.row < candidate.row + candidate.h && r.row + r.h > candidate.row
-                              )
-                              if (fits) return gridEngine.gridRectToPixels(candidate)
-                            }
-                          }
-                          return gridEngine.gridRectToPixels({ col: 1, row: 1, w, h })
-                        })()
+                    // Card lands at its current index in the flow order — or
+                    // at the end if not yet placed. Either way it's a 1×1.
+                    const cpr = gridEngine.settings.cardsPerRow
+                    const idx = gridEngine.indexOf(aid)
+                    const landingIdx = idx >= 0 ? idx : gridEngine.order.length
+                    const targetRect = gridEngine.gridRectToPixels({
+                      col: (landingIdx % cpr) + 1,
+                      row: Math.floor(landingIdx / cpr) + 1,
+                      w: 1, h: 1,
+                    })
                     const doExpand = () => {
                       manualExpandRef.current.add(aid); persistManualExpand()
                       setCollapsedIds(prev => { const next = new Set(prev); next.delete(aid); return next })
@@ -713,8 +762,6 @@ export default function App() {
                   onClose={() => setShowSettings(false)}
                   onTestMessaging={triggerTestDelivery}
                   onGridDragging={setGridSliderDragging}
-                  onTidyUp={() => gridEngine.compactUp()}
-                  onResetPositions={() => gridEngine.resetSizes()}
                 />
               )}
             </div>
@@ -722,8 +769,10 @@ export default function App() {
         </div>
       )}
 
-      {/* Grid */}
-      {agents.length === 0 ? (
+      {/* Body: grid (left) + optional ChatPanel (right split-pane) */}
+      <div className="flex-1 min-h-0 flex gap-3">
+       <div className="flex-1 min-w-0 flex flex-col">
+      {agents.length === 0 && !settings.showTownCard ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="gba-dialog text-center px-8 py-6">
             <p className="text-[9px] font-pixel text-gba-dialog-border">No POKéMON in party</p>
@@ -743,62 +792,42 @@ export default function App() {
           }}
         >
           {(id, rect, cardMode) => {
+            // Town card — special grid item that renders the live town map.
+            // Wrapped in gba-card so it has the same blue chrome as agent cards
+            // instead of floating naked on the page background.
+            if (id === 'town') {
+              return (
+                <div
+                  className="gba-card h-full w-full flex items-center justify-center overflow-hidden"
+                  style={{ padding: 'var(--card-padding, 16px)' }}
+                  data-no-drag-children="false"
+                >
+                  <TownView
+                    agents={agents}
+                    onSelect={(a) => focusAgent(stableId(a))}
+                    selectedId={null}
+                    debug={settings.townDebug}
+                  />
+                </div>
+              )
+            }
             // Group container
             if (id.startsWith('group:')) {
               const groupName = id.slice(6)
               const members = grouped[groupName]
               if (!members) return null
-              const pixelW = rect.w * gridEngine.cellW + (rect.w - 1) * 8
-              const pixelH = rect.h * gridEngine.cellH + (rect.h - 1) * 8
-              const sr = groupSingleRects.current[groupName]
-              const singleCardPixelW = sr ? sr.w * gridEngine.cellW + (sr.w - 1) * 8 : undefined
-              const singleCardPixelH = sr ? sr.h * gridEngine.cellH + (sr.h - 1) * 8 : undefined
+              // All cells are 1×1 in flow mode, so the group's pixel size is
+              // just one cell. Expanded view-mode is gone — groups always
+              // render in single mode (active card + compact member list).
+              const pixelW = gridEngine.cellW
+              const pixelH = gridEngine.cellH
               return (
                 <GroupContainer
                   name={groupName}
                   members={members}
-                  viewMode={(groupViewModes[groupName] === 'expanded' ? 'expanded' : 'single')}
+                  viewMode="single"
                   pageIndex={groupPageIndex[groupName] || 0}
-                  onSetViewMode={(mode) => {
-                    setGroupViewModes(prev => ({ ...prev, [groupName]: mode }))
-                    if (mode === 'expanded') {
-                      // Save single-view rect as card unit
-                      groupSingleRects.current[groupName] = { w: rect.w, h: rect.h }
-                      // Restore previous expanded config if available
-                      const saved = groupExpandedRects.current[groupName]
-                      const sr = groupSingleRects.current[groupName] || { w: rect.w, h: rect.h }
-                      if (saved) {
-                        // Clamp width to available space at current position
-                        const maxW = gridEngine.settings.cols - rect.col + 1
-                        const clampedW = Math.min(saved.w, maxW)
-                        if (clampedW !== saved.w) {
-                          // Recalculate height: more rows needed since fewer columns
-                          const savedCols = Math.max(1, Math.floor(saved.w / sr.w))
-                          const newCols = Math.max(1, Math.floor(clampedW / sr.w))
-                          const savedRows = Math.ceil(members.length / savedCols)
-                          const newRows = Math.ceil(members.length / newCols)
-                          const newH = Math.round(saved.h * newRows / savedRows)
-                          gridEngine.resizeItem(id, clampedW, newH)
-                        } else {
-                          gridEngine.resizeItem(id, saved.w, saved.h)
-                        }
-                      } else {
-                        // Default: single column, height = memberCount * singleH, capped to visible grid
-                        const expandedH = Math.min(members.length * rect.h, gridEngine.settings.rows)
-                        gridEngine.resizeItem(id, rect.w, expandedH)
-                      }
-                    } else if (mode === 'single') {
-                      // Save expanded rect for next time
-                      groupExpandedRects.current[groupName] = { w: rect.w, h: rect.h }
-                      // Restore single-view rect
-                      const sr = groupSingleRects.current[groupName]
-                      if (sr) {
-                        gridEngine.resizeItem(id, sr.w, sr.h)
-                      } else {
-                        gridEngine.resizeItem(id, rect.w, gridEngine.settings.defaultCardH)
-                      }
-                    }
-                  }}
+                  onSetViewMode={() => { /* expand-in-grid is gone */ }}
                   onSetPageIndex={(idx) => setGroupPageIndex(prev => ({ ...prev, [groupName]: idx }))}
                   onMinimize={() => {
                     const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
@@ -813,12 +842,10 @@ export default function App() {
                       setGroupViewModes(prev => ({ ...prev, [groupName]: 'collapsed' }))
                     }, { spriteCx, spriteCy })
                   }}
-                  cols={rect.w}
+                  cols={1}
                   cardMode={cardMode}
                   pixelW={pixelW}
                   pixelH={pixelH}
-                  singleCardPixelW={singleCardPixelW}
-                  singleCardPixelH={singleCardPixelH}
                   readingAgents={readingAgents}
                   projects={projects}
                   roles={roles}
@@ -831,10 +858,24 @@ export default function App() {
             const agent = agentMap[id]
             if (!agent) return null
             const aid = stableId(agent)
+            const isChat = agent.interface === 'chat'
+            const isActiveChatTarget = isChat && chatAgentId === aid
             return (
               <AgentCard
                 agent={agent}
-                onClick={() => focusAgent(aid)}
+                onClick={() => {
+                  if (isChat) {
+                    if (chatAgentId === aid) {
+                      // Same agent re-clicked — ping the panel to flash.
+                      window.dispatchEvent(new Event('chat-panel-ping'))
+                    } else {
+                      setChatAgentId(aid)
+                    }
+                  } else {
+                    focusAgent(aid)
+                  }
+                }}
+                glowActive={isActiveChatTarget}
                 mode={cardMode}
                 connectedAgents={connectedAgentsMap[aid] || connectedAgentsMap[agent.session_id]}
                 spriteOverride={agent.sprite}
@@ -880,12 +921,44 @@ export default function App() {
           }}
         </GridContainer>
       )}
+       </div>{/* end grid column */}
 
-      </div>{/* ← end ROOT flex container */}
+       {/* Right split-pane: always present so grid doesn't resize when toggling chat.
+           Shows ChatPanel when an agent is selected, empty placeholder otherwise. */}
+       {/* Resize handle */}
+       <div
+         role="separator"
+         aria-orientation="vertical"
+         title="Drag to resize chat panel"
+         onPointerDown={onChatDividerPointerDown}
+         className="group/divider shrink-0 -mx-1.5 px-1 cursor-col-resize relative z-20 select-none"
+         style={{ width: 6 }}
+       >
+         <div className="h-full w-px mx-auto bg-white/10 group-hover/divider:bg-accent-blue transition-colors" />
+       </div>
+       <div className="shrink-0 min-h-0" style={{ width: chatPanelWidth }}>
+         {(() => {
+           const chatAgent = chatAgentId ? agentMap[chatAgentId] : null
+           if (chatAgent) {
+             return <ChatPanel agent={chatAgent} onClose={() => setChatAgentId(null)} />
+           }
+           return (
+             <div className="h-full w-full flex items-center justify-center gba-card" style={{ borderRadius: 8, background: 'linear-gradient(180deg, #3a78b0 0%, #2e6498 30%, #1f4878 100%)' }}>
+               <div className="text-center text-white/30">
+                 <div className="text-[8px] font-pixel pixel-shadow">No agent selected</div>
+                 <div className="text-[7px] font-pixel mt-1">Click a chat agent to open</div>
+               </div>
+             </div>
+           )
+         })()}
+       </div>
+      </div>{/* end body flex-row */}
 
-      {/* Bottom bar — Messages + Activity tabs (fixed, outside flex) */}
+      {/* Bottom bar — Messages + Activity tabs. Lives inside the root flex
+          column as a shrink-0 child so the body's flex-1 sizing accounts
+          for it (grid cell-height calc + chat panel both respect it). */}
       {(messages.length > 0 || activity.length > 0) && (
-        <div className="fixed bottom-0 left-0 right-0 z-30 border-t-2 border-gba-teal-dark pt-2 pb-2 px-3" style={{ background: 'linear-gradient(180deg, rgba(42,104,88,0.95) 0%, rgba(42,104,88,1) 30%)' }}>
+        <div className="shrink-0 -mx-3 -mb-3 mt-2 border-t-2 border-gba-teal-dark pt-2 pb-2 px-3 z-30" style={{ background: 'linear-gradient(180deg, rgba(42,104,88,0.95) 0%, rgba(42,104,88,1) 30%)' }}>
           <div className="flex items-center gap-3 mb-1 px-0.5">
             <button
               onClick={() => setBottomOpen(o => !o)}
@@ -965,15 +1038,16 @@ export default function App() {
         </div>
       )}
 
+      </div>{/* ← end ROOT flex container (now AFTER bottom bar so flex-1 body respects it) */}
+
       <DeliveryOverlay deliveries={deliveries} />
       <PokeballAnimationLayer animations={animations} onComplete={onAnimComplete} />
       {showBrowser && <SessionBrowser
         onClose={() => setShowBrowser(false)}
-        activeSessionIds={new Set(agents.map(a => a.session_id))}
+        activePokegentIds={new Set(agents.map(a => stableId(a)))}
         onResume={(id) => setCollapsedIds(prev => { const next = new Set(prev); next.delete(id); return next })}
       />}
       {showLauncher && <LaunchModal projects={projects} roles={roles} agents={agents} onClose={() => setShowLauncher(false)} />}
     </>
   )
 }
-

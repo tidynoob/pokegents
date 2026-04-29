@@ -34,6 +34,9 @@ export interface AgentState {
   is_alive: boolean
   duration_sec: number
   created_at: string
+  /** Runtime backend bound to this agent. "" / "iterm2" → terminal tab.
+   *  "chat" → embedded ACP chat panel. Drives card click routing. */
+  interface?: 'iterm2' | 'chat'
 }
 
 export interface Profile {
@@ -44,29 +47,33 @@ export interface Profile {
   cwd: string
 }
 
-export interface SearchResult {
+export interface TranscriptSummary {
   session_id: string
-  project_dir: string
+  started_at?: string
+  last_modified: number
   custom_title: string
-  profile_name: string
+  first_user_msg: string
+  project_dir?: string
+  git_branch?: string
+  cwd?: string
+  snippet?: string
+}
+
+export interface PokegentSummary {
+  pokegent_id: string
+  display_name: string
+  sprite: string
   role?: string
   project?: string
   task_group?: string
+  profile_name?: string
   role_emoji?: string
   project_color?: [number, number, number]
-  snippet: string
-  message_type: string
-  timestamp: string
-  cwd: string
-  git_branch: string
-  sprite?: string
-  sprite_override?: string
-  pokegent_id?: string
-}
-
-export interface SearchResponse {
-  results: SearchResult[]
-  total: number
+  created_at?: string
+  last_active_at: number
+  conversation_count: number
+  latest_session: TranscriptSummary
+  transcripts?: TranscriptSummary[]
 }
 
 export type AgentStatus = 'running' | 'idle' | 'error' | 'permission' | 'waiting' | 'started' | 'ended'

@@ -15,3 +15,9 @@ mcp/node_modules/
 # Never commit user data (lives in ~/.ccsession/)
 
 dashboard/dashboard
+
+# Claude Code agent worktree scratch
+.claude/
+
+# Local Go binary build alongside the running one
+dashboard/pokegents-dashboard.new

@@ -9,8 +9,6 @@ interface SettingsPanelProps {
   onClose: () => void
   onTestMessaging?: () => void
   onGridDragging?: (dragging: boolean) => void
-  onTidyUp?: () => void
-  onResetPositions?: () => void
 }
 
 function Slider({ label, value, min, max, step, unit, onChange, onDragStart, onDragEnd }: {
@@ -89,7 +87,7 @@ function OptionGroup<T extends string>({ label, value, options, onChange }: {
   )
 }
 
-export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging, onGridDragging, onTidyUp, onResetPositions }: SettingsPanelProps) {
+export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, onTestMessaging, onGridDragging }: SettingsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -130,72 +128,55 @@ export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, 
           onChange={v => onChange({ theme: v })}
         />
 
-        {/* Font Size */}
-        <OptionGroup
-          label="FONT SIZE"
-          value={settings.fontSize}
-          options={[
-            { value: 'small', label: 'SM' },
-            { value: 'medium', label: 'MD' },
-            { value: 'large', label: 'LG' },
-          ]}
-          onChange={v => onChange({ fontSize: v })}
+        {/* Output Font Size */}
+        <Slider
+          label="OUTPUT FONT"
+          value={settings.outputFontSize}
+          min={8} max={18} step={1}
+          unit="px"
+          onChange={v => onChange({ outputFontSize: v })}
         />
 
-        {/* Grid Size */}
+        {/* (Grid columns/rows are now derived from CARDS PER ROW / COL below.) */}
+
+        {/* Card Gap */}
         <Slider
-          label="COLUMNS"
-          value={settings.gridCols}
-          min={2} max={8} step={1}
-          onChange={v => onChange({ gridCols: v })}
+          label="CARD GAP"
+          value={settings.cardGap}
+          min={0} max={24} step={1}
+          unit="px"
+          onChange={v => onChange({ cardGap: v })}
+        />
+
+        {/* Card Inner Padding */}
+        <Slider
+          label="CARD PADDING"
+          value={settings.cardPadding}
+          min={0} max={24} step={1}
+          unit="px"
+          onChange={v => onChange({ cardPadding: v })}
+        />
+
+        {/* Layout density. CARDS PER ROW is the CSS grid column count;
+            CARDS PER COL is how many rows fit on screen at a time before the
+            grid scrolls. Cards always wrap left-to-right, top-to-bottom — the
+            (N+1)th card spills onto the next row, the (N*M+1)th below the fold. */}
+        <Slider
+          label="CARDS PER ROW"
+          value={settings.cardsPerRow}
+          min={1} max={8} step={1}
+          onChange={v => onChange({ cardsPerRow: v })}
           onDragStart={() => onGridDragging?.(true)}
           onDragEnd={() => onGridDragging?.(false)}
         />
         <Slider
-          label="ROWS"
-          value={settings.gridRows}
+          label="CARDS PER COL"
+          value={settings.cardsPerCol}
           min={1} max={6} step={1}
-          onChange={v => onChange({ gridRows: v })}
+          onChange={v => onChange({ cardsPerCol: v })}
           onDragStart={() => onGridDragging?.(true)}
           onDragEnd={() => onGridDragging?.(false)}
         />
-
-        {/* Default Card Size */}
-        <div>
-          <label className="text-[7px] font-pixel text-white/70 pixel-shadow block mb-1.5">DEFAULT CARD SIZE</label>
-          <div className="flex items-center gap-2">
-            <span className="text-[6px] font-pixel text-white/40 w-8">W</span>
-            <div className="flex gap-1">
-              {[1, 2, 3].map(n => (
-                <button
-                  key={n}
-                  onClick={() => onChange({ defaultCardW: n })}
-                  className={`text-[7px] font-pixel w-6 h-5 rounded transition-colors ${
-                    settings.defaultCardW === n
-                      ? 'bg-accent-blue text-white'
-                      : 'bg-white/10 text-white/50 hover:bg-white/20'
-                  }`}
-                  style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
-                >{n}</button>
-              ))}
-            </div>
-            <span className="text-[6px] font-pixel text-white/40 w-8 ml-2">H</span>
-            <div className="flex gap-1">
-              {[1, 2, 3].map(n => (
-                <button
-                  key={n}
-                  onClick={() => onChange({ defaultCardH: n })}
-                  className={`text-[7px] font-pixel w-6 h-5 rounded transition-colors ${
-                    settings.defaultCardH === n
-                      ? 'bg-accent-blue text-white'
-                      : 'bg-white/10 text-white/50 hover:bg-white/20'
-                  }`}
-                  style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
-                >{n}</button>
-              ))}
-            </div>
-          </div>
-        </div>
 
         {/* Auto-collapse */}
         <Slider
@@ -216,27 +197,19 @@ export function SettingsPanel({ settings, defaults, onChange, onReset, onClose, 
           onChange={v => onChange({ scanlines: v })}
         />
 
-        {/* Grid Actions */}
-        <div className="flex gap-2">
-          {onTidyUp && (
-            <button
-              onClick={onTidyUp}
-              className="flex-1 gba-button text-[7px] font-pixel px-3 py-2 transition-colors"
-              title="Move cards up to fill gaps"
-            >
-              TIDY UP CARDS
-            </button>
-          )}
-          {onResetPositions && (
-            <button
-              onClick={onResetPositions}
-              className="flex-1 gba-button text-[7px] font-pixel px-3 py-2 transition-colors"
-              title="Reset all cards to default size and repack"
-            >
-              RESET POSITIONS
-            </button>
-          )}
-        </div>
+        {/* Town card */}
+        <Toggle
+          label="SHOW TOWN CARD"
+          checked={settings.showTownCard}
+          onChange={v => onChange({ showTownCard: v })}
+        />
+
+        {/* Town debug overlay */}
+        <Toggle
+          label="TOWN DEBUG GRID"
+          checked={settings.townDebug}
+          onChange={v => onChange({ townDebug: v })}
+        />
 
         {/* Test Messaging */}
         {onTestMessaging && (

@@ -30,6 +30,29 @@ if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
+# Runtime gate: if this agent is currently chat-backed (interface=chat in the
+# running file), the chat supervisor in the dashboard owns the status file
+# pipeline. Running this iterm2-flavored hook for chat agents corrupts state
+# — particularly UserPromptSubmit, which gets fired by claude-agent-sdk's
+# `--replay-user-messages` on resume and writes a stale "busy" + "processing
+# prompt" that nothing later clears (no live Stop event for replayed
+# messages). The chat backend's translateUpdate handles status writes for
+# chat agents; this script is for iterm2 agents only.
+_RT_LOOKUP="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
+if [ -d "$POKEGENTS_DATA/running" ] && [ -n "$_RT_LOOKUP" ]; then
+  for _rt_rf in "$POKEGENTS_DATA/running"/*.json; do
+    [ -f "$_rt_rf" ] || continue
+    _RT_PGID=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$_rt_rf" 2>/dev/null)
+    if [ "$_RT_PGID" = "$_RT_LOOKUP" ]; then
+      _RT_IFACE=$(jq -r '.interface // empty' "$_rt_rf" 2>/dev/null)
+      if [ "$_RT_IFACE" = "chat" ]; then
+        exit 0
+      fi
+      break
+    fi
+  done
+fi
+
 STATE=""
 DETAIL=""
 SUMMARY=""
@@ -90,8 +113,10 @@ case "$EVENT" in
       DETAIL="processing prompt"
       CLEAR_OUTPUT=true
     fi
-    # Reset message budget for this agent's turn (use POKEGENTS_SESSION_ID for clone safety)
-    BUDGET_LOOKUP="${POKEGENTS_SESSION_ID:-$SESSION_ID}"
+    # Reset message budget for this agent's turn. Mailboxes are keyed by
+    # pokegent_id (stable across resume/migration). Fall back to legacy IDs
+    # only for old running files that pre-date the pokegent_id refactor.
+    BUDGET_LOOKUP="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
     BUDGET_FILE="$POKEGENTS_DATA/messages/${BUDGET_LOOKUP}/_msg_budget"
     mkdir -p "$POKEGENTS_DATA/messages/${BUDGET_LOOKUP}" 2>/dev/null
     echo "0" > "$BUDGET_FILE" 2>/dev/null
@@ -275,20 +300,35 @@ case "$EVENT" in
     # Also try session_id-keyed status file (legacy or status written with SESSION_ID)
     rm -f "$STATUS_DIR/${SESSION_ID}.json"
     RUNNING_DIR="$POKEGENTS_DATA/running"
-    # Clean running files: match by pokegent_id field (new) or filename pattern (legacy)
+    # Clean running files — but ONLY if WE still own them. If a dashboard
+    # interface migration flipped the file to interface=chat, the chat
+    # backend owns it now and we must not delete (otherwise the agent
+    # vanishes from the dashboard mid-migration). Same idea as
+    # pokegent.sh's ownership check at the shell-exit level.
     if [ -n "$_PGID_END" ]; then
       for rf in "$RUNNING_DIR"/*.json; do
         [ -f "$rf" ] || continue
         _RF_PG=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
         if [ "$_RF_PG" = "$_PGID_END" ]; then
+          _RF_IFACE=$(jq -r '.interface // empty' "$rf" 2>/dev/null)
+          if [ "$_RF_IFACE" = "chat" ]; then
+            # Migrated to chat — chat backend owns this file now. Leave it.
+            break
+          fi
           rm -f "$rf"
           break
         fi
       done
     fi
-    # Legacy fallback: remove by session_id filename pattern
+    # Legacy fallback: remove by session_id filename pattern (also skip if
+    # the file is chat-owned).
     for rf in "$RUNNING_DIR"/*-"${SESSION_ID}".json; do
-      [ -f "$rf" ] && rm -f "$rf"
+      [ -f "$rf" ] || continue
+      _RF_IFACE=$(jq -r '.interface // empty' "$rf" 2>/dev/null)
+      if [ "$_RF_IFACE" = "chat" ]; then
+        continue
+      fi
+      rm -f "$rf"
     done
     exit 0
     ;;
@@ -436,10 +476,11 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
     echo "$TOTAL_LINES" > "$LASTREAD_FILE" 2>/dev/null
   fi
 
-  # Part 2: Pending messages — deliver via dashboard API (fast path) or file fallback
-  # Use POKEGENTS_SESSION_ID (unique per agent, even for clones) not SESSION_ID (shared by clones)
+  # Part 2: Pending messages — deliver via dashboard API (fast path) or file fallback.
+  # Mailboxes are keyed by pokegent_id (stable across resume/interface migration).
+  # Fall back to legacy IDs only for old running files that pre-date the refactor.
   DASHBOARD_URL="${POKEGENTS_DASHBOARD_URL:-http://localhost:7834}"
-  MSG_LOOKUP_ID="${POKEGENTS_SESSION_ID:-$SESSION_ID}"
+  MSG_LOOKUP_ID="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
   MSG_CONTENT=""
 
   # Fast path: try dashboard API (marks delivered + returns content)
@@ -475,9 +516,15 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
     NOTIFY="${NOTIFY}${NOTIFY:+\n\n}$MSG_CONTENT"
   fi
 
-  # Output combined systemMessage
+  # Output combined systemMessage (truncate to ~6KB to avoid Claude Code persisting
+  # to file — messages over the inline limit become unreadable to the agent)
   if [ -n "$NOTIFY" ]; then
     FORMATTED=$(printf '%b' "$NOTIFY")
+    if [ ${#FORMATTED} -gt 6000 ]; then
+      FORMATTED="${FORMATTED:0:5900}
+
+... [message truncated — full content available via check_messages MCP tool]"
+    fi
     jq -n --arg msg "$FORMATTED" '{systemMessage: $msg}'
     exit 0
   fi

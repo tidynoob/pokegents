@@ -397,6 +397,16 @@ func (sm *StateManager) getPokegentID(sessionID string) string {
 }
 
 // GetIdentity returns the persistent identity for a pokegent_id.
+func (sm *StateManager) GetIdentities() map[string]*AgentIdentity {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	cp := make(map[string]*AgentIdentity, len(sm.identities))
+	for k, v := range sm.identities {
+		cp[k] = v
+	}
+	return cp
+}
+
 func (sm *StateManager) GetIdentity(pokegentID string) *AgentIdentity {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -504,6 +514,26 @@ func (sm *StateManager) TransitionDoneToIdle() bool {
 		}
 	}
 	return changed
+}
+
+// TransitionState forces a state/detail change for a session (used by poller for interrupt detection).
+func (sm *StateManager) TransitionState(sessionID, state, detail string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if a, ok := sm.agents[sessionID]; ok {
+		a.State = state
+		a.Detail = detail
+		a.LastUpdated = now
+	}
+	if sf, ok := sm.statuses[sessionID]; ok {
+		sf.State = state
+		sf.Detail = detail
+		sf.Timestamp = now
+		sm.statuses[sessionID] = sf
+		sm.store.Status.Upsert(sf)
+	}
 }
 
 // CleanStale removes running files for dead sessions and rebuilds state. Returns true if anything changed.
@@ -1256,6 +1286,15 @@ func (sm *StateManager) rebuildAgents() {
 	now := time.Now()
 	agents := make(map[string]*AgentState)
 
+	// Reload identities from disk — new agents may have created identity files since startup
+	if sm.store.Agents != nil {
+		if loaded, err := sm.store.Agents.List(); err == nil {
+			for i := range loaded {
+				sm.identities[loaded[i].PokegentID] = &loaded[i]
+			}
+		}
+	}
+
 	// Build session ID map from running files (CCD UUID / pokegent_id → Claude session ID)
 	mapChanged := false
 	for sid, rs := range sm.running {
@@ -1391,6 +1430,14 @@ func (sm *StateManager) rebuildAgents() {
 			if ident.CreatedAt != "" {
 				a.CreatedAt = ident.CreatedAt
 			}
+			if ident.Interface != "" {
+				a.Interface = ident.Interface
+			}
+		}
+		// Running-file Interface field wins over identity (it's the live truth
+		// for interface-migration scenarios).
+		if rs.Interface != "" {
+			a.Interface = rs.Interface
 		}
 
 		// Check PID liveness
@@ -2086,4 +2133,53 @@ func extractLastAssistantMessage(path string) string {
 		return string(r[:200])
 	}
 	return lastText
+}
+
+// isTranscriptInterrupted checks if the last entry in a transcript JSONL is
+// "[Request interrupted by user]" — written by Claude Code on Ctrl+C.
+// No hook fires for interrupts, so the poller must detect this from the transcript.
+func isTranscriptInterrupted(path string) bool {
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	// Read last 4KB — the interrupt entry is tiny
+	info, _ := f.Stat()
+	if info == nil {
+		return false
+	}
+	offset := info.Size() - 4096
+	if offset < 0 {
+		offset = 0
+	}
+	f.Seek(offset, 0)
+	data, _ := io.ReadAll(f)
+
+	// Find the last non-empty line
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 {
+		return false
+	}
+	lastLine := lines[len(lines)-1]
+
+	var entry struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(lastLine), &entry) != nil {
+		return false
+	}
+	if entry.Type == "user" && len(entry.Message.Content) > 0 {
+		return strings.Contains(entry.Message.Content[0].Text, "interrupted by user")
+	}
+	return false
 }

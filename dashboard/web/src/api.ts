@@ -1,4 +1,4 @@
-import { AgentState, SearchResponse, SearchResult, AgentMessage, AgentConnection } from './types'
+import { AgentState, PokegentSummary, AgentMessage, AgentConnection } from './types'
 
 const BASE = '/api'
 
@@ -8,22 +8,31 @@ export async function fetchSessions(): Promise<AgentState[]> {
   return res.json()
 }
 
-export async function search(query: string, limit = 20, offset = 0): Promise<SearchResponse> {
-  const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) })
-  const res = await fetch(`${BASE}/search?${params}`)
-  if (!res.ok) return { results: [], total: 0 }
-  return res.json()
-}
-
-export async function fetchRecentSessions(limit = 20): Promise<SearchResult[]> {
-  const res = await fetch(`${BASE}/search/recent?limit=${limit}`)
+// ── PC box (pokegent-centric) ───────────────────────────────
+export async function fetchPokegents(limit = 100): Promise<PokegentSummary[]> {
+  const res = await fetch(`${BASE}/pokegents/pc-box?limit=${limit}`)
   if (!res.ok) return []
+  const data = await res.json()
+  return data.pokegents || []
+}
+
+export async function searchPokegents(query: string, limit = 50): Promise<{ pokegents: PokegentSummary[]; total: number }> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const res = await fetch(`${BASE}/pokegents/search?${params}`)
+  if (!res.ok) return { pokegents: [], total: 0 }
   return res.json()
 }
 
-export async function resumeSession(sessionId: string, compact?: 'yes' | 'no'): Promise<void> {
+export async function fetchPokegent(pokegentId: string): Promise<PokegentSummary | null> {
+  const res = await fetch(`${BASE}/pokegents/${pokegentId}`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+export async function revivePokegent(pokegentId: string, compact?: 'yes' | 'no'): Promise<boolean> {
   const params = compact ? `?compact=${compact}` : ''
-  await fetch(`${BASE}/sessions/${sessionId}/resume${params}`, { method: 'POST' })
+  const res = await fetch(`${BASE}/pokegents/${pokegentId}/revive${params}`, { method: 'POST' })
+  return res.ok
 }
 
 export async function fetchSessionPreview(sessionId: string): Promise<{ user_prompt: string; last_summary: string }> {
@@ -90,6 +99,24 @@ export async function sendPrompt(sessionId: string, prompt: string): Promise<voi
   })
 }
 
+export async function cancelTurn(sessionId: string): Promise<void> {
+  await fetch(`${BASE}/sessions/${sessionId}/cancel`, { method: 'POST' })
+}
+
+export interface RuntimeCapabilities {
+  can_focus: boolean
+  can_clone: boolean
+  can_cancel: boolean
+  has_streaming_ui: boolean
+  has_permission_ui: boolean
+}
+
+export async function fetchRuntimes(): Promise<Record<string, RuntimeCapabilities>> {
+  const res = await fetch(`${BASE}/runtimes`)
+  if (!res.ok) return {}
+  return res.json()
+}
+
 export async function checkAgentMessages(sessionId: string): Promise<void> {
   // This triggers the agent to check messages by sending a prompt
   await fetch(`${BASE}/sessions/${sessionId}/check-messages`, { method: 'POST' })
@@ -111,6 +138,55 @@ export async function releaseTaskGroup(groupName: string): Promise<{ ok: boolean
   const res = await fetch(`${BASE}/task-groups/${encodeURIComponent(groupName)}/release`, { method: 'POST' })
   return res.json()
 }
+
+/** Unified launch — Phase 2 of pokegents-unified-launch.md.
+ *  Single endpoint that mints a pokegent_id server-side, pre-writes the running
+ *  file, and dispatches by `interface` (iterm2 today; chat re-introduced in Phase 3).
+ */
+export interface LaunchPokegentRequest {
+  profile?: string
+  role?: string
+  project?: string
+  name?: string
+  sprite?: string
+  model?: string
+  effort?: string
+  task_group?: string
+  parent_pokegent_id?: string
+  interface?: 'iterm2' | 'chat'
+}
+
+export interface LaunchPokegentResponse {
+  pokegent_id: string
+  profile: string
+  interface: string
+}
+
+export async function launchPokegent(req: LaunchPokegentRequest): Promise<LaunchPokegentResponse> {
+  const res = await fetch(`${BASE}/pokegents/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** Phase 4: migrate an agent between runtime backends. Same pokegent_id and
+ *  Claude session_id (so the JSONL transcript continues), different process. */
+export async function migrateInterface(
+  sessionId: string,
+  to: 'iterm2' | 'chat',
+): Promise<{ pokegent_id: string; interface: string; session_id: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/migrate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 
 export async function sendMessage(from: string, to: string, content: string): Promise<AgentMessage | null> {
   const res = await fetch(`${BASE}/messages`, {
@@ -161,7 +237,7 @@ export interface TranscriptEntry {
   type: 'user' | 'assistant' | 'tool_result' | 'system'
   timestamp: string
   content?: string
-  blocks?: { type: string; text?: string; name?: string; input?: string }[]
+  blocks?: { type: string; text?: string; id?: string; name?: string; input?: string }[]
   tool_use_id?: string
   truncated?: boolean
   full_size?: number

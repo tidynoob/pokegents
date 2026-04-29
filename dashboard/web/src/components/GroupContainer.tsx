@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { AgentState, stableId } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
-import { focusAgent, releaseTaskGroup, ProjectInfo, RoleInfo } from '../api'
+import { focusAgent, releaseTaskGroup, assignTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import type { CardMode } from '../hooks/useGridEngine'
 
 export type GroupViewMode = 'collapsed' | 'single' | 'expanded'
@@ -100,6 +101,7 @@ export function GroupContainer({
   readingAgents, projects, roles, existingGroups,
 }: GroupContainerProps) {
   const [confirmRelease, setConfirmRelease] = useState(false)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const confirmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   useEffect(() => {
@@ -153,6 +155,7 @@ export function GroupContainer({
         border: `1px solid rgba(${r}, ${g}, ${b}, 0.55)`,
         borderLeft: `3px solid rgba(${r}, ${g}, ${b}, 0.85)`,
       }}
+      onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }) }}
     >
       {/* Header bar */}
       <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H, background: `rgba(${r}, ${g}, ${b}, 0.15)` }}>
@@ -235,22 +238,57 @@ export function GroupContainer({
       )}
 
       {/* Expanded mode: sub-grid of all cards */}
-      {viewMode === 'expanded' && contentH > 0 && (
-        <div
-          className="flex-1 min-h-0 min-w-0 overflow-hidden px-1 pb-1"
-          style={{
-            display: 'grid',
-            gridTemplateColumns: `repeat(auto-fill, minmax(${Math.max(200, innerCardW - 16)}px, 1fr))`,
-            gap: 8,
-            alignContent: 'start',
-          }}
-        >
-          {members.map(agent => (
-            <div key={stableId(agent)} className="min-w-0" style={{ height: innerCardH }}>
-              {renderCard(agent)}
+      {viewMode === 'expanded' && contentH > 0 && (() => {
+        const minColW = Math.min(Math.max(200, (singleCardPixelW || 280) - 16), pixelW - 16)
+        const expandedCols = Math.max(1, Math.floor((pixelW - PAD) / (minColW + INNER_GAP)))
+        const expandedRows = Math.ceil(members.length / expandedCols)
+        const expandedCardH = expandedRows > 0 ? Math.floor((contentH - PAD - (expandedRows - 1) * INNER_GAP) / expandedRows) : 180
+        return (
+          <div
+            className="flex-1 min-h-0 min-w-0 overflow-hidden px-1 pb-1"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: `repeat(${expandedCols}, 1fr)`,
+              gridTemplateRows: `repeat(${expandedRows}, 1fr)`,
+              gap: 8,
+            }}
+          >
+            {members.map(agent => (
+              <div key={stableId(agent)} className="min-w-0 min-h-0">
+                {renderCard(agent)}
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
+      {/* Context menu */}
+      {ctxMenu && createPortal(
+        <>
+          <div className="fixed inset-0" style={{ zIndex: 9999 }} onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null) }} />
+          <div style={{ position: 'fixed', left: ctxMenu.x, top: ctxMenu.y, zIndex: 10000 }}>
+            <div className="gba-panel py-1 min-w-[160px]">
+              <button
+                onClick={() => {
+                  Promise.all(members.map(m => assignTaskGroup(stableId(m), '')))
+                  setCtxMenu(null)
+                }}
+                className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+              >
+                <span className="w-4 text-center">💨</span>
+                Disperse group
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleRelease(); setCtxMenu(null) }}
+                className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-accent-red hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+              >
+                <span className="w-4 text-center">⏻</span>
+                Release all
+              </button>
             </div>
-          ))}
-        </div>
+          </div>
+        </>,
+        document.body
       )}
     </div>
   )

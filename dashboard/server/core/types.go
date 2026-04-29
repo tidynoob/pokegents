@@ -69,6 +69,10 @@ type AgentIdentity struct {
 	Model       string `json:"model,omitempty"`
 	Effort      string `json:"effort,omitempty"`
 	CreatedAt   string `json:"created_at,omitempty"`
+	// Interface is the runtime backend bound to this agent: "" / "iterm2" =
+	// Claude Code in a terminal tab; "chat" = ACP-backed embedded panel.
+	// Set at launch time, survives session resume.
+	Interface string `json:"interface,omitempty"`
 }
 
 // RunningSession is the data stored in ~/.pokegents/running/*.json.
@@ -89,6 +93,7 @@ type RunningSession struct {
 	Model          string `json:"model,omitempty"`      // claude model alias or full name (e.g. "sonnet", "haiku")
 	Effort         string `json:"effort,omitempty"`     // reasoning effort level (low, medium, high, max)
 	Sprite         string `json:"sprite,omitempty"`     // pokemon sprite name (single source of truth)
+	Interface      string `json:"interface,omitempty"`  // "" / "iterm2" or "chat" — runtime backend
 }
 
 // Agent interface implementation for identity resolution.

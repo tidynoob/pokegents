@@ -28,7 +28,11 @@ func NewEventBus() *EventBus {
 
 // Subscribe adds a new SSE client. Returns a channel and a cleanup function.
 func (eb *EventBus) Subscribe() (chan SSEEvent, func()) {
-	ch := make(chan SSEEvent, 64)
+	// Buffer was 64 — easy to fill during a busy moment (file watcher fires +
+	// transcript poller + multiple agents going busy/idle in the same tick).
+	// 1024 covers a several-second backlog at our typical event rate, which
+	// is enough headroom that drain-on-full below rarely kicks in.
+	ch := make(chan SSEEvent, 1024)
 	eb.mu.Lock()
 	eb.clients[ch] = struct{}{}
 	eb.mu.Unlock()
@@ -52,7 +56,22 @@ func (eb *EventBus) Publish(eventType string, data any) {
 		select {
 		case ch <- evt:
 		default:
-			// Client too slow, drop event
+			// Buffer full. Previously we dropped the NEW event, which meant
+			// a transient slowdown could leave the client permanently stuck
+			// on stale state — newer state_updates kept getting discarded
+			// while older queued ones drained. Instead drop the OLDEST and
+			// admit the new event: state_update events always replace, so
+			// keeping the latest is strictly better than keeping the
+			// oldest. The user's bug ("UI doesn't update until I shift+
+			// refresh") was almost certainly this.
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- evt:
+			default:
+			}
 		}
 	}
 }
@@ -78,7 +97,7 @@ func (eb *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	ctx := r.Context()
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 
 	for {
@@ -86,8 +105,13 @@ func (eb *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-heartbeat.C:
-			// SSE comment keeps the connection alive through proxies/browsers
-			fmt.Fprintf(w, ": heartbeat\n\n")
+			// Send as a real event (was an SSE `:` comment, which the browser
+			// silently consumes — useless for client-side liveness checks).
+			// As an `event: ping`, the client can listen for it and force-
+			// reconnect if it doesn't see one within ~30s — covering the case
+			// where the TCP socket is half-dead but EventSource hasn't
+			// noticed yet (sleep/wake, flaky proxies, etc.).
+			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
 			flusher.Flush()
 		case evt, ok := <-ch:
 			if !ok {

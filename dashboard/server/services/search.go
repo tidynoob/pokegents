@@ -50,6 +50,35 @@ type SearchResponse struct {
 	Total   int            `json:"total"`
 }
 
+// TranscriptSummary is a per-conversation entry under a pokegent.
+type TranscriptSummary struct {
+	SessionID      string  `json:"session_id"`
+	StartedAt      string  `json:"started_at"`
+	LastModified   float64 `json:"last_modified"`
+	CustomTitle    string  `json:"custom_title"`
+	FirstUserMsg   string  `json:"first_user_msg"`
+	ProjectDir     string  `json:"project_dir"`
+	GitBranch      string  `json:"git_branch"`
+	CWD            string  `json:"cwd"`
+	Snippet        string  `json:"snippet,omitempty"`
+}
+
+// PokegentSummary is one row in the PC box — an agent (pokegent_id) with its latest transcript.
+type PokegentSummary struct {
+	PokegentID        string              `json:"pokegent_id"`
+	DisplayName       string              `json:"display_name"`
+	Sprite            string              `json:"sprite"`
+	Role              string              `json:"role,omitempty"`
+	Project           string              `json:"project,omitempty"`
+	TaskGroup         string              `json:"task_group,omitempty"`
+	ProfileName       string              `json:"profile_name,omitempty"`
+	CreatedAt         string              `json:"created_at,omitempty"`
+	LastActiveAt      float64             `json:"last_active_at"`
+	ConversationCount int                 `json:"conversation_count"`
+	LatestSession     TranscriptSummary   `json:"latest_session"`
+	Transcripts       []TranscriptSummary `json:"transcripts,omitempty"`
+}
+
 // SearchService manages the SQLite FTS5 search index over session transcripts.
 type SearchService struct {
 	mu               sync.Mutex
@@ -58,6 +87,19 @@ type SearchService struct {
 	profiles         store.ProfileStore
 	profileMatcher   ProfileMatcher
 	done             chan struct{}
+
+	// pokegentResolver maps a Claude session_id → pokegent_id. Supplied by the
+	// caller (usually the state manager) so the indexer can attribute transcripts
+	// without reaching into running files / identity store directly.
+	pokegentResolver func(sessionID string) string
+}
+
+// SetPokegentResolver installs a session_id → pokegent_id resolver. The indexer
+// uses it to populate session_transcripts.pokegent_id.
+func (ss *SearchService) SetPokegentResolver(fn func(sessionID string) string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.pokegentResolver = fn
 }
 
 // NewSearchService creates a search service backed by SQLite FTS5.
@@ -104,6 +146,36 @@ func (ss *SearchService) createTables() error {
 			assistant_messages,
 			tokenize='porter unicode61'
 		);
+
+		-- New: per-conversation transcript index. Replaces session_meta as the
+		-- transcript registry. Attributes each Claude session_id to a pokegent_id.
+		CREATE TABLE IF NOT EXISTS session_transcripts (
+			session_id    TEXT PRIMARY KEY,
+			pokegent_id   TEXT NOT NULL,
+			started_at    TEXT,
+			last_modified REAL,
+			custom_title  TEXT,
+			first_user_msg TEXT,
+			project_dir   TEXT,
+			git_branch    TEXT,
+			cwd           TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_transcripts_pgid ON session_transcripts(pokegent_id);
+		CREATE INDEX IF NOT EXISTS idx_transcripts_modified ON session_transcripts(last_modified DESC);
+
+		-- New: pokegent-level metadata. Read-through cache of the identity store,
+		-- primary lookup for PC box rows and sprite resolution.
+		CREATE TABLE IF NOT EXISTS pokegents_meta (
+			pokegent_id    TEXT PRIMARY KEY,
+			display_name   TEXT,
+			sprite         TEXT,
+			role           TEXT,
+			project        TEXT,
+			task_group     TEXT,
+			profile_name   TEXT,
+			created_at     TEXT,
+			last_active_at REAL DEFAULT 0
+		);
 	`)
 	if err != nil {
 		return err
@@ -121,9 +193,9 @@ func (ss *SearchService) createTables() error {
 
 // BuildIndex scans all JSONL files and indexes new/modified ones.
 func (ss *SearchService) BuildIndex() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
+	// Intentionally does NOT hold ss.mu — walking 100s of JSONL files would
+	// block all read handlers for seconds. Per-row DB writes are safe because
+	// sqlite3 serializes at the connection layer.
 	entries, err := os.ReadDir(ss.claudeProjectDir)
 	if err != nil {
 		log.Printf("search: cannot read projects dir: %v", err)
@@ -172,12 +244,14 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 	}
 
 	var (
-		customTitle      string
-		firstUserMessage string
-		userMessages     strings.Builder
-		assistantMsgs    strings.Builder
-		cwd              string
-		gitBranch        string
+		customTitle       string
+		firstUserMessage  string
+		userMessages      strings.Builder
+		assistantMsgs     strings.Builder
+		cwd               string
+		gitBranch         string
+		startedAt         string
+		embeddedPokegentID string
 	)
 
 	for _, line := range strings.Split(string(data), "\n") {
@@ -201,8 +275,17 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 				gitBranch = b
 			}
 		}
+		if startedAt == "" {
+			if ts, ok := entry["timestamp"].(string); ok {
+				startedAt = ts
+			}
+		}
 
 		switch entryType {
+		case "pokegent-id":
+			if p, ok := entry["pokegent_id"].(string); ok {
+				embeddedPokegentID = p
+			}
 		case "custom-title":
 			if t, ok := entry["customTitle"].(string); ok {
 				customTitle = t
@@ -253,6 +336,35 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 	ss.db.Exec(`INSERT INTO sessions_fts (session_id, project_dir, custom_title, user_messages, assistant_messages)
 		VALUES (?, ?, ?, ?, ?)`,
 		sessionID, projectDir, customTitle, userMessages.String(), assistantMsgs.String())
+
+	// Attribute transcript to a pokegent_id (preferred: embedded marker;
+	// fallback: resolver callback supplied by the state manager)
+	pgid := embeddedPokegentID
+	if pgid == "" && ss.pokegentResolver != nil {
+		pgid = ss.pokegentResolver(sessionID)
+	}
+	if pgid != "" {
+		ss.db.Exec(`
+			INSERT INTO session_transcripts
+				(session_id, pokegent_id, started_at, last_modified, custom_title, first_user_msg, project_dir, git_branch, cwd)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				pokegent_id    = excluded.pokegent_id,
+				started_at     = COALESCE(NULLIF(excluded.started_at, ''), session_transcripts.started_at),
+				last_modified  = MAX(excluded.last_modified, session_transcripts.last_modified),
+				custom_title   = COALESCE(NULLIF(excluded.custom_title, ''), session_transcripts.custom_title),
+				first_user_msg = COALESCE(NULLIF(excluded.first_user_msg, ''), session_transcripts.first_user_msg),
+				project_dir    = COALESCE(NULLIF(excluded.project_dir, ''), session_transcripts.project_dir),
+				git_branch     = COALESCE(NULLIF(excluded.git_branch, ''), session_transcripts.git_branch),
+				cwd            = COALESCE(NULLIF(excluded.cwd, ''), session_transcripts.cwd)
+		`, sessionID, pgid, startedAt, modTime, customTitle, firstUserMessage, projectDir, gitBranch, cwd)
+
+		ss.db.Exec(`
+			UPDATE pokegents_meta
+			SET last_active_at = (SELECT MAX(last_modified) FROM session_transcripts WHERE pokegent_id = ?)
+			WHERE pokegent_id = ?
+		`, pgid, pgid)
+	}
 
 	return true
 }
@@ -455,6 +567,449 @@ func (ss *SearchService) GetProfileName(sessionID string) string {
 	ss.db.QueryRow("SELECT profile_name FROM session_meta WHERE session_id = ?", sessionID).Scan(&pn)
 	return pn
 }
+
+// ── Pokegent-centric index (new data model) ─────────────────
+
+// IdentitySnapshot is a minimal view of an agent identity, supplied by the
+// caller so this package doesn't reach into the identity store directly.
+type IdentitySnapshot struct {
+	PokegentID  string
+	DisplayName string
+	Sprite      string
+	Role        string
+	Project     string
+	TaskGroup   string
+	ProfileName string
+	CreatedAt   string
+}
+
+// IdentityResolver maps a pokegent_id to its identity data.
+type IdentityResolver func(pokegentID string) (IdentitySnapshot, bool)
+
+// UpsertPokegentsMeta replaces the pokegents_meta table with the supplied
+// identity snapshots. Safe to call repeatedly — last_active_at is preserved.
+func (ss *SearchService) UpsertPokegentsMeta(identities []IdentitySnapshot) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	for _, id := range identities {
+		if id.PokegentID == "" {
+			continue
+		}
+		_, _ = tx.Exec(`
+			INSERT INTO pokegents_meta
+				(pokegent_id, display_name, sprite, role, project, task_group, profile_name, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(pokegent_id) DO UPDATE SET
+				display_name = excluded.display_name,
+				sprite       = excluded.sprite,
+				role         = excluded.role,
+				project      = excluded.project,
+				task_group   = excluded.task_group,
+				profile_name = excluded.profile_name,
+				created_at   = COALESCE(excluded.created_at, pokegents_meta.created_at)
+		`, id.PokegentID, id.DisplayName, id.Sprite, id.Role, id.Project, id.TaskGroup, id.ProfileName, id.CreatedAt)
+	}
+	// Recompute last_active_at from transcripts
+	_, _ = tx.Exec(`
+		UPDATE pokegents_meta
+		SET last_active_at = COALESCE((
+			SELECT MAX(last_modified) FROM session_transcripts
+			WHERE session_transcripts.pokegent_id = pokegents_meta.pokegent_id
+		), 0)
+	`)
+	tx.Commit()
+}
+
+// UpsertTranscript records that a transcript belongs to a pokegent.
+func (ss *SearchService) UpsertTranscript(t TranscriptSummary, pokegentID string) {
+	if t.SessionID == "" || pokegentID == "" {
+		return
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	_, _ = ss.db.Exec(`
+		INSERT INTO session_transcripts
+			(session_id, pokegent_id, started_at, last_modified, custom_title, first_user_msg, project_dir, git_branch, cwd)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			pokegent_id    = excluded.pokegent_id,
+			started_at     = COALESCE(NULLIF(excluded.started_at, ''), session_transcripts.started_at),
+			last_modified  = MAX(excluded.last_modified, session_transcripts.last_modified),
+			custom_title   = COALESCE(NULLIF(excluded.custom_title, ''), session_transcripts.custom_title),
+			first_user_msg = COALESCE(NULLIF(excluded.first_user_msg, ''), session_transcripts.first_user_msg),
+			project_dir    = COALESCE(NULLIF(excluded.project_dir, ''), session_transcripts.project_dir),
+			git_branch     = COALESCE(NULLIF(excluded.git_branch, ''), session_transcripts.git_branch),
+			cwd            = COALESCE(NULLIF(excluded.cwd, ''), session_transcripts.cwd)
+	`, t.SessionID, pokegentID, t.StartedAt, t.LastModified, t.CustomTitle, t.FirstUserMsg, t.ProjectDir, t.GitBranch, t.CWD)
+
+	_, _ = ss.db.Exec(`
+		UPDATE pokegents_meta
+		SET last_active_at = (SELECT MAX(last_modified) FROM session_transcripts WHERE pokegent_id = ?)
+		WHERE pokegent_id = ?
+	`, pokegentID, pokegentID)
+}
+
+// GetPokegentIDForSession looks up the pokegent that owns a Claude session_id.
+func (ss *SearchService) GetPokegentIDForSession(sessionID string) string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	var pgid string
+	ss.db.QueryRow(`SELECT pokegent_id FROM session_transcripts WHERE session_id = ?`, sessionID).Scan(&pgid)
+	return pgid
+}
+
+// ListPokegents returns all pokegents with their latest transcript, sorted by recency.
+func (ss *SearchService) ListPokegents(limit int) ([]PokegentSummary, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	// Single query: pokegents_meta LEFT JOIN a subquery that picks the most-recent
+	// transcript per pokegent_id, plus a count of transcripts.
+	rows, err := ss.db.Query(`
+		WITH latest AS (
+			SELECT t.* FROM session_transcripts t
+			INNER JOIN (
+				SELECT pokegent_id, MAX(last_modified) AS mx
+				FROM session_transcripts
+				GROUP BY pokegent_id
+			) agg
+			ON t.pokegent_id = agg.pokegent_id AND t.last_modified = agg.mx
+		)
+		SELECT
+			m.pokegent_id,
+			COALESCE(m.display_name, ''),
+			COALESCE(m.sprite, ''),
+			COALESCE(m.role, ''),
+			COALESCE(m.project, ''),
+			COALESCE(m.task_group, ''),
+			COALESCE(m.profile_name, ''),
+			COALESCE(m.created_at, ''),
+			COALESCE(m.last_active_at, 0),
+			COALESCE((SELECT COUNT(*) FROM session_transcripts WHERE pokegent_id = m.pokegent_id), 0),
+			COALESCE(latest.session_id, ''),
+			COALESCE(latest.started_at, ''),
+			COALESCE(latest.last_modified, 0),
+			COALESCE(latest.custom_title, ''),
+			COALESCE(latest.first_user_msg, ''),
+			COALESCE(latest.project_dir, ''),
+			COALESCE(latest.git_branch, ''),
+			COALESCE(latest.cwd, '')
+		FROM pokegents_meta m
+		LEFT JOIN latest ON latest.pokegent_id = m.pokegent_id
+		ORDER BY m.last_active_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PokegentSummary
+	for rows.Next() {
+		var p PokegentSummary
+		var t TranscriptSummary
+		if err := rows.Scan(
+			&p.PokegentID, &p.DisplayName, &p.Sprite, &p.Role, &p.Project, &p.TaskGroup,
+			&p.ProfileName, &p.CreatedAt, &p.LastActiveAt, &p.ConversationCount,
+			&t.SessionID, &t.StartedAt, &t.LastModified, &t.CustomTitle, &t.FirstUserMsg,
+			&t.ProjectDir, &t.GitBranch, &t.CWD,
+		); err != nil {
+			continue
+		}
+		if t.SessionID != "" {
+			p.LatestSession = t
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// latestTranscriptLocked returns the most recent transcript for a pokegent.
+// Caller must hold ss.mu.
+func (ss *SearchService) latestTranscriptLocked(pgid string) (TranscriptSummary, bool) {
+	var t TranscriptSummary
+	err := ss.db.QueryRow(`
+		SELECT session_id, COALESCE(started_at,''), COALESCE(last_modified,0),
+		       COALESCE(custom_title,''), COALESCE(first_user_msg,''),
+		       COALESCE(project_dir,''), COALESCE(git_branch,''), COALESCE(cwd,'')
+		FROM session_transcripts
+		WHERE pokegent_id = ?
+		ORDER BY last_modified DESC
+		LIMIT 1
+	`, pgid).Scan(&t.SessionID, &t.StartedAt, &t.LastModified, &t.CustomTitle, &t.FirstUserMsg, &t.ProjectDir, &t.GitBranch, &t.CWD)
+	if err != nil {
+		return TranscriptSummary{}, false
+	}
+	return t, true
+}
+
+// TranscriptsForPokegent returns every transcript belonging to a pokegent.
+func (ss *SearchService) TranscriptsForPokegent(pgid string) ([]TranscriptSummary, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	rows, err := ss.db.Query(`
+		SELECT session_id, COALESCE(started_at,''), COALESCE(last_modified,0),
+		       COALESCE(custom_title,''), COALESCE(first_user_msg,''),
+		       COALESCE(project_dir,''), COALESCE(git_branch,''), COALESCE(cwd,'')
+		FROM session_transcripts
+		WHERE pokegent_id = ?
+		ORDER BY last_modified DESC
+	`, pgid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TranscriptSummary
+	for rows.Next() {
+		var t TranscriptSummary
+		if err := rows.Scan(&t.SessionID, &t.StartedAt, &t.LastModified, &t.CustomTitle, &t.FirstUserMsg, &t.ProjectDir, &t.GitBranch, &t.CWD); err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// GetPokegentSummary returns a single pokegent's summary with its transcripts populated.
+func (ss *SearchService) GetPokegentSummary(pgid string) (*PokegentSummary, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.getPokegentSummaryLocked(pgid)
+}
+
+// getPokegentSummaryLocked is the internal implementation — caller must hold ss.mu.
+func (ss *SearchService) getPokegentSummaryLocked(pgid string) (*PokegentSummary, error) {
+	var p PokegentSummary
+	err := ss.db.QueryRow(`
+		SELECT pokegent_id, COALESCE(display_name,''), COALESCE(sprite,''),
+		       COALESCE(role,''), COALESCE(project,''), COALESCE(task_group,''),
+		       COALESCE(profile_name,''), COALESCE(created_at,''), COALESCE(last_active_at,0)
+		FROM pokegents_meta WHERE pokegent_id = ?
+	`, pgid).Scan(&p.PokegentID, &p.DisplayName, &p.Sprite, &p.Role, &p.Project, &p.TaskGroup,
+		&p.ProfileName, &p.CreatedAt, &p.LastActiveAt)
+	if err != nil {
+		return nil, err
+	}
+	transcripts := ss.transcriptsForPokegentLocked(pgid)
+	p.Transcripts = transcripts
+	p.ConversationCount = len(transcripts)
+	if len(transcripts) > 0 {
+		p.LatestSession = transcripts[0]
+	}
+	return &p, nil
+}
+
+// transcriptsForPokegentLocked is the unlocked internal — caller must hold ss.mu.
+func (ss *SearchService) transcriptsForPokegentLocked(pgid string) []TranscriptSummary {
+	rows, err := ss.db.Query(`
+		SELECT session_id, COALESCE(started_at,''), COALESCE(last_modified,0),
+		       COALESCE(custom_title,''), COALESCE(first_user_msg,''),
+		       COALESCE(project_dir,''), COALESCE(git_branch,''), COALESCE(cwd,'')
+		FROM session_transcripts
+		WHERE pokegent_id = ?
+		ORDER BY last_modified DESC
+	`, pgid)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []TranscriptSummary
+	for rows.Next() {
+		var t TranscriptSummary
+		if err := rows.Scan(&t.SessionID, &t.StartedAt, &t.LastModified, &t.CustomTitle, &t.FirstUserMsg, &t.ProjectDir, &t.GitBranch, &t.CWD); err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// SearchPokegents runs a keyword query across transcripts, groups matches by
+// pokegent_id, and returns summaries with matching transcripts populated.
+func (ss *SearchService) SearchPokegents(query string, limit int) ([]PokegentSummary, int, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	ftsQuery := query
+	if !strings.Contains(query, `"`) {
+		words := strings.Fields(query)
+		for i, w := range words {
+			words[i] = w + "*"
+		}
+		ftsQuery = strings.Join(words, " ")
+	}
+
+	rows, err := ss.db.Query(`
+		SELECT
+			f.session_id,
+			snippet(sessions_fts, 3, '<mark>', '</mark>', '...', 40) as snippet,
+			t.pokegent_id
+		FROM sessions_fts f
+		INNER JOIN session_transcripts t ON f.session_id = t.session_id
+		WHERE sessions_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, ftsQuery, limit*10)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	type hit struct{ sessionID, snippet string }
+	byPgid := map[string][]hit{}
+	order := []string{}
+	for rows.Next() {
+		var sid, snippet, pgid string
+		if err := rows.Scan(&sid, &snippet, &pgid); err != nil {
+			continue
+		}
+		if pgid == "" {
+			continue
+		}
+		if _, seen := byPgid[pgid]; !seen {
+			order = append(order, pgid)
+		}
+		byPgid[pgid] = append(byPgid[pgid], hit{sid, snippet})
+	}
+
+	out := make([]PokegentSummary, 0, len(order))
+	for _, pgid := range order {
+		if len(out) >= limit {
+			break
+		}
+		summary, err := ss.getPokegentSummaryLocked(pgid)
+		if err != nil {
+			continue
+		}
+		hits := byPgid[pgid]
+		// Attach snippets only to matching transcripts, and cap transcripts to matches
+		hitMap := map[string]string{}
+		for _, h := range hits {
+			hitMap[h.sessionID] = h.snippet
+		}
+		matched := make([]TranscriptSummary, 0, len(hits))
+		for _, t := range summary.Transcripts {
+			if s, ok := hitMap[t.SessionID]; ok {
+				t.Snippet = s
+				matched = append(matched, t)
+			}
+		}
+		summary.Transcripts = matched
+		if len(matched) > 0 {
+			summary.LatestSession.Snippet = matched[0].Snippet
+		}
+		out = append(out, *summary)
+	}
+	return out, len(byPgid), nil
+}
+
+// MigrateFromSessionMeta backfills session_transcripts + pokegents_meta from
+// existing data. Idempotent — skips if session_transcripts already has rows.
+// sessionIDMap is the legacy ccd_session_id → claude_session_id map used only
+// here as a last-resort attribution source.
+func (ss *SearchService) MigrateFromSessionMeta(
+	identities []IdentitySnapshot,
+	sessionIDMap map[string]string,
+) {
+	ss.mu.Lock()
+	var existingCount int
+	ss.db.QueryRow("SELECT COUNT(*) FROM session_transcripts").Scan(&existingCount)
+	ss.mu.Unlock()
+
+	// Always upsert identity metadata (cheap, identity store is source of truth)
+	ss.UpsertPokegentsMeta(identities)
+
+	if existingCount > 0 {
+		return
+	}
+	log.Printf("search: migrating legacy session_meta → session_transcripts + pokegents_meta")
+
+	// Build lookup: claude_sid → pokegent_id from the legacy session-id-map.
+	// sessionIDMap is ccd_sid → claude_sid, but ccd_sid historically equals pokegent_id.
+	claudeToPgid := make(map[string]string, len(sessionIDMap))
+	for ccdSID, claudeSID := range sessionIDMap {
+		// Last-write wins is fine here — sprites within a cluster were equalized
+		// by the one-time identity patch.
+		claudeToPgid[claudeSID] = ccdSID
+	}
+
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	rows, err := ss.db.Query(`
+		SELECT session_id,
+		       COALESCE(pokegent_id, ''),
+		       COALESCE(project_dir, ''),
+		       COALESCE(custom_title, ''),
+		       COALESCE(first_user_message, ''),
+		       COALESCE(last_modified, 0),
+		       COALESCE(cwd, ''),
+		       COALESCE(git_branch, '')
+		FROM session_meta
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	migrated := 0
+	orphaned := 0
+	for rows.Next() {
+		var (
+			sid, pgid, projDir, title, firstMsg, cwd, branch string
+			lastMod                                          float64
+		)
+		if err := rows.Scan(&sid, &pgid, &projDir, &title, &firstMsg, &lastMod, &cwd, &branch); err != nil {
+			continue
+		}
+		if pgid == "" {
+			pgid = claudeToPgid[sid]
+		}
+		if pgid == "" {
+			orphaned++
+			continue
+		}
+		_, err := tx.Exec(`
+			INSERT OR IGNORE INTO session_transcripts
+				(session_id, pokegent_id, last_modified, custom_title, first_user_msg, project_dir, git_branch, cwd)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, sid, pgid, lastMod, title, firstMsg, projDir, branch, cwd)
+		if err == nil {
+			migrated++
+		}
+	}
+	_, _ = tx.Exec(`
+		UPDATE pokegents_meta
+		SET last_active_at = COALESCE((
+			SELECT MAX(last_modified) FROM session_transcripts
+			WHERE session_transcripts.pokegent_id = pokegents_meta.pokegent_id
+		), 0)
+	`)
+	tx.Commit()
+	log.Printf("search: migrated %d transcripts (%d orphaned — no pokegent_id attribution)", migrated, orphaned)
+}
+
+// ── End pokegent-centric index ──────────────────────────────
 
 // StartBackgroundIndexer re-indexes every interval. Calls onReady after the
 // first index build completes (used to sync running session metadata).

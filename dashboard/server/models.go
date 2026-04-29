@@ -52,6 +52,10 @@ type AgentState struct {
 	Ephemeral       bool   `json:"ephemeral,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	SubagentType    string `json:"subagent_type,omitempty"`
+	// Interface routes click-handling on the frontend: "iterm2" focuses a
+	// terminal tab, "chat" opens an in-dashboard ACP panel. Empty defaults
+	// to iterm2 for legacy agents.
+	Interface string `json:"interface,omitempty"`
 }
 
 // ActivityItem is a single entry in the agent's activity feed.
@@ -74,24 +78,3 @@ type HookEvent struct {
 	Prompt               string `json:"prompt,omitempty"`
 }
 
-// SearchResult is returned by the search API.
-type SearchResult struct {
-	SessionID      string `json:"session_id"`
-	ProjectDir     string `json:"project_dir"`
-	CustomTitle    string `json:"custom_title"`
-	ProfileName    string `json:"profile_name"`
-	Role           string `json:"role,omitempty"`
-	Project        string `json:"project,omitempty"`
-	Snippet        string `json:"snippet"`
-	MessageType    string `json:"message_type"`
-	Timestamp      string `json:"timestamp"`
-	CWD            string `json:"cwd"`
-	GitBranch      string `json:"git_branch"`
-	SpriteOverride string `json:"sprite_override,omitempty"`
-}
-
-// SearchResponse wraps search results with total count.
-type SearchResponse struct {
-	Results []SearchResult `json:"results"`
-	Total   int            `json:"total"`
-}

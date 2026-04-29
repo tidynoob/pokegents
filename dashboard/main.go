@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"pokegents/dashboard/server"
+	"pokegents/dashboard/server/services"
+	"pokegents/dashboard/server/store"
 )
 
 func main() {
@@ -59,10 +63,26 @@ func runServe() {
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
-	defer s.Stop()
 
-	if err := s.Start(); err != nil {
-		log.Fatalf("server error: %v", err)
+	// Trap SIGTERM/SIGINT so we run Server.Stop (which cleanly closes all
+	// chat ACP subprocesses + HTTP server). Without this, a `kill` on the
+	// dashboard orphans every chat backend and the next dashboard can't
+	// re-attach to them via stdio. SIGKILL bypasses this — but our reattach
+	// logic on next startup handles that case as well.
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGTERM, syscall.SIGINT)
+	errchan := make(chan error, 1)
+	go func() { errchan <- s.Start() }()
+
+	select {
+	case sig := <-sigchan:
+		log.Printf("received %s, shutting down", sig)
+		s.Stop()
+	case err := <-errchan:
+		s.Stop()
+		if err != nil {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 }
 
@@ -76,7 +96,13 @@ func runIndex() {
 	state := server.NewStateManager(cfg.DataDir, cfg.ClaudeProjectDir)
 	state.LoadAll()
 
-	search, err := server.NewSearchIndex(cfg.SearchDBPath, cfg.ClaudeProjectDir, state)
+	fs := store.NewFileStore(cfg.DataDir)
+	search, err := services.NewSearchService(cfg.SearchDBPath, cfg.ClaudeProjectDir, fs.Profiles,
+		services.ProfileMatcherFunc(func(cwd string) string {
+			name, _, _ := state.MatchProfile(cwd)
+			return name
+		}),
+	)
 	if err != nil {
 		log.Fatalf("failed to create search index: %v", err)
 	}

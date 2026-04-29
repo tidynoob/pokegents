@@ -699,7 +699,7 @@ if last_title: print(last_title)
     done
     # Check running files (agent still alive, or pre-migration)
     if [[ -z "$sprite" ]]; then
-      for rf in "$RUNNING_DIR"/*.json; do
+      for rf in "$RUNNING_DIR"/*.json(N); do
         [[ -f "$rf" ]] || continue
         local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
         local _rf_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
@@ -917,23 +917,52 @@ if last_title: print(last_title)
       # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
       local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
-      # Inherit task_group and sprite from original's identity file first, then running file
-      if [[ "$fork_session" == "true" ]]; then
-        # Check identity file of original agent (by scanning running files for pokegent_id)
-        local orig_rf=$(ls "$RUNNING_DIR"/*-${matches[1]}.json 2>/dev/null | head -1)
-        local orig_pgid=""
-        if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
-          orig_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$orig_rf" 2>/dev/null)
+      # Inherit task_group and sprite from the target session's identity.
+      # Applies to BOTH plain resume and fork — the only thing that differs between
+      # them is the session_id, not the agent's identity.
+      # Strategy: (1) scan running files for a match on the resolved session_id,
+      # (2) else scan identity files via search DB lookup (pokegent_id stored in
+      # session_meta), (3) else leave empty and fall through to random.
+      # NOTE: must use the (N) glob qualifier — zsh's default `nomatch`
+      # option aborts the command line on an empty glob *before* `ls`
+      # runs, so `2>/dev/null` doesn't suppress the error. (N) = nullglob:
+      # treat unmatched globs as empty arrays.
+      local _orig_rfs=("$RUNNING_DIR"/*-${matches[1]}.json(N))
+      local orig_rf="${_orig_rfs[1]:-}"
+      local orig_pgid=""
+      if [[ -z "$orig_rf" || ! -f "$orig_rf" ]]; then
+        # Running file not keyed by resolved sid — may live under a pokegent_id
+        # (post-reconciliation). Search every running file for a session_id match.
+        for _rf in "$RUNNING_DIR"/*.json(N); do
+          local _rsid=$(jq -r '.session_id // empty' "$_rf" 2>/dev/null)
+          if [[ "$_rsid" == "${matches[1]}" ]]; then
+            orig_rf="$_rf"
+            break
+          fi
+        done
+      fi
+      if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
+        orig_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$orig_rf" 2>/dev/null)
+      fi
+      # Fall back to search DB if no running file matched (dead agent case)
+      if [[ -z "$orig_pgid" ]]; then
+        local _port=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
+        local _meta=$(curl -s --max-time 2 "http://localhost:${_port}/api/sessions/${matches[1]}/meta" 2>/dev/null)
+        orig_pgid=$(echo "$_meta" | jq -r '.pokegent_id // empty' 2>/dev/null)
+      fi
+      local orig_identity="$POKEGENTS_DATA/agents/${orig_pgid}.json"
+      if [[ -n "$orig_pgid" && -f "$orig_identity" ]]; then
+        [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_identity" 2>/dev/null)
+        [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_identity" 2>/dev/null)
+        # Preserve the original pokegent_id — reuse identity so sprite stays stable.
+        # Only on plain resume though; fork needs a fresh identity (it's a different agent).
+        if [[ "$fork_session" != "true" && -z "$inherited_pokegent_id" ]]; then
+          inherited_pokegent_id="$orig_pgid"
         fi
-        local orig_identity="$POKEGENTS_DATA/agents/${orig_pgid}.json"
-        if [[ -n "$orig_pgid" && -f "$orig_identity" ]]; then
-          [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_identity" 2>/dev/null)
-          [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_identity" 2>/dev/null)
-        elif [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
-          # Fallback: read from running file (pre-migration agents)
-          [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
-          [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_rf" 2>/dev/null)
-        fi
+      elif [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
+        # Legacy fallback: read directly from running file
+        [[ -z "$task_group" ]] && task_group=$(jq -r '.task_group // empty' "$orig_rf" 2>/dev/null)
+        [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_rf" 2>/dev/null)
       fi
 
       # For resume/fork, pokegent_id is always fresh (like ccd_session_id) unless inherited.
@@ -1023,7 +1052,15 @@ You are one of several concurrent Claude Code agents managed by pokegents. You c
 
 Keep messages concise and actionable. Include file paths, specific line numbers, and code snippets when relevant."
 
-  local full_prompt="${system_prompt:+$system_prompt
+  # Shared base prompt — prepended to every agent's system prompt
+  local shared_prompt=""
+  if [[ -f "$POKEGENTS_DATA/system-prompt.md" ]]; then
+    shared_prompt=$(<"$POKEGENTS_DATA/system-prompt.md")
+  fi
+
+  local full_prompt="${shared_prompt:+$shared_prompt
+
+}${system_prompt:+$system_prompt
 
 }${messaging_prompt}"
   claude_args+=(--append-system-prompt "$full_prompt")
@@ -1047,12 +1084,20 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   # cd and launch
   cd "$cwd" || return 1
 
-  # Trap for cleanup on abnormal exit (tab close, SIGHUP, etc.)
+  # Trap for cleanup on abnormal exit. Only clean the iTerm2 dynamic profile
+  # here (the dashboard can't see it); leave the running file alone on
+  # signal-driven exits and let the dashboard's CleanStale routine remove
+  # it based on actual claude liveness (claude_pid → shell pid → claude
+  # session registry). This prevents accidental tab closes (Ctrl+W →
+  # SIGHUP) from deleting the running file out from under a concurrent
+  # revive flow that's trying to re-attach to the same identity.
+  # On normal exit the explicit `rm` at the end of this function still
+  # cleans the running file.
   local dyn_profile_cleanup=""
   if [[ "$POKEGENTS_HAS_ITERM" == "true" ]]; then
     dyn_profile_cleanup="$HOME/Library/Application Support/iTerm2/DynamicProfiles/pokegents-session-${pokegent_id}.json"
   fi
-  trap "rm -f '$running_file' '$dyn_profile_cleanup'" EXIT INT TERM HUP
+  trap "rm -f '$dyn_profile_cleanup'" EXIT INT TERM HUP
 
   # Use ccd_session_id for POKEGENTS_SESSION_ID (unique per agent, even for resume/clone).
   # Falls back to session_id for fresh launches where ccd_session_id isn't set separately.
@@ -1061,9 +1106,21 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
     POKEGENT_ID="$pokegent_id" \
     CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude "${claude_args[@]}"
 
-  # Disarm trap and clean up explicitly
+  # Normal exit: disarm trap and clean up explicitly. Only delete the
+  # running file if WE still own it — i.e. the file's `pid` field still
+  # matches our shell pid ($$). If a dashboard interface migration
+  # overwrote the file with a different runtime's pid (e.g. the chat
+  # backend's ACP subprocess), leave it alone — that runtime owns it now,
+  # and deleting it would silently knock the agent off the dashboard.
+  # Dashboard's CleanStale handles any stale-leftover case via liveness.
   trap - EXIT INT TERM HUP
-  rm -f "$running_file"
+  if [[ -f "$running_file" ]]; then
+    local _file_pid=$(jq -r '.pid // 0' "$running_file" 2>/dev/null || echo 0)
+    if [[ "$_file_pid" == "$$" ]]; then
+      rm -f "$running_file"
+    fi
+    # else: someone else (dashboard migration) owns it now; don't touch.
+  fi
   rm -f "$dyn_profile_cleanup"
 
   # Save to history (skip for resumed sessions)

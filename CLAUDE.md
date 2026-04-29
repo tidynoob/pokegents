@@ -159,17 +159,19 @@ All iTerm2 code is guarded by `POKEGENTS_HAS_ITERM` checks in `pokegent.sh` and 
 
 **Tools:** `list_agents`, `send_message(to, content)`, `check_messages(my_session_id)`
 
-**Session ID resolution (`resolveAgent`):** Matches against both `session_id` and `ccd_session_id` fields from the dashboard API. Handles 8-char prefixes.
+**Routing key: `pokegent_id`.** All mailbox storage is at `~/.pokegents/messages/{pokegent_id}/{msg_id}.json`. `pokegent_id` is the abstraction-layer identifier — backend-agnostic, stable across resume and interface migration. `ccd_session_id` is iterm2-adapter-internal and never appears at the messaging layer (legacy fallback paths exist for old running files but are deprecated).
 
-**Server-side resolution:** The Go server's `resolveSessionID` also matches both IDs, with fallbacks to running file scan and mailbox directory scan.
+**ID resolution.** Both client (`resolveAgent` in `mcp/server.js`) and server (`resolveToPokegentID` in `dashboard/server/server.go`) accept any agent ID hint (8-char prefix or full UUID, matching pokegent_id / ccd_session_id / session_id) and resolve to the agent's pokegent_id for routing. The hook's `MSG_LOOKUP_ID` and `BUDGET_LOOKUP` prefer `$POKEGENT_ID` env var over legacy `$POKEGENTS_SESSION_ID` for the same reason.
+
+**Migration.** On dashboard startup, `migrateMailboxesToPokegentID` (in `mailbox_migration.go`) moves any leftover `messages/{ccd_session_id}/` directories to `messages/{pokegent_id}/` for running files that have both IDs. Idempotent. Will be removed in a future release once no ccd_session_id-keyed mailboxes remain in the wild.
 
 **Message lifecycle:**
-1. `send_message` → stored in `~/.pokegents/messages/{to_session_id}/{msg_id}.json` with `delivered: false`
+1. `send_message` → stored in `~/.pokegents/messages/{pokegent_id}/{msg_id}.json` with `delivered: false`
 2. Hook fires (UserPromptSubmit) → `GetPending` reads undelivered messages → injects notification via `systemMessage` → marks `delivered: true`
 3. Agent calls `check_messages` → `ConsumePending` reads AND deletes message files
 4. If agent is idle, nudger types "check messages" into terminal after 2s delay
 
-**Message budget:** 5 per turn, tracked in `~/.pokegents/messages/{session_id}/_msg_budget`, reset on UserPromptSubmit.
+**Message budget:** 15 per turn (per `POKEGENTS_MESSAGE_BUDGET` env var, default in `mcp/server.js`), tracked in `~/.pokegents/messages/{pokegent_id}/_msg_budget`, reset on UserPromptSubmit.
 
 ### Configuration (`~/.pokegents/config.json`)
 

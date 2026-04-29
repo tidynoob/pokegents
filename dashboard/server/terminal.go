@@ -1,5 +1,16 @@
 package server
 
+// LaunchOptions describes a fresh pokegent launch request from the dashboard.
+// The unified launch endpoint mints `PokegentID` server-side and pre-writes
+// the running file before invoking the terminal adapter, so the dashboard
+// always has a record even if the spawned shell fails to start.
+type LaunchOptions struct {
+	Profile      string // role@project or legacy profile name
+	ITermProfile string // iTerm2 profile name for tab coloring (optional)
+	TaskGroup    string // organizational tag, passed via --group
+	PokegentID   string // pre-minted, passed via --pokegent-id (required for new launches)
+}
+
 // TerminalIntegration abstracts platform-specific terminal control
 // (e.g. iTerm2 on macOS via AppleScript). Non-macOS platforms get a
 // stub that returns errors, keeping the server compilable everywhere.
@@ -17,9 +28,11 @@ type TerminalIntegration interface {
 	// ResumeSession opens a new tab and resumes an existing pokegents session.
 	// compact: "yes" to auto-compact, "no" to skip, "" to let user decide.
 	ResumeSession(profile, sessionID, compact string) error
+	// ResumePokegent opens a new tab and resumes a session while pinning the
+	// identity to a specific pokegent_id (so sprite/name/etc. stay stable).
+	ResumePokegent(profile, sessionID, pokegentID, compact string) error
 	// LaunchProfile opens a new tab and starts a fresh pokegents session for the given profile.
-	// taskGroup is optional — if non-empty, passed as --group to pokegent for auto-naming.
-	LaunchProfile(profile, itermProfile, taskGroup string) error
+	LaunchProfile(opts LaunchOptions) error
 	// IsAvailable reports whether the terminal integration is functional
 	// on the current platform.
 	IsAvailable() bool

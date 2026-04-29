@@ -15,7 +15,7 @@ func TestFullMessageWorkflow(t *testing.T) {
 		"sender-11111111": {State: "busy", IsAlive: true},
 		"recver-22222222": {State: "done", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-r", LastUpdated: "2020-01-01T00:00:00Z"},
 	}
-	svc := NewMessagingService(fs.Messages, nil, func(id string) *AgentInfo { return agents[id] })
+	svc := NewMessagingService(fs.Messages, nil, func(id string) *AgentInfo { return agents[id] }, nil)
 
 	// 1. Send message
 	msg, needsNudge, err := svc.Send("sender-11111111", "Sender", "recver-22222222", "Receiver", "hello from sender")
@@ -166,7 +166,7 @@ func TestCloneIsolation(t *testing.T) {
 	fs := store.NewFileStore(dir)
 	svc := NewMessagingService(fs.Messages, nil, func(id string) *AgentInfo {
 		return &AgentInfo{State: "done", IsAlive: true}
-	})
+	}, nil)
 
 	// Send to original and clone separately
 	svc.Send("boss-11111111", "Boss", "original-ccd-id", "Original", "task for original")

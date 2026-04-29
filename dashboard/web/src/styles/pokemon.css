@@ -101,6 +101,17 @@ body::before {
   color: #383838;
 }
 
+/* Dark variant of GBA dialog for chat panel */
+.gba-dialog-dark {
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.05),
+    2px 2px 0 rgba(0,0,0,0.2);
+  color: #e0e0e0;
+}
+
 /* GBA button (like CANCEL) */
 .gba-button {
   background: linear-gradient(180deg, #a888b8 0%, #8870a0 100%);
@@ -142,9 +153,9 @@ body::before {
 
 /* GBA-style scrollbar */
 ::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-track { background: #2a5848; border-radius: 4px; }
-::-webkit-scrollbar-thumb { background: #4a9888; border-radius: 4px; border: 1px solid #2a5848; }
-::-webkit-scrollbar-thumb:hover { background: #5aac98; }
+::-webkit-scrollbar-track { background: transparent; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.25); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.4); }
 
 /* ─── Sprite Animation System ─────────────────────────────────── */
 /* Each animation is a one-shot that plays once then the JS reverts to sprite-idle */
@@ -467,8 +478,26 @@ body.theme-classic ::-webkit-scrollbar-track { background: transparent; }
 body.theme-classic ::-webkit-scrollbar-thumb { background: #27272a; border: none; }
 body.theme-classic ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
 
-/* ─── Font Size Scaling (uses zoom for uniform scaling) ─ */
-body.font-size-small  #root { zoom: 0.88; }
-body.font-size-medium #root { zoom: 1; }
-body.font-size-large  #root { zoom: 1.15; }
+/* ─── Output Font Size (CSS variable set by settings) ─ */
+:root { --output-font-size: 11px; }
+
+/* ─── Thinking indicator (ChatPanel) ─────────────────────
+   Animated trailing dots after a verb like "Ruminating".
+   Pure CSS so we don't trigger React re-renders just to
+   shift a few characters.                                */
+.thinking-dots::after {
+  content: '';
+  display: inline-block;
+  animation: thinking-dots 1.4s steps(4, end) infinite;
+  width: 1.5em;
+  text-align: left;
+  letter-spacing: 0.05em;
+}
+@keyframes thinking-dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
 

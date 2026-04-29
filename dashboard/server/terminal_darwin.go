@@ -94,17 +94,23 @@ end tell`, safeProfile, safeSID)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
-func (t *ITerm2Terminal) LaunchProfile(profile, itermProfile, taskGroup string) error {
-	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
+func (t *ITerm2Terminal) LaunchProfile(opts LaunchOptions) error {
+	safeProfile := strings.ReplaceAll(opts.Profile, `"`, `\"`)
 	createTab := `create tab with default profile`
-	if itermProfile != "" {
-		safeITermProf := strings.ReplaceAll(itermProfile, `"`, `\"`)
+	if opts.ITermProfile != "" {
+		safeITermProf := strings.ReplaceAll(opts.ITermProfile, `"`, `\"`)
 		createTab = fmt.Sprintf(`create tab with profile "%s"`, safeITermProf)
 	}
 	cmd := fmt.Sprintf("pokegent %s", safeProfile)
-	if taskGroup != "" {
-		safeGroup := strings.ReplaceAll(taskGroup, `"`, `\"`)
-		cmd = fmt.Sprintf("pokegent %s --group %s", safeProfile, safeGroup)
+	// --pokegent-id pins the identity (so dashboard's pre-written running file
+	// and pokegent.sh's later writes agree on the same pokegent_id).
+	if opts.PokegentID != "" {
+		safePGID := strings.ReplaceAll(opts.PokegentID, `"`, `\"`)
+		cmd = fmt.Sprintf("%s --pokegent-id %s", cmd, safePGID)
+	}
+	if opts.TaskGroup != "" {
+		safeGroup := strings.ReplaceAll(opts.TaskGroup, `"`, `\"`)
+		cmd = fmt.Sprintf("%s --group %s", cmd, safeGroup)
 	}
 	script := fmt.Sprintf(`
 tell application "iTerm2"
@@ -120,11 +126,20 @@ end tell`, createTab, cmd)
 }
 
 func (t *ITerm2Terminal) ResumeSession(profile, sessionID, compact string) error {
+	return t.ResumePokegent(profile, sessionID, "", compact)
+}
+
+// ResumePokegent resumes a Claude session while forcing pokegent.sh to reuse the
+// given pokegent_id — this prevents a new identity file from being minted.
+func (t *ITerm2Terminal) ResumePokegent(profile, sessionID, pokegentID, compact string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSession := strings.ReplaceAll(sessionID, `"`, `\"`)
+	safePgid := strings.ReplaceAll(pokegentID, `"`, `\"`)
+	pgidArg := ""
+	if safePgid != "" {
+		pgidArg = fmt.Sprintf(" --pokegent-id %s", safePgid)
+	}
 	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
-	// Only auto-answer when user explicitly chose to compact — otherwise let them
-	// handle the prompt in the terminal (Claude doesn't always show it)
 	autoAnswer := ""
 	if compact == "yes" {
 		autoAnswer = `
@@ -137,10 +152,10 @@ tell application "iTerm2"
 		create tab with default profile
 		delay 1
 		tell current session
-			write text "pokegent %s -r %s"%s
+			write text "pokegent %s -r %s%s"%s
 		end tell
 	end tell
-end tell`, safeProfile, safeSession, autoAnswer)
+end tell`, safeProfile, safeSession, pgidArg, autoAnswer)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
@@ -219,7 +234,9 @@ tell application "iTerm2"
 				if targetID is not "" and (id of s) = targetID then
 					tell s to write text (character id 21) newline NO
 					delay 0.05
-					tell s to write text "%s"
+					tell s to write text "%s" newline NO
+					delay 0.05
+					tell s to write text (character id 13) newline NO
 					return
 				end if
 			end repeat
@@ -231,9 +248,11 @@ tell application "iTerm2"
 			repeat with t in tabs of w
 				repeat with s in sessions of t
 					if tty of s = targetTTY then
-						tell s to write text (character id 21)
+						tell s to write text (character id 21) newline NO
 						delay 0.05
-						tell s to write text "%s"
+						tell s to write text "%s" newline NO
+						delay 0.05
+						tell s to write text (character id 13) newline NO
 						return
 					end if
 				end repeat
