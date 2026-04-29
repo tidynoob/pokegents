@@ -266,6 +266,44 @@ export default function App() {
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
   }
+  // CMD-hold overlay: shows numbered shortcuts on agent cards.
+  // CMD+1..9 opens the chat panel for that agent.
+  const [cmdHeld, setCmdHeld] = useState(false)
+  const gridIdsRef = useRef<string[]>([])
+  const agentMapRef = useRef<Record<string, AgentState>>({})
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => {
+      if (e.key === 'Meta') setCmdHeld(true)
+      // CMD+1..9 → open agent at that grid position
+      if (e.metaKey && e.key >= '1' && e.key <= '9') {
+        e.preventDefault()
+        const idx = parseInt(e.key) - 1
+        const ids = gridIdsRef.current
+        const agentIds = ids.filter(id => !id.startsWith('town') && !id.startsWith('group:'))
+        const targetId = agentIds[idx]
+        if (targetId) {
+          const agent = agentMapRef.current[targetId]
+          if (agent?.interface === 'chat') {
+            setChatAgentId(targetId)
+          } else if (agent) {
+            focusAgent(targetId)
+          }
+        }
+      }
+    }
+    const onUp = (e: KeyboardEvent) => {
+      if (e.key === 'Meta') setCmdHeld(false)
+    }
+    const onBlur = () => setCmdHeld(false)
+    window.addEventListener('keydown', onDown)
+    window.addEventListener('keyup', onUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onDown)
+      window.removeEventListener('keyup', onUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [])
   const settingsRef = useRef<HTMLDivElement>(null)
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [activity, setActivity] = useState<ActivityEntry[]>([])
@@ -542,6 +580,21 @@ export default function App() {
     cardsPerCol: settings.cardsPerCol ?? 3,
     gap: settings.cardGap ?? 8,
   })
+  // Keep gridIdsRef in sync for the CMD+N keydown handler closure.
+  // Use effectiveOrder (visual grid order) not gridIds (insertion order).
+  const visualOrder = gridEngine.effectiveOrder
+  useEffect(() => { gridIdsRef.current = visualOrder }, [visualOrder])
+  // Map each agent grid ID to its 1-based shortcut index (skipping town/group).
+  const cmdIndexMap = useMemo(() => {
+    const m: Record<string, number> = {}
+    let idx = 1
+    for (const id of visualOrder) {
+      if (id === 'town' || id.startsWith('group:')) continue
+      m[id] = idx++
+    }
+    return m
+  }, [visualOrder])
+
   // Show header when cells are tall enough for standard mode
   const showHeader = gridEngine.cellH >= 140
   const isCompact = gridEngine.cellH < 120
@@ -624,6 +677,8 @@ export default function App() {
     }
     return m
   }, [agents])
+  // Keep agentMapRef in sync for the CMD+N keydown handler.
+  useEffect(() => { agentMapRef.current = agentMap }, [agentMap])
 
   return (
     <>
@@ -876,6 +931,7 @@ export default function App() {
                   }
                 }}
                 glowActive={isActiveChatTarget}
+                cmdIndex={cmdHeld ? cmdIndexMap[aid] : undefined}
                 mode={cardMode}
                 connectedAgents={connectedAgentsMap[aid] || connectedAgentsMap[agent.session_id]}
                 spriteOverride={agent.sprite}

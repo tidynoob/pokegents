@@ -718,7 +718,12 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: text }),
       })
-      if (!r.ok) {
+      if (r.ok) {
+        // Optimistic busy — don't wait for the SSE state event which can
+        // arrive late, especially right after a Ctrl+C cancel.
+        setOptimisticBusy(true)
+        setOptimisticBusySince(new Date().toISOString())
+      } else {
         const msg = await r.text()
         appendEntry({ kind: 'system', id: `e-${turnIdRef.current++}`, text: `Error: ${msg}` })
       }
@@ -900,7 +905,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
               While only thoughts are streaming, the indicator owns them
               behind a click-to-expand toggle so the user sees one row
               instead of two. */}
-          {isBusy && !lastEntryIsCurrentAssistantMessage(entries) && (
+          {isBusy && (
             <ThinkingIndicator
               busySince={busySinceTs}
               detail={agent.detail}

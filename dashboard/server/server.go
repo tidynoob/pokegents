@@ -92,10 +92,12 @@ func NewServer(cfg Config) (*Server, error) {
 	notifier := NewNotifier(cfg.WebDir, cfg.DataDir)
 	terminal := NewTerminal()
 
-	// Services
+	// Services. Wake callback is wired below once the runtime registry is
+	// built — using a setter avoids reordering the rest of bootstrap and
+	// lets the closure capture `s` so it always sees the latest registry.
 	msgSvc := services.NewMessagingService(
 		fileStore.Messages,
-		terminal.WriteText,
+		nil,
 		func(id string) *services.AgentInfo {
 			a := state.GetAgent(id)
 			if a == nil {
@@ -150,6 +152,22 @@ func NewServer(cfg Config) (*Server, error) {
 		"iterm2": NewITerm2Runtime(state, terminal),
 		"chat":   NewChatRuntime(s.chatMgr),
 	}
+
+	// Wire the messaging-service wake callback now that the registry exists.
+	// Dispatches per-agent based on `agent.Interface` — iterm2 types the
+	// trigger phrase into the TTY, chat sends an ACP prompt. This was the
+	// missing piece that broke nudges for chat agents.
+	msgSvc.SetWake(func(pgid string) error {
+		a := state.GetAgent(pgid)
+		if a == nil {
+			return nil
+		}
+		rt, err := s.runtimes.For(a.Interface)
+		if err != nil {
+			return err
+		}
+		return rt.CheckMessages(context.Background(), pgid)
+	})
 
 	s.routes()
 	return s, nil

@@ -113,6 +113,8 @@ interface AgentCardProps {
   /** When true, shows a brief accent-blue glow ring to indicate this card's
    *  chat panel is active on the right. */
   glowActive?: boolean
+  /** When set, shows a CMD+N shortcut overlay on the card. */
+  cmdIndex?: number
 }
 
 const HIDE_DETAILS = new Set(['finished', 'session started', 'processing prompt'])
@@ -126,7 +128,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive, cmdIndex }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -214,6 +216,21 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             className="card-done-flash absolute inset-0 rounded-lg pointer-events-none group-hover:hidden"
             style={{ background: 'rgba(88, 216, 152, 0.15)' }}
           />
+        )}
+
+        {/* CMD shortcut overlay */}
+        {cmdIndex != null && cmdIndex <= 9 && (
+          <div className="absolute inset-0 rounded-lg flex flex-col items-center justify-center gap-2 pointer-events-none z-30" style={{ background: 'rgba(0,0,0,0.55)' }}>
+            <span className="text-[24px] font-pixel text-white pixel-shadow" style={{ textShadow: '0 0 12px rgba(248,216,48,0.6)' }}>
+              ⌘{cmdIndex}
+            </span>
+            {glowActive && (
+              <div className="flex flex-col gap-1">
+                {isBusy && <span className="text-[8px] font-pixel text-white/60">⌃C cancel</span>}
+                <span className="text-[8px] font-pixel text-white/60">⌘F search</span>
+              </div>
+            )}
+          </div>
         )}
 
         {/* Toast overlay */}

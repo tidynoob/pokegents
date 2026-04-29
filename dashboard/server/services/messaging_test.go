@@ -10,10 +10,11 @@ func newTestMessaging(t *testing.T) (*MessagingService, string) {
 	dir := t.TempDir()
 	fs := store.NewFileStore(dir)
 	var nudgedSessions []string
-	writeText := func(itermID, tty, text string) error {
-		nudgedSessions = append(nudgedSessions, tty)
+	wake := func(pgid string) error {
+		nudgedSessions = append(nudgedSessions, pgid)
 		return nil
 	}
+	_ = nudgedSessions // kept for future assertions; compiler-quiet for now
 	agents := map[string]*AgentInfo{
 		"agent-aaa-1111": {State: "done", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-a", LastUpdated: "2020-01-01T00:00:00Z"},
 		"agent-bbb-2222": {State: "busy", IsAlive: true, TTY: "/dev/ttys002", ITermSessionID: "iterm-b"},
@@ -21,7 +22,7 @@ func newTestMessaging(t *testing.T) (*MessagingService, string) {
 	}
 	getAgent := func(id string) *AgentInfo { return agents[id] }
 
-	svc := NewMessagingService(fs.Messages, writeText, getAgent, nil)
+	svc := NewMessagingService(fs.Messages, wake, getAgent, nil)
 	return svc, dir
 }
 

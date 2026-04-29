@@ -10,15 +10,19 @@ import (
 	"pokegents/dashboard/server/store"
 )
 
-// WriteTextFunc is a callback for typing text into an agent's terminal.
-// Injected by the server — keeps messaging free of terminal imports.
-type WriteTextFunc func(iTermSessionID, tty, text string) error
+// WakeFunc tells an idle agent it has new messages waiting. The server
+// dispatches through the Runtime registry — iterm2 types "check messages"
+// into the TTY, chat sends an ACP prompt. Keeps messaging free of runtime
+// imports.
+type WakeFunc func(pgid string) error
 
 // AgentLookupFunc returns agent state for nudge decisions.
 // Injected by the server — keeps messaging free of state manager imports.
 type AgentLookupFunc func(sessionID string) *AgentInfo
 
-// IsSessionFocusedFunc checks if a terminal session is currently focused by the user.
+// IsSessionFocusedFunc checks if a terminal session is currently focused by
+// the user. Only meaningful for iterm2 agents; nil for chat (chat agents
+// have no TTY-focus concept).
 type IsSessionFocusedFunc func(iTermSessionID, tty string) bool
 
 // AgentInfo is the minimal agent state the nudger needs for its guards.
@@ -33,7 +37,7 @@ type AgentInfo struct {
 // MessagingService consolidates message routing, delivery, budget, and nudging.
 type MessagingService struct {
 	store            store.MessageStore
-	writeText        WriteTextFunc
+	wake             WakeFunc
 	getAgent         AgentLookupFunc
 	isSessionFocused IsSessionFocusedFunc
 
@@ -49,10 +53,12 @@ type MessagingService struct {
 }
 
 // NewMessagingService creates a messaging service with injected dependencies.
-func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgent AgentLookupFunc, isFocused IsSessionFocusedFunc) *MessagingService {
+// `wake` may be nil at construction and set later via SetWake — useful when
+// the runtime registry isn't built yet at messaging-service-init time.
+func NewMessagingService(ms store.MessageStore, wake WakeFunc, getAgent AgentLookupFunc, isFocused IsSessionFocusedFunc) *MessagingService {
 	return &MessagingService{
 		store:            ms,
-		writeText:        writeText,
+		wake:             wake,
 		getAgent:         getAgent,
 		isSessionFocused: isFocused,
 		pending:          make(map[string]*time.Timer),
@@ -63,6 +69,15 @@ func NewMessagingService(ms store.MessageStore, writeText WriteTextFunc, getAgen
 		minIdle:          1 * time.Second,
 		maxFocusRetries:  3,
 	}
+}
+
+// SetWake installs (or replaces) the wake callback. Safe to call after the
+// service is constructed — used by the server to defer wiring until after
+// the runtime registry is built.
+func (s *MessagingService) SetWake(fn WakeFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wake = fn
 }
 
 // Send stores a message and returns whether the recipient should be nudged.
@@ -199,14 +214,13 @@ func (s *MessagingService) executeNudge(sessionID string) {
 		}
 	}
 
-	if agent.ITermSessionID == "" && agent.TTY == "" {
-		log.Printf("nudger: skip %s — no iTerm session or TTY", sessionID[:8])
-		return
-	}
-
-	// Don't nudge if user is actively typing in this terminal — but limit retries.
-	// After maxFocusRetries deferrals, nudge anyway (Ctrl+U makes it safe).
-	if s.isSessionFocused != nil && s.isSessionFocused(agent.ITermSessionID, agent.TTY) {
+	// Iterm2-specific guard: if the user is actively typing in the agent's
+	// terminal, defer the nudge (don't clobber their in-progress prompt).
+	// Only meaningful when we have a TTY/iTerm sid — chat agents have neither
+	// and skip this branch entirely. After maxFocusRetries deferrals, nudge
+	// anyway (Ctrl+U makes it safe).
+	hasTTY := agent.ITermSessionID != "" || agent.TTY != ""
+	if hasTTY && s.isSessionFocused != nil && s.isSessionFocused(agent.ITermSessionID, agent.TTY) {
 		s.mu.Lock()
 		retries := s.focusRetries[sessionID]
 		if retries < s.maxFocusRetries {
@@ -227,22 +241,21 @@ func (s *MessagingService) executeNudge(sessionID string) {
 	s.mu.Lock()
 	s.lastNudge[sessionID] = time.Now()
 	delete(s.focusRetries, sessionID)
+	wake := s.wake
 	s.mu.Unlock()
 
 	short := sessionID
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	itermShort := agent.ITermSessionID
-	if len(itermShort) > 8 {
-		itermShort = itermShort[:8]
-	}
-	log.Printf("nudger: NUDGING %s (iTerm=%s, TTY=%s)", short, itermShort, agent.TTY)
+	log.Printf("nudger: NUDGING %s", short)
 
-	if s.writeText != nil {
-		if err := s.writeText(agent.ITermSessionID, agent.TTY, "check messages"); err != nil {
-			log.Printf("nudger: terminal error for %s: %v", short, err)
-		}
+	if wake == nil {
+		log.Printf("nudger: no wake func wired for %s", short)
+		return
+	}
+	if err := wake(sessionID); err != nil {
+		log.Printf("nudger: wake error for %s: %v", short, err)
 	}
 }
 
