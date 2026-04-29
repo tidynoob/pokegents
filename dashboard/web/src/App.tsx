@@ -267,13 +267,15 @@ export default function App() {
     window.addEventListener('pointerup', onUp)
   }
   // CMD-hold overlay: shows numbered shortcuts on agent cards.
-  // CMD+1..9 opens the chat panel for that agent.
-  const [cmdHeld, setCmdHeld] = useState(false)
+  // CMD+1..9 opens the chat panel for that agent. We used to also show a
+  // dimming "⌘1, ⌘2…" overlay over each card while Meta was held; that was
+  // removed because Cmd is the modifier for macOS screenshots (Cmd+Shift+4)
+  // and the overlay flashed onto every card the moment you held Cmd, ruining
+  // captures.
   const gridIdsRef = useRef<string[]>([])
   const agentMapRef = useRef<Record<string, AgentState>>({})
   useEffect(() => {
     const onDown = (e: KeyboardEvent) => {
-      if (e.key === 'Meta') setCmdHeld(true)
       // CMD+1..9 → open agent at that grid position
       if (e.metaKey && e.key >= '1' && e.key <= '9') {
         e.preventDefault()
@@ -291,17 +293,9 @@ export default function App() {
         }
       }
     }
-    const onUp = (e: KeyboardEvent) => {
-      if (e.key === 'Meta') setCmdHeld(false)
-    }
-    const onBlur = () => setCmdHeld(false)
     window.addEventListener('keydown', onDown)
-    window.addEventListener('keyup', onUp)
-    window.addEventListener('blur', onBlur)
     return () => {
       window.removeEventListener('keydown', onDown)
-      window.removeEventListener('keyup', onUp)
-      window.removeEventListener('blur', onBlur)
     }
   }, [])
   const settingsRef = useRef<HTMLDivElement>(null)
@@ -584,16 +578,6 @@ export default function App() {
   // Use effectiveOrder (visual grid order) not gridIds (insertion order).
   const visualOrder = gridEngine.effectiveOrder
   useEffect(() => { gridIdsRef.current = visualOrder }, [visualOrder])
-  // Map each agent grid ID to its 1-based shortcut index (skipping town/group).
-  const cmdIndexMap = useMemo(() => {
-    const m: Record<string, number> = {}
-    let idx = 1
-    for (const id of visualOrder) {
-      if (id === 'town' || id.startsWith('group:')) continue
-      m[id] = idx++
-    }
-    return m
-  }, [visualOrder])
 
   // Show header when cells are tall enough for standard mode
   const showHeader = gridEngine.cellH >= 140
@@ -931,7 +915,6 @@ export default function App() {
                   }
                 }}
                 glowActive={isActiveChatTarget}
-                cmdIndex={cmdHeld ? cmdIndexMap[aid] : undefined}
                 mode={cardMode}
                 connectedAgents={connectedAgentsMap[aid] || connectedAgentsMap[agent.session_id]}
                 spriteOverride={agent.sprite}
