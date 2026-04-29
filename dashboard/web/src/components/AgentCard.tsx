@@ -202,7 +202,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         style={{
           ...cardStyle,
           ...(agent.ephemeral ? { borderStyle: 'dashed' } : {}),
-          ...(glowActive ? { boxShadow: '0 0 0 2px rgba(88,160,216,0.7), 0 0 12px rgba(88,160,216,0.3)' } : {}),
+          ...(glowActive ? { boxShadow: '0 0 0 2px rgba(248,216,48,0.6), 0 0 16px rgba(248,216,48,0.2)' } : {}),
         }}
         onMouseEnter={() => {
           if (isDone && !flashDismissed) setFlashDismissed(true)
