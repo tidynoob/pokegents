@@ -23,12 +23,14 @@
 //   killed     KillShell returned successfully
 
 export type BgShellStatus = 'running' | 'completed' | 'failed' | 'killed'
+export type BgTaskType = 'shell' | 'agent' | 'monitor'
 
 export interface BgShell {
   taskId: string
   command: string
   startedAt: number
   status: BgShellStatus
+  type?: BgTaskType
   endedAt?: number
   /** Last known stdout snippet, populated from BashOutput results. */
   lastOutput?: string
@@ -71,6 +73,35 @@ export function isBackgroundSpawn(kind: string | undefined, rawInput: unknown): 
     return (rawInput as Record<string, unknown>).run_in_background === true
   }
   return false
+}
+
+/** Detect Agent (subagent) tool calls — these run in the background. */
+export function isAgentSpawn(title: string | undefined, rawInput: unknown, kind?: string): boolean {
+  if (kind === 'think') return true
+  const t = (title || '').toLowerCase()
+  if (t.includes('agent')) return true
+  if (rawInput && typeof rawInput === 'object') {
+    const inp = rawInput as Record<string, unknown>
+    if (inp.subagent_type || inp.prompt) return true
+    if (inp.run_in_background === true && (inp.description || inp.prompt)) return true
+  }
+  return false
+}
+
+/** Detect Monitor tool calls — long-running background watchers. */
+export function isMonitorSpawn(title: string | undefined, kind: string | undefined): boolean {
+  const t = (title || '').toLowerCase()
+  return t.includes('monitor') || (kind === 'other' && t.includes('watch'))
+}
+
+/** Extract a short label for a background task from its rawInput. */
+export function extractBgLabel(title: string | undefined, rawInput: unknown): string {
+  if (rawInput && typeof rawInput === 'object') {
+    const inp = rawInput as Record<string, unknown>
+    if (typeof inp.description === 'string' && inp.description) return inp.description
+    if (typeof inp.subagent_type === 'string') return `${inp.subagent_type} agent`
+  }
+  return title || 'background task'
 }
 
 /** Decide whether a tool_call is a BashOutput / KillShell follow-up.

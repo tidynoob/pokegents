@@ -846,6 +846,7 @@ export default function App() {
                     onSelect={(a) => focusAgent(stableId(a))}
                     selectedId={null}
                     debug={settings.townDebug}
+                    newMessage={newMessage}
                   />
                 </div>
               )

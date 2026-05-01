@@ -158,7 +158,7 @@ export function PromptInput({
         onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); submit() }}
         onClick={(e) => e.stopPropagation()}
         data-no-drag
-        className="mt-1.5 shrink-0"
+        className="mt-1 shrink-0"
       >
         <textarea
           ref={ref}
@@ -170,8 +170,8 @@ export function PromptInput({
           rows={1}
           placeholder={placeholder ?? 'What will you do?'}
           disabled={disabled}
-          className="w-full gba-dialog text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 text-gba-dialog-border placeholder:text-gba-dialog-border/30 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border disabled:opacity-50"
-          style={{ minHeight: 28, maxHeight }}
+          className="w-full gba-dialog-dark text-[10px] leading-[14px] font-mono rounded-md px-2 py-0.5 placeholder:text-white/25 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border disabled:opacity-50"
+          style={{ minHeight: 22, maxHeight }}
         />
       </form>
     )
@@ -226,17 +226,17 @@ export function PromptInput({
         onPaste={handlePaste}
         onKeyDown={handleKey}
         onInput={handleInput}
-        placeholder={placeholder ?? 'What will you do?'}
+        placeholder={isBusy ? 'Agent is busy. Messages will be added to queue.' : (placeholder ?? 'What will you do?')}
         disabled={disabled}
-        className="flex-1 min-w-0 gba-dialog-dark text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 placeholder:text-white/25 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border disabled:opacity-50"
+        className={`flex-1 min-w-0 gba-dialog-dark text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 placeholder:text-white/25 outline-none transition-colors resize-none box-border disabled:opacity-50 ${isBusy ? 'border-accent-red/50 focus:border-accent-red/70' : 'focus:border-[#68a8d8]'}`}
         style={{ minHeight: 28, maxHeight }}
       />
       {showSendButton && (
         <button
           type="submit"
           disabled={disabled || !value.trim()}
-          className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors disabled:opacity-50"
-        >SEND</button>
+          className={`text-[7px] font-pixel px-3 py-1.5 transition-colors disabled:opacity-50 ${isBusy ? 'gba-button-red' : 'gba-button'}`}
+        >{isBusy ? 'QUEUE' : 'SEND'}</button>
       )}
     </form>
   )

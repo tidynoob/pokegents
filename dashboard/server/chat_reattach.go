@@ -70,6 +70,12 @@ func (s *Server) reattachChatSessions() {
 		return
 	}
 	log.Printf("chat-reattach: %d chat agent(s) need reattachment", len(pending))
+	// Touch running files so CleanStale's 30s grace period protects them
+	// while we kill orphans and respawn ACP processes.
+	now := time.Now()
+	for _, t := range pending {
+		os.Chtimes(t.jsonPath, now, now)
+	}
 	for _, t := range pending {
 		killOrphanChatBackends(t.rs.SessionID)
 	}
@@ -82,10 +88,15 @@ func (s *Server) reattachChatSessions() {
 		waitForOrphansGone(t.rs.SessionID, reattachOrphanKillTimeout)
 	}
 	for _, t := range pending {
+		// Re-touch before each spawn — the 30s grace period may have
+		// expired if earlier spawns took a while.
+		os.Chtimes(t.jsonPath, time.Now(), time.Now())
 		if err := s.relaunchChatSession(t.rs); err != nil {
 			log.Printf("chat-reattach[%s]: relaunch failed: %v", shortChat(t.rs.PokegentID), err)
 			continue
 		}
+		// Touch again after spawn so CleanStale sees a fresh mtime
+		os.Chtimes(t.jsonPath, time.Now(), time.Now())
 		log.Printf("chat-reattach[%s]: re-spawned chat backend (resumed session %s)",
 			shortChat(t.rs.PokegentID), shortChat(t.rs.SessionID))
 	}
@@ -223,10 +234,15 @@ func waitForOrphansGone(claudeSessionID string, timeout time.Duration) {
 // config, then project config. Either field may end up empty if no
 // config in the chain provides one — caller passes the empty values to
 // the chat backend, which falls back to SDK defaults.
+const defaultChatModel = "claude-opus-4-6[1m]"
+
 func (s *Server) resolveModelEffort(rsModel, rsEffort, role, project string) (model, effort string) {
 	model = rsModel
 	effort = rsEffort
 	if s.fileStore == nil {
+		if model == "" {
+			model = defaultChatModel
+		}
 		return
 	}
 	if role != "" {
@@ -248,6 +264,9 @@ func (s *Server) resolveModelEffort(rsModel, rsEffort, role, project string) (mo
 				effort = p.Effort
 			}
 		}
+	}
+	if model == "" {
+		model = defaultChatModel
 	}
 	return
 }
@@ -277,6 +296,19 @@ func (s *Server) relaunchChatSession(rs store.RunningSession) error {
 	// config (mirrors state.go's rebuildAgents enrichment) so the chat
 	// backend gets the same values pokegent.sh resolves for iterm2.
 	model, effort := s.resolveModelEffort(rs.Model, rs.Effort, role, project)
+
+	// Persist resolved model back to running file so the dashboard UI
+	// shows the correct context window (otherwise null → SDK default 200k).
+	if model != rs.Model || effort != rs.Effort {
+		rs.Model = model
+		rs.Effort = effort
+		runningGlob := filepath.Join(s.dataDir, "running", "*-"+rs.PokegentID+".json")
+		if rfMatches, _ := filepath.Glob(runningGlob); len(rfMatches) > 0 {
+			if out, err := json.MarshalIndent(rs, "", "  "); err == nil {
+				_ = os.WriteFile(rfMatches[0], out, 0o644)
+			}
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

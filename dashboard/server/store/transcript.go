@@ -439,8 +439,8 @@ func (tr *TranscriptReader) parseAssistantEntry(raw map[string]any, uuid, timest
 			if input, ok := m["input"].(map[string]any); ok {
 				j, _ := json.Marshal(input)
 				inputSummary = string(j)
-				if len(inputSummary) > 200 {
-					inputSummary = inputSummary[:200] + "..."
+				if len(inputSummary) > 2000 {
+					inputSummary = inputSummary[:2000] + "..."
 				}
 			}
 			entry.Blocks = append(entry.Blocks, ContentBlock{Type: "tool_use", ID: blockID, Name: name, Input: inputSummary})

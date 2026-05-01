@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { fetchTranscript, TranscriptEntry, renameAgent, setSprite, fetchProjectList, fetchRoleList, ProjectInfo, RoleInfo } from '../api'
@@ -18,6 +18,9 @@ import {
   BgShell,
   extractTaskId,
   isBackgroundSpawn,
+  isAgentSpawn,
+  isMonitorSpawn,
+  extractBgLabel,
   followupTool,
   extractBashCommand,
   readToolText,
@@ -68,11 +71,11 @@ interface PermissionOption {
 }
 
 type Entry =
-  | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string; thoughts: string }
-  | { kind: 'tool'; id: string; data: ToolCall }
-  | { kind: 'system'; id: string; text: string }
-  | { kind: 'permission'; id: string; requestId: number; toolCall?: ToolCall; options: PermissionOption[]; resolved?: 'allowed' | 'denied' | 'pending' }
+  | { kind: 'user'; id: string; text: string; ts?: number }
+  | { kind: 'assistant'; id: string; text: string; thoughts: string; ts?: number }
+  | { kind: 'tool'; id: string; data: ToolCall; ts?: number }
+  | { kind: 'system'; id: string; text: string; ts?: number }
+  | { kind: 'permission'; id: string; requestId: number; toolCall?: ToolCall; options: PermissionOption[]; resolved?: 'allowed' | 'denied' | 'pending'; ts?: number }
 
 // renderRawPayload turns ACP's opaque rawInput/rawOutput into something
 // readable. ACP doesn't pin a type — it could be a string, an object, or
@@ -115,12 +118,27 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const editNameRef = useRef<HTMLInputElement>(null)
   const turnIdRef = useRef(0)
-  // Queued messages: prompts sent while the agent is busy. They're held in
-  // ACP's in-memory queue and won't appear in the transcript until processed.
-  // Show them above the input so the user knows they were received.
+  // Queued messages: prompts the user typed while the agent was busy.
+  // Held locally — NOT sent to the server until the current turn finishes.
+  // Follows the Zed pattern: one prompt in flight at a time, queue in UI.
   const [queuedMessages, setQueuedMessages] = useState<string[]>([])
+  // SSE-driven busy state — single source of truth from the Go backend's
+  // Prompt() lifecycle (busyCount > 0 → busy, busyCount == 0 → done).
+  const [sseBusy, setSseBusy] = useState(false)
+  const [sseBusySince, setSseBusySince] = useState<string | null>(null)
   const allCaps = useRuntimeCapabilities()
   const caps = capsFor(allCaps, agent.interface)
+
+  // Timestamps: false | true | 'debug' (debug shows table borders)
+  const [showTimestamps, setShowTimestamps] = useState<boolean | 'debug'>(() => localStorage.getItem('pokegents-show-timestamps') !== 'false')
+
+  // Debug panel
+  const [debugOpen, setDebugOpen] = useState(false)
+  const debugLogRef = useRef<string[]>([])
+  const sseReconnectRef = useRef<(() => void) | null>(null)
+  const addDebugLog = useCallback((msg: string) => {
+    debugLogRef.current = [...debugLogRef.current.slice(-99), `${new Date().toLocaleTimeString()} ${msg}`]
+  }, [])
 
   // Search state
   const [searchOpen, setSearchOpen] = useState(false)
@@ -150,15 +168,6 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
     }
   }
 
-  // Local optimistic busy state — set the moment the SSE `state` event
-  // fires from the chat backend (~10ms after Prompt() starts) so the UI
-  // flips to BUSY instantly. The canonical agent.state from the status
-  // pipeline takes ~50-200ms to propagate (file write → fsnotify →
-  // state.go → SSE state_update), which is enough lag to look broken.
-  // We OR the two: local optimistic for instant feedback, canonical as
-  // the slower-but-authoritative truth.
-  const [optimisticBusy, setOptimisticBusy] = useState(false)
-  const [optimisticBusySince, setOptimisticBusySince] = useState<string | null>(null)
 
   // Background shells the agent has spawned via Bash(run_in_background=true).
   // Tracked separately from the transcript so the StatusBar below the input
@@ -206,20 +215,13 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
     return () => clearTimeout(t)
   }, [reconfiguring])
 
-  // SSE-drop fallback: if the optimistic busy flag stuck (we missed the
-  // 'state':done event because the SSE connection dropped mid-turn), the
-  // canonical agent.state arriving as idle/done/error from the dashboard's
-  // own state_update stream is our authoritative reset. Without this, the
-  // BUSY badge could stick forever after a connection blip.
-  useEffect(() => {
-    if (agent.state && agent.state !== 'busy') {
-      setOptimisticBusy(false)
-      setOptimisticBusySince(null)
-    }
-  }, [agent.state])
-
-  const isBusy = optimisticBusy || agent.state === 'busy'
-  const busySinceTs = optimisticBusySince || agent.busy_since
+  // Busy = Chat SSE says busy, OR dashboard SSE says busy (fallback for
+  // when the chat SSE drops). Chat SSE is faster (~10ms) but dashboard SSE
+  // (~50-200ms) is the safety net. Both derive from the same Go-side
+  // busyCount, so they always converge.
+  const isBusy = sseBusy || agent.state === 'busy'
+  const busySinceTs = sseBusySince || agent.busy_since
+  const bgToolIds = useMemo(() => new Set(bgShells.keys()), [bgShells])
   // Reconfiguring overrides connecting/busy when active — the user
   // triggered the restart, so the disconnect dance shouldn't read as
   // failure or busy work.
@@ -242,8 +244,9 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
     setEntries([])
     setStreamReady(false)
     setTitle('')
-    setOptimisticBusy(false)
-    setOptimisticBusySince(null)
+    setSseBusy(false)
+    setSseBusySince(null)
+    setQueuedMessages([])
     setBgShells(new Map())
     pendingSpawnRef.current = new Map()
     reconfigureRef.current = null
@@ -292,89 +295,221 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
       if (seeded.length === 0) return
       setEntries(prev => (prev.length > 0 ? prev : seeded))
       turnIdRef.current = seeded.length
+      // Background tasks are tracked via live claude/task_started and
+      // claude/task_notification SSE events from our ACP patch — no
+      // transcript scanning needed.
     }).catch(() => { /* no transcript yet — fine */ })
     return () => { cancelled = true }
   }, [agent.session_id])
 
-  // SSE subscription.
+  // SSE subscription with auto-reconnect. Browser's native EventSource
+  // gives up on non-200 (e.g. 404 during a brief cancel/restart window).
+  // We wrap it so transient 404s don't permanently kill the stream.
   useEffect(() => {
     if (!pokegentId) return
-    const es = new EventSource(`/api/chat/${pokegentId}/stream`)
-    es.onopen = () => {
-      setStreamReady(true)
-      // If we're in a reconfigure window, this onopen is the new session
-      // coming up after a /model or /effort restart. Emit the queued
-      // confirmation entry so the user sees clear closure.
-      const rc = reconfigureRef.current
-      if (rc && Date.now() < rc.endsAt) {
-        if (rc.pendingMsg) {
-          appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: rc.pendingMsg })
+    let closed = false
+    let currentEs: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let lastEventAt = Date.now()
+    let healthTimer: ReturnType<typeof setInterval> | null = null
+
+    function touch() { lastEventAt = Date.now() }
+
+    function connect() {
+      if (closed) return
+      if (healthTimer) clearInterval(healthTimer)
+      const es = new EventSource(`/api/chat/${pokegentId}/stream`)
+      currentEs = es
+
+      es.onopen = () => {
+        touch()
+        addDebugLog('SSE: connected')
+        setStreamReady(true)
+        const rc = reconfigureRef.current
+        if (rc && Date.now() < rc.endsAt) {
+          if (rc.pendingMsg) {
+            appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: rc.pendingMsg })
+          }
+          reconfigureRef.current = null
+          setReconfiguring(false)
         }
-        reconfigureRef.current = null
-        setReconfiguring(false)
       }
+
+      es.addEventListener('heartbeat', () => { touch() })
+      es.addEventListener('session_update', (e) => {
+        touch()
+        try {
+          const env = JSON.parse((e as MessageEvent).data) as SessionUpdateEnvelope
+          applyUpdate(env.update)
+        } catch (err) { console.warn('chat: bad session_update', err) }
+      })
+      es.addEventListener('permission_request', (e) => {
+        touch()
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as {
+            request_id: number
+            toolCall?: ToolCall
+            options: PermissionOption[]
+          }
+          if (data.request_id == null || !Array.isArray(data.options)) return
+          setEntries(prev => {
+            if (prev.some(en => en.kind === 'permission' && en.requestId === data.request_id)) return prev
+            return [...prev, {
+              kind: 'permission',
+              id: `perm-${data.request_id}`,
+              requestId: data.request_id,
+              toolCall: data.toolCall,
+              options: data.options,
+              resolved: 'pending',
+            }]
+          })
+        } catch { /* ignore */ }
+      })
+      es.addEventListener('state', (e) => {
+        touch()
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as { state?: string }
+          addDebugLog(`SSE state: ${data?.state}`)
+          if (data?.state === 'busy') {
+            setSseBusy(true)
+            setSseBusySince(new Date().toISOString())
+          }
+          if (data?.state === 'idle' || data?.state === 'done') {
+            setSseBusy(false)
+            setSseBusySince(null)
+            setQueuedMessages(prev => {
+              if (prev.length === 0) return prev
+              const [next, ...rest] = prev
+              appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text: next })
+              fetch(`/api/sessions/${pokegentId}/prompt`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: next }),
+              }).catch(() => {})
+              return rest
+            })
+          }
+        } catch { /* ignore */ }
+      })
+      es.addEventListener('exit', () => {
+        touch()
+        const rc = reconfigureRef.current
+        const intentional = rc && Date.now() < rc.endsAt
+        if (!intentional) {
+          appendEntry({ kind: 'system', id: `exit-${turnIdRef.current++}`, text: 'Chat process exited.' })
+        }
+        setStreamReady(false)
+      })
+      // Claude SDK extension events forwarded by our ACP patch.
+      es.addEventListener('claude/task_started', (e) => {
+        touch()
+        try {
+          const d = JSON.parse((e as MessageEvent).data)
+          setBgShells(prev => {
+            if (prev.has(d.taskId)) return prev
+            const out = new Map(prev)
+            out.set(d.taskId, {
+              taskId: d.taskId,
+              command: d.description || d.workflowName || 'background task',
+              startedAt: Date.now(),
+              status: 'running',
+              type: d.taskType === 'local_bash' ? 'shell' : 'agent',
+            })
+            return out
+          })
+        } catch {}
+      })
+      es.addEventListener('claude/task_notification', (e) => {
+        touch()
+        try {
+          const d = JSON.parse((e as MessageEvent).data)
+          setBgShells(prev => {
+            const cur = prev.get(d.taskId)
+            if (!cur) return prev
+            const out = new Map(prev)
+            const status = d.status === 'completed' ? 'completed' : d.status === 'stopped' ? 'killed' : 'failed'
+            out.set(d.taskId, { ...cur, status, endedAt: Date.now(), lastOutput: d.summary })
+            return out
+          })
+        } catch {}
+      })
+      es.addEventListener('claude/task_progress', (e) => {
+        touch()
+        try {
+          const d = JSON.parse((e as MessageEvent).data)
+          setBgShells(prev => {
+            const cur = prev.get(d.taskId)
+            if (!cur) return prev
+            const out = new Map(prev)
+            out.set(d.taskId, { ...cur, lastOutput: d.summary || d.description })
+            return out
+          })
+        } catch {}
+      })
+      es.addEventListener('claude/api_retry', (e) => {
+        touch()
+        try {
+          const d = JSON.parse((e as MessageEvent).data)
+          appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: `API retry ${d.attempt}/${d.maxRetries} (${d.error || 'unknown'}) — waiting ${Math.round((d.retryDelayMs || 0) / 1000)}s` })
+        } catch {}
+      })
+      es.addEventListener('claude/rate_limit', (e) => {
+        touch()
+        try {
+          const d = JSON.parse((e as MessageEvent).data)
+          const info = d.rateLimitInfo
+          if (info?.status === 'rejected' || info?.status === 'allowed_warning') {
+            const pct = info.utilization != null ? `${Math.round(info.utilization * 100)}%` : ''
+            let resetStr = ''
+            if (info.resetsAt) {
+              const resetsMs = new Date(info.resetsAt).getTime() - Date.now()
+              resetStr = resetsMs > 0 ? ` — resets in ${Math.ceil(resetsMs / 60000)}m` : ' — resets soon'
+            }
+            appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: `Rate limit ${info.status === 'rejected' ? 'hit' : 'warning'} ${pct}${resetStr}` })
+          }
+        } catch {}
+      })
+      es.onerror = () => {
+        addDebugLog(`SSE error: readyState=${es.readyState}`)
+        if (es.readyState === EventSource.CLOSED) {
+          setStreamReady(false)
+          es.close()
+          if (!closed) {
+            addDebugLog('SSE: retrying in 2s')
+            retryTimer = setTimeout(connect, 2000)
+          }
+        }
+      }
+
+      healthTimer = setInterval(() => {
+        if (Date.now() - lastEventAt > 35_000 && es.readyState !== EventSource.CLOSED) {
+          addDebugLog('SSE: heartbeat timeout, reconnecting')
+          es.close()
+          setStreamReady(false)
+          if (!closed) {
+            retryTimer = setTimeout(connect, 500)
+          }
+        }
+      }, 10_000)
     }
 
-    es.addEventListener('session_update', (e) => {
-      try {
-        const env = JSON.parse((e as MessageEvent).data) as SessionUpdateEnvelope
-        applyUpdate(env.update)
-      } catch (err) { console.warn('chat: bad session_update', err) }
-    })
-    es.addEventListener('permission_request', (e) => {
-      try {
-        const data = JSON.parse((e as MessageEvent).data) as {
-          request_id: number
-          toolCall?: ToolCall
-          options: PermissionOption[]
-        }
-        if (data.request_id == null || !Array.isArray(data.options)) return
-        setEntries(prev => {
-          if (prev.some(en => en.kind === 'permission' && en.requestId === data.request_id)) return prev
-          return [...prev, {
-            kind: 'permission',
-            id: `perm-${data.request_id}`,
-            requestId: data.request_id,
-            toolCall: data.toolCall,
-            options: data.options,
-            resolved: 'pending',
-          }]
-        })
-      } catch { /* ignore */ }
-    })
-    // SSE 'state' events flip optimisticBusy *instantly* — the canonical
-    // agent.state from the status-file pipeline arrives ~50-200ms later.
-    es.addEventListener('state', (e) => {
-      try {
-        const data = JSON.parse((e as MessageEvent).data) as { state?: string }
-        if (data?.state === 'busy') {
-          setOptimisticBusy(true)
-          setOptimisticBusySince(new Date().toISOString())
-          // A new busy state means a queued message was picked up — shift it.
-          setQueuedMessages(prev => prev.length > 0 ? prev.slice(1) : prev)
-        }
-        if (data?.state === 'idle' || data?.state === 'done') {
-          setOptimisticBusy(false)
-          setOptimisticBusySince(null)
-        }
-      } catch { /* ignore */ }
-    })
-    es.addEventListener('exit', () => {
-      // Suppress the alarming "Chat process exited." line during an
-      // intentional reconfigure window — the new session is coming. The
-      // server-side change to handleChatStream returns after `exit` so
-      // the EventSource will auto-reconnect and onopen will fire when
-      // the relaunched session is ready.
-      const rc = reconfigureRef.current
-      const intentional = rc && Date.now() < rc.endsAt
-      if (!intentional) {
-        appendEntry({ kind: 'system', id: `exit-${turnIdRef.current++}`, text: 'Chat process exited.' })
-      }
-      setStreamReady(false)
-    })
-    es.onerror = () => { /* auto-reconnects */ }
+    connect()
 
-    return () => { es.close() }
+    sseReconnectRef.current = () => {
+      addDebugLog('SSE: manual reconnect')
+      currentEs?.close()
+      if (retryTimer) clearTimeout(retryTimer)
+      if (healthTimer) clearInterval(healthTimer)
+      connect()
+    }
+
+    return () => {
+      closed = true
+      sseReconnectRef.current = null
+      if (retryTimer) clearTimeout(retryTimer)
+      if (healthTimer) clearInterval(healthTimer)
+      currentEs?.close()
+    }
   }, [pokegentId])
 
   // Sticky-bottom auto-scroll: only follow new content if the user is
@@ -422,11 +557,8 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         onClose()
         return
       }
-      // Ctrl+C or Ctrl+B cancels/backgrounds the current turn.
-      // During a Bash tool call, the SDK backgrounds the process rather
-      // than killing it — same as Ctrl+B in the Claude terminal.
-      if ((e.key === 'c' || e.key === 'b') && (e.ctrlKey || e.metaKey) && isBusy) {
-        if (e.key === 'c' && window.getSelection()?.toString()) return // don't hijack copy
+      if (e.key === 'c' && (e.ctrlKey || e.metaKey) && isBusy) {
+        if (window.getSelection()?.toString()) return // don't hijack copy
         e.preventDefault()
         cancel()
         appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: 'Interrupted. What would you like me to do?' })
@@ -436,7 +568,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [onClose, isBusy, searchOpen])
 
-  function appendEntry(e: Entry) { setEntries(prev => [...prev, e]) }
+  function appendEntry(e: Entry) { setEntries(prev => [...prev, { ...e, ts: e.ts || Date.now() }]) }
 
   const applyUpdate = useCallback((u: SessionUpdate) => {
     setEntries(prev => {
@@ -449,7 +581,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           if (last && last.kind === 'assistant') {
             next[next.length - 1] = { ...last, text: last.text + t }
           } else {
-            next.push({ kind: 'assistant', id: `a-${turnIdRef.current++}`, text: t, thoughts: '' })
+            next.push({ kind: 'assistant', id: `a-${turnIdRef.current++}`, text: t, thoughts: '', ts: Date.now() })
           }
           return next
         }
@@ -458,7 +590,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           if (last && last.kind === 'assistant') {
             next[next.length - 1] = { ...last, thoughts: last.thoughts + t }
           } else {
-            next.push({ kind: 'assistant', id: `a-${turnIdRef.current++}`, text: '', thoughts: t })
+            next.push({ kind: 'assistant', id: `a-${turnIdRef.current++}`, text: '', thoughts: t, ts: Date.now() })
           }
           return next
         }
@@ -475,22 +607,64 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           if (last && last.kind === 'user' && last.text === ut) {
             return next
           }
-          next.push({ kind: 'user', id: `u-${turnIdRef.current++}`, text: ut })
+          next.push({ kind: 'user', id: `u-${turnIdRef.current++}`, text: ut, ts: Date.now() })
           return next
         }
         case 'tool_call': {
           const tc = u as unknown as ToolCall
-          // Background-shell spawn: the initial tool_call doesn't have the
-          // task_id yet (output isn't populated), but mark this toolCallId
-          // as "pending spawn" so the matching tool_call_update can resolve.
           if (isBackgroundSpawn(tc.kind, tc.rawInput)) {
             pendingSpawnRef.current.set(tc.toolCallId, extractBashCommand(tc.rawInput))
           }
-          next.push({ kind: 'tool', id: tc.toolCallId, data: tc })
+          // Agent subagent spawns run in the background — track immediately
+          if (isAgentSpawn(tc.title, tc.rawInput, tc.kind)) {
+            const label = extractBgLabel(tc.title, tc.rawInput)
+            setBgShells(prev => {
+              if (prev.has(tc.toolCallId)) return prev
+              const out = new Map(prev)
+              out.set(tc.toolCallId, { taskId: tc.toolCallId, command: label, startedAt: Date.now(), status: 'running', type: 'agent' })
+              return out
+            })
+          }
+          // Monitor tool calls are long-running watchers
+          if (isMonitorSpawn(tc.title, tc.kind)) {
+            const label = extractBgLabel(tc.title, tc.rawInput)
+            setBgShells(prev => {
+              if (prev.has(tc.toolCallId)) return prev
+              const out = new Map(prev)
+              out.set(tc.toolCallId, { taskId: tc.toolCallId, command: label, startedAt: Date.now(), status: 'running', type: 'monitor' })
+              return out
+            })
+          }
+          next.push({ kind: 'tool', id: tc.toolCallId, data: tc, ts: Date.now() })
           return next
         }
         case 'tool_call_update': {
           const tc = u as unknown as ToolCall
+          // Background-shell spawn detection: rawInput arrives empty on
+          // the initial tool_call event — the real data only shows up in
+          // tool_call_update. Check here so we actually catch it.
+          if (!pendingSpawnRef.current.has(tc.toolCallId) && isBackgroundSpawn(tc.kind, tc.rawInput)) {
+            pendingSpawnRef.current.set(tc.toolCallId, extractBashCommand(tc.rawInput))
+          }
+          // Agent/Monitor detection on update (rawInput arrives here, not on initial tool_call)
+          if (!bgShells.has(tc.toolCallId) && isAgentSpawn(tc.title, tc.rawInput, tc.kind)) {
+            const label = extractBgLabel(tc.title, tc.rawInput)
+            setBgShells(prev => {
+              if (prev.has(tc.toolCallId)) return prev
+              const out = new Map(prev)
+              out.set(tc.toolCallId, { taskId: tc.toolCallId, command: label, startedAt: Date.now(), status: 'running', type: 'agent' })
+              return out
+            })
+          }
+          if (!bgShells.has(tc.toolCallId) && isMonitorSpawn(tc.title, tc.kind)) {
+            const label = extractBgLabel(tc.title, tc.rawInput)
+            setBgShells(prev => {
+              if (prev.has(tc.toolCallId)) return prev
+              const out = new Map(prev)
+              out.set(tc.toolCallId, { taskId: tc.toolCallId, command: label, startedAt: Date.now(), status: 'running', type: 'monitor' })
+              return out
+            })
+          }
           // Resolve pending background-shell spawns: the update carries
           // the rawOutput / content with the task_id. Promote it into our
           // bgShells map.
@@ -508,6 +682,17 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
                 startedAt: Date.now(),
                 status: 'running',
               })
+              return out
+            })
+          }
+          // Agent/Monitor completion: update bgShells when these finish.
+          if ((tc.status === 'completed' || tc.status === 'failed') && bgShells.has(tc.toolCallId)) {
+            const text = readToolText(tc.content) || (typeof tc.rawOutput === 'string' ? tc.rawOutput : '')
+            setBgShells(prev => {
+              const cur = prev.get(tc.toolCallId)
+              if (!cur || cur.status !== 'running') return prev
+              const out = new Map(prev)
+              out.set(tc.toolCallId, { ...cur, status: tc.status === 'completed' ? 'completed' : 'failed', endedAt: Date.now(), lastOutput: text ? text.slice(0, 200) : cur.lastOutput })
               return out
             })
           }
@@ -562,17 +747,22 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
             const cur = next[idx] as Extract<Entry, { kind: 'tool' }>
             // Merge without overwriting populated fields with empty values.
             // ACP sends multiple updates: one with rawInput/content, another
-            // with status/rawOutput but content=[]. Naive spread would clobber.
+            // with status/rawOutput but content=[]. Intermediary events may
+            // carry null for fields that were populated in earlier events.
             const merged = { ...cur.data } as Record<string, unknown>
             for (const [k, v] of Object.entries(tc)) {
               if (k === 'sessionUpdate') continue
+              // Skip null/undefined — never clobber existing data with nothing.
+              if (v === undefined || v === null) continue
+              // Skip empty arrays when we already have populated arrays.
               if (Array.isArray(v) && v.length === 0 && Array.isArray(merged[k]) && (merged[k] as unknown[]).length > 0) continue
-              if (k === 'rawInput' && typeof v === 'object' && v !== null && Object.keys(v).length === 0 && merged[k] != null && typeof merged[k] === 'object' && Object.keys(merged[k] as object).length > 0) continue
-              if (v !== undefined) merged[k] = v
+              // Skip empty objects when we already have populated objects.
+              if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0 && merged[k] != null && typeof merged[k] === 'object' && Object.keys(merged[k] as object).length > 0) continue
+              merged[k] = v
             }
             next[idx] = { ...cur, data: merged as unknown as ToolCall }
           } else {
-            next.push({ kind: 'tool', id: tc.toolCallId, data: tc })
+            next.push({ kind: 'tool', id: tc.toolCallId, data: tc, ts: Date.now() })
           }
           return next
         }
@@ -691,39 +881,21 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           return
       }
     }
-    // Append the user message locally — the ACP backend does NOT send a
-    // `user_message_chunk` event back to subscribers (verified against
-    // @zed-industries/claude-agent-acp; only agent_message_chunk,
-    // tool_call(_update), usage_update, and state events flow). Without
-    // this local append, two things break:
-    //   1. The user's prompt never appears in the transcript at all.
-    //   2. Consecutive agent_message_chunks across turns merge into one
-    //      assistant entry (because applyUpdate appends to the last
-    //      entry when last.kind === 'assistant') — so "Ready" + "Here." +
-    //      "P" smush into "Ready.Here.P".
-    // user_message_chunk's applyUpdate branch handles the de-dup case
-    // where ACP *does* echo (some adapters do, in case future versions
-    // add it): it merges into the existing user entry instead of pushing
-    // a duplicate.
-    appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text })
-    // If the agent is busy, track this as a queued message so the UI
-    // can show it above the input (survives scroll but not refresh).
     if (isBusy) {
+      // Agent is busy — queue locally. The SSE state:done handler will
+      // pop and send the next message when the current turn finishes.
       setQueuedMessages(prev => [...prev, text])
+      return
     }
+    // Not busy — send immediately.
+    appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text })
     try {
-      // Unified endpoint — dispatched server-side by agent.interface.
       const r = await fetch(`/api/sessions/${pokegentId}/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: text }),
       })
-      if (r.ok) {
-        // Optimistic busy — don't wait for the SSE state event which can
-        // arrive late, especially right after a Ctrl+C cancel.
-        setOptimisticBusy(true)
-        setOptimisticBusySince(new Date().toISOString())
-      } else {
+      if (!r.ok) {
         const msg = await r.text()
         appendEntry({ kind: 'system', id: `e-${turnIdRef.current++}`, text: `Error: ${msg}` })
       }
@@ -734,6 +906,26 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
 
   async function cancel() {
     if (!pokegentId) return
+    // Promote any in-progress bash tool call to a background shell.
+    // The SDK doesn't kill the process on cancel — it continues running,
+    // same as Ctrl+B in the Claude Code terminal.
+    setEntries(prev => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const e = prev[i]
+        if (e.kind === 'tool' && e.data.kind === 'execute' && e.data.status !== 'completed' && e.data.status !== 'failed') {
+          const cmd = extractBashCommand(e.data.rawInput) || e.data.title || 'background task'
+          const taskId = e.data.toolCallId
+          setBgShells(p => {
+            if (p.has(taskId)) return p
+            const out = new Map(p)
+            out.set(taskId, { taskId, command: cmd, startedAt: Date.now(), status: 'running' })
+            return out
+          })
+          break
+        }
+      }
+      return prev
+    })
     await fetch(`/api/sessions/${pokegentId}/cancel`, { method: 'POST' })
   }
 
@@ -779,7 +971,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
 
   return (
     <div
-      className="h-full w-full flex flex-col gba-card overflow-hidden"
+      className="h-full w-full flex flex-col gba-card overflow-visible"
       style={{
         borderRadius: 8,
         background: 'linear-gradient(180deg, #3a78b0 0%, #2e6498 30%, #1f4878 100%)',
@@ -801,7 +993,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           {/* Sprite with background box + animations */}
           <div
             onClick={() => setShowSpritePicker(true)}
-            className="cursor-pointer hover:brightness-125 relative shrink-0"
+            className="cursor-pointer hover:brightness-125 relative shrink-0 overflow-visible"
             style={{ width: 32, height: 32 }}
           >
             <div className="absolute inset-0 bg-black/20 rounded-lg" />
@@ -855,6 +1047,13 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
             onCancel={isBusy && caps.can_cancel ? () => { cancel(); appendEntry({ kind: 'system', id: `s-${turnIdRef.current++}`, text: 'Interrupted. What would you like me to do?' }) } : undefined}
             onClose={onClose}
             searchOpen={searchOpen}
+            onDebug={() => setDebugOpen(true)}
+            showTimestamps={showTimestamps}
+            onToggleTimestamps={() => {
+              const next = !showTimestamps
+              setShowTimestamps(next)
+              localStorage.setItem('pokegents-show-timestamps', String(next))
+            }}
           />
         </div>
       </div>
@@ -885,7 +1084,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-full overflow-y-auto overflow-x-hidden rounded-md px-3 pt-2.5 pb-10 space-y-4 font-mono"
+          className="h-full overflow-y-auto overflow-x-hidden rounded-md px-3 pt-2.5 pb-10 space-y-1.5 font-mono"
           style={{
             background: 'rgba(0, 0, 0, 0.55)',
             boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)',
@@ -898,34 +1097,69 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           {streamReady && entries.length === 0 && (
             <div className="text-[10px] font-mono text-white/40">Ready. Type a prompt below.</div>
           )}
-          {entries.map(e => <EntryRow key={e.id} entry={e} onDecidePermission={decidePermission} searchQuery={searchQuery} />)}
+          {entries.map(e => <EntryRow key={e.id} entry={e} onDecidePermission={decidePermission} searchQuery={searchQuery} backgroundedToolIds={bgToolIds} showTimestamps={showTimestamps} />)}
           {/* Sentinel "Thinking..." row — visible while the agent is busy
               AND we haven't received any assistant-message-chunk *text* for
               this turn yet (disappears as soon as text starts streaming).
               While only thoughts are streaming, the indicator owns them
               behind a click-to-expand toggle so the user sees one row
-              instead of two. */}
-          {isBusy && (
-            <ThinkingIndicator
-              busySince={busySinceTs}
-              detail={agent.detail}
-              thoughts={inflightThoughts(entries)}
-            />
-          )}
+              instead of two.
+              Hidden when the last entry is an active tool call — the
+              ToolCallRow already shows its own elapsed timer, and having
+              both reads as two conflicting clocks (turn-level vs tool-level). */}
+          {isBusy && (() => {
+            const lastEntry = entries[entries.length - 1]
+            const lastIsActiveTool = lastEntry?.kind === 'tool' &&
+              (lastEntry.data.status === 'pending' || lastEntry.data.status === 'in_progress')
+            if (lastIsActiveTool) return null
+            if (lastEntryIsCurrentAssistantMessage(entries)) return null
+            const indicator = (
+              <ThinkingIndicator
+                busySince={busySinceTs}
+                thoughts={inflightThoughts(entries)}
+              />
+            )
+            if (!showTimestamps) return indicator
+            return (
+              <table className="w-full border-collapse"><tbody><tr>
+                <td className={`align-top w-0 whitespace-nowrap pr-1 ${showTimestamps === 'debug' ? 'border border-red-500/30' : ''}`}>
+                  <span className="text-[8px] font-mono text-white/20 tabular-nums select-none">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
+                </td>
+                <td className={`align-top ${showTimestamps === 'debug' ? 'border border-blue-500/30' : ''}`}>
+                  {indicator}
+                </td>
+              </tr></tbody></table>
+            )
+          })()}
         </div>
         {/* Floating sprite — bottom-right of transcript, 2x size */}
         <ChatPanelSprite sprite={agent.sprite} state={agent.state} />
       </div>
 
-      {/* Queued messages — shown above the input when prompts were sent while busy */}
+      {/* Queued messages — stacked above input, same visual treatment */}
       {queuedMessages.length > 0 && (
-        <div className="px-3 pt-1.5 shrink-0">
-          <div className="text-[9px] font-mono text-amber-300/60 mb-1">
-            {queuedMessages.length} queued {queuedMessages.length === 1 ? 'message' : 'messages'}
+        <div className="shrink-0 px-2 pt-1.5 space-y-1">
+          <div className="flex items-center gap-2 px-0.5">
+            <span className="text-[9px] font-mono text-white/30">
+              {queuedMessages.length} queued
+            </span>
+            <div className="flex-1 h-px bg-white/10" />
+            <button
+              type="button"
+              onClick={() => setQueuedMessages([])}
+              className="text-[9px] font-mono text-white/30 hover:text-white/60 transition-colors"
+            >clear</button>
           </div>
           {queuedMessages.map((msg, i) => (
-            <div key={i} className="text-[10px] font-mono text-white/40 truncate pl-2 border-l border-amber-400/30 mb-0.5">
-              <span className="text-amber-300/40 mr-1">&gt;</span>{msg}
+            <div key={i} className="flex items-start gap-1">
+              <div className="flex-1 gba-dialog-dark text-[10px] leading-[14px] font-mono px-2.5 py-1 text-white/40 truncate">
+                {msg}
+              </div>
+              <button
+                type="button"
+                onClick={() => setQueuedMessages(prev => prev.filter((_, j) => j !== i))}
+                className="text-[9px] text-white/20 hover:text-white/50 transition-colors px-1 pt-0.5"
+              >x</button>
             </div>
           ))}
         </div>
@@ -976,6 +1210,56 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         />,
         document.body,
       )}
+      {debugOpen && createPortal(
+        <DebugModal
+          agent={agent}
+          pokegentId={pokegentId}
+          streamReady={streamReady}
+          sseBusy={sseBusy}
+          queuedMessages={queuedMessages}
+          bgShells={bgShells}
+          debugLog={debugLogRef.current}
+          onClose={() => setDebugOpen(false)}
+          onForceIdle={async () => {
+            await fetch(`/api/sessions/${pokegentId}/debug/force-idle`, { method: 'POST' })
+            setSseBusy(false)
+            setSseBusySince(null)
+            addDebugLog('action: force idle')
+          }}
+          onRespawnAcp={async () => {
+            addDebugLog('action: respawn ACP')
+            await fetch(`/api/sessions/${pokegentId}/debug/respawn`, { method: 'POST' })
+          }}
+          onReconnectSse={() => {
+            sseReconnectRef.current?.()
+          }}
+          onReloadTranscript={() => {
+            if (!agent.session_id) return
+            addDebugLog('action: reload transcript')
+            fetchTranscript(agent.session_id, 5000).then(page => {
+              const seeded = entriesFromTranscript(page.entries || [])
+              if (seeded.length > 0) {
+                setEntries(seeded)
+                turnIdRef.current = seeded.length
+              }
+              addDebugLog(`transcript: ${seeded.length} entries loaded`)
+            }).catch(() => {})
+          }}
+          onFlushQueue={() => {
+            addDebugLog(`action: flushed ${queuedMessages.length} queued messages`)
+            setQueuedMessages([])
+          }}
+          onClearBgTasks={() => {
+            addDebugLog('action: cleared bg tasks')
+            setBgShells(new Map())
+          }}
+          showTimestamps={showTimestamps}
+          onToggleDebugBorders={() => {
+            setShowTimestamps(prev => prev === 'debug' ? true : 'debug')
+          }}
+        />,
+        document.body,
+      )}
     </div>
   )
 }
@@ -1011,9 +1295,10 @@ function entriesFromTranscript(transcript: TranscriptEntry[]): Entry[] {
   }
 
   for (const t of transcript) {
+    const ts = t.timestamp ? new Date(t.timestamp).getTime() : undefined
     if (t.type === 'user' && t.content) {
       if (isLocalCommandArtifact(t.content)) continue
-      out.push({ kind: 'user', id: id('u'), text: t.content })
+      out.push({ kind: 'user', id: id('u'), text: t.content, ts })
       continue
     }
     if (t.type === 'assistant') {
@@ -1024,23 +1309,28 @@ function entriesFromTranscript(transcript: TranscriptEntry[]): Entry[] {
         if (b.type === 'text' && b.text) text += b.text
         else if (b.type === 'thinking' && b.text) thoughts += b.text
       }
-      if (text || thoughts) out.push({ kind: 'assistant', id: id('a'), text, thoughts })
+      if (text || thoughts) out.push({ kind: 'assistant', id: id('a'), text, thoughts, ts })
       for (const b of blocks) {
         if (b.type === 'tool_use' && b.name) {
           const toolId = b.id || ''
           let title = b.name
           let rawInput: unknown = undefined
           try {
-            const parsed = JSON.parse((b.input || '').replace(/\.\.\.$/, '') || '{}')
+            const inputStr = b.input || '{}'
+            const parsed = JSON.parse(inputStr)
             rawInput = parsed
             if (parsed.command) title = `${b.name}: ${parsed.command.slice(0, 60)}`
             else if (parsed.file_path) title = `${b.name}: ${parsed.file_path}`
             else if (parsed.pattern) title = `${b.name}: ${parsed.pattern}`
-          } catch { /* keep base title */ }
+          } catch {
+            // Truncated JSON (server caps at 200 chars + "...") — show raw string
+            if (b.input && b.input.length > 2) rawInput = b.input
+          }
           const result = toolResults.get(toolId)
           out.push({
             kind: 'tool',
             id: id('t'),
+            ts,
             data: {
               toolCallId: toolId || id('seed-tool'),
               title,
@@ -1061,45 +1351,51 @@ function EntryRow({
   entry,
   onDecidePermission,
   searchQuery,
+  backgroundedToolIds,
+  showTimestamps,
 }: {
   entry: Entry
   onDecidePermission: (requestId: number, optionId: string, cancelled: boolean) => void
   searchQuery?: string
+  backgroundedToolIds?: Set<string>
+  showTimestamps?: boolean | 'debug'
 }) {
-  switch (entry.kind) {
-    case 'user': {
-      // Task notifications: render as a compact pill instead of raw XML.
-      const taskMatch = entry.text.match(/<task-notification>[\s\S]*?<summary>([\s\S]*?)<\/summary>[\s\S]*?<\/task-notification>/)
-      if (taskMatch) {
-        return <TaskNotificationRow text={entry.text} summary={taskMatch[1].trim()} />
-      }
-      // Hide local-command artifacts from live stream (backfill already filters these).
-      if (isLocalCommandArtifact(entry.text)) return null
-      return (
-        <div className="pt-4" data-user-entry>
-          <div
-            className="rounded-md px-2.5 py-2 text-[11px] font-mono text-white whitespace-pre-wrap break-words leading-snug border-l-2 border-amber-400/70"
-            style={{ background: 'rgba(180, 130, 40, 0.12)' }}
-          >
-            <span className="text-amber-300/70 mr-1">&gt;</span><HighlightText text={entry.text} query={searchQuery} />
+  const tsLabel = entry.ts ? new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : ''
+
+  const content = (() => {
+    switch (entry.kind) {
+      case 'user': {
+        const taskMatch = entry.text.match(/<task-notification>[\s\S]*?<summary>([\s\S]*?)<\/summary>[\s\S]*?<\/task-notification>/)
+        if (taskMatch) {
+          return <TaskNotificationRow text={entry.text} summary={taskMatch[1].trim()} />
+        }
+        if (isLocalCommandArtifact(entry.text)) return null
+        return (
+          <div className="pt-4" data-user-entry>
+            <div
+              className="rounded-md px-2.5 py-2 text-[11px] font-mono text-white whitespace-pre-wrap break-words leading-snug border-l-2 border-amber-400/70"
+              style={{ background: 'rgba(180, 130, 40, 0.12)' }}
+            >
+              <span className="text-amber-300/70 mr-1">&gt;</span><HighlightText text={entry.text} query={searchQuery} />
+            </div>
           </div>
-        </div>
-      )
-    }
-    case 'assistant':
-      return (
-        <div className="text-[11px] font-mono text-white/95 leading-snug">
-          {entry.thoughts && entry.text && <ThoughtsDisclosure thoughts={entry.thoughts} />}
-          {entry.text ? (
+        )
+      }
+      case 'assistant': {
+        if (!entry.text && !entry.thoughts) return null
+        if (!entry.text) return null
+        return (
+          <div className="text-[11px] font-mono text-white/95 leading-snug">
+            {entry.thoughts && <ThoughtsDisclosure thoughts={entry.thoughts} />}
             <TypewriterMarkdown text={entry.text} />
-          ) : entry.thoughts ? null : <span className="text-white/30">…</span>}
-        </div>
-      )
-    case 'tool':
-      return <ToolCallRow entry={entry} />
-    case 'system':
-      return (
-        <div className="text-[10px] font-mono text-white/40 italic leading-snug"><HighlightText text={entry.text} query={searchQuery} /></div>
+          </div>
+        )
+      }
+      case 'tool':
+        return <ToolCallRow entry={entry} backgrounded={backgroundedToolIds?.has(entry.id)} />
+      case 'system':
+        return (
+          <div className="text-[10px] font-mono text-white/40 italic leading-snug"><HighlightText text={entry.text} query={searchQuery} /></div>
       )
     case 'permission': {
       const t = entry.toolCall
@@ -1145,12 +1441,41 @@ function EntryRow({
       )
     }
   }
+  })()
+
+  if (!content) return null
+  if (!showTimestamps) return content
+
+  return (
+    <table className="w-full border-collapse"><tbody><tr>
+      <td className={`align-top w-0 whitespace-nowrap pr-1 ${showTimestamps === 'debug' ? 'border border-red-500/30' : ''}`}>
+        <span className="text-[8px] font-mono text-white/20 tabular-nums select-none">{tsLabel}</span>
+      </td>
+      <td className={`align-top ${showTimestamps === 'debug' ? 'border border-blue-500/30' : ''}`}>
+        {content}
+      </td>
+    </tr></tbody></table>
+  )
 }
 
 // Expandable tool-call row with a tinted background so it reads as a
 // distinct "event" block between assistant prose. Click the header to
 // toggle the detail pane (locations, raw input/output when available).
-function ToolCallRow({ entry }: { entry: Extract<Entry, { kind: 'tool' }> }) {
+function extractFilePath(text: string): string | null {
+  const m = text.match(/(\/(?:Users|private|tmp|home|var|opt)\/\S+\.\w+)/)
+  return m ? m[1] : null
+}
+
+function AnimatedDots() {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    const iv = setInterval(() => setCount(c => (c + 1) % 4), 500)
+    return () => clearInterval(iv)
+  }, [])
+  return <span className="inline-block w-[1.5em] text-left">{'.'.repeat(count)}</span>
+}
+
+function ToolCallRow({ entry, backgrounded }: { entry: Extract<Entry, { kind: 'tool' }>; backgrounded?: boolean }) {
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const startRef = useRef(Date.now())
@@ -1162,7 +1487,6 @@ function ToolCallRow({ entry }: { entry: Extract<Entry, { kind: 'tool' }> }) {
   const status = t.status || 'pending'
   const isRunning = status === 'pending' || status === 'in_progress'
 
-  // Tick every second while running to update elapsed time.
   useEffect(() => {
     if (!isRunning) return
     const iv = setInterval(() => setTick(n => n + 1), 1000)
@@ -1179,27 +1503,160 @@ function ToolCallRow({ entry }: { entry: Extract<Entry, { kind: 'tool' }> }) {
     return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`
   })() : null
 
+  // Extract tool-specific display info
+  const inp = t.rawInput && typeof t.rawInput === 'object' ? t.rawInput as Record<string, unknown> : null
+  const toolName = (t as any)?._meta?.claudeCode?.toolName || t.kind || 'tool'
+  const isEdit = toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit' || t.kind === 'edit'
+  const isBash = toolName === 'Bash' || t.kind === 'execute'
+  const isRead = toolName === 'Read' || t.kind === 'read'
+  const isAgent = toolName === 'Agent' || t.kind === 'think'
+
+  const filePath = inp?.file_path as string || inp?.path as string || inp?.notebook_path as string || ''
+  const shortPath = filePath ? filePath.replace(/.*\/Projects\//, '').replace(/.*\/node_modules\//, 'node_modules/') : ''
+  const bashCmd = inp?.command as string || (isBash && t.title && t.title !== 'Terminal' ? t.title : '')
+  const bashDesc = inp?.description as string || ''
+  const agentDesc = inp?.description as string || inp?.prompt as string || ''
+
+  // Extract summary text from content/rawOutput, stripping markdown fences
+  const summaryText = (() => {
+    let raw = ''
+    if (t.content && Array.isArray(t.content)) {
+      for (const item of t.content as any[]) {
+        if (item?.type === 'content' && item?.content?.type === 'text') { raw = item.content.text as string; break }
+        if (item?.type === 'terminal' && item?.terminalOutput) { raw = item.terminalOutput as string; break }
+      }
+    }
+    if (!raw && typeof t.rawOutput === 'string') raw = t.rawOutput
+    // Strip markdown code fences (```console\n...\n```)
+    raw = raw.replace(/^```\w*\n?/gm, '').replace(/\n?```$/gm, '').trim()
+    return raw
+  })()
+  const truncSummary = summaryText.length > 200 ? summaryText.slice(0, 200) + '…' : summaryText
+
+  // Diff detection — check ACP _meta toolResponse, rawInput, and rawOutput
+  const toolResp = (t as any)?._meta?.claudeCode?.toolResponse
+  const diffOld = toolResp?.oldString as string || toolResp?.old_string as string || inp?.old_string as string || inp?.oldString as string || undefined
+  const diffNew = toolResp?.newString as string || toolResp?.new_string as string || inp?.new_string as string || inp?.newString as string || undefined
+  const diffFile = toolResp?.filePath as string || toolResp?.file_path as string || ''
+  const hasDiff = isEdit && diffOld != null && diffNew != null
+  const editPath = shortPath || (diffFile ? diffFile.replace(/.*\/Projects\//, '') : '')
+
+  const editSummary = (() => {
+    if (!isEdit) return null
+    if (hasDiff) {
+      const oldLines = (diffOld || '').split('\n').length
+      const newLines = (diffNew || '').split('\n').length
+      const added = Math.max(0, newLines - oldLines)
+      const removed = Math.max(0, oldLines - newLines)
+      const changed = Math.min(oldLines, newLines)
+      const parts: string[] = []
+      if (added > 0) parts.push(`Added ${added} lines`)
+      if (removed > 0) parts.push(`Removed ${removed} lines`)
+      if (parts.length === 0) parts.push(`Changed ${changed} lines`)
+      return parts.join(', ')
+    }
+    if (summaryText) return summaryText.split('\n')[0].slice(0, 80)
+    return status === 'completed' ? 'Updated' : null
+  })()
+
+  // Header label
+  const headerLabel = (() => {
+    if (isBash) return 'Bash'
+    if (toolName === 'NotebookEdit') return 'Notebook'
+    if (isEdit) return 'Update'
+    if (isRead) return 'Read'
+    if (isAgent) return 'Agent'
+    if (toolName === 'Write') return 'Write'
+    if (toolName === 'Grep' || toolName === 'Glob') return toolName
+    return toolName
+  })()
+
+  // Header detail
+  const headerDetail = (() => {
+    if (isBash && bashCmd) return bashCmd.length > 80 ? bashCmd.slice(0, 80) + '…' : bashCmd
+    if (isEdit && editPath) return editPath
+    if (isRead && shortPath) return shortPath
+    if (isAgent && agentDesc) return agentDesc.length > 60 ? agentDesc.slice(0, 60) + '…' : agentDesc
+    if (t.title && t.title !== t.kind && t.title !== 'Terminal') return t.title
+    return ''
+  })()
+
   return (
     <div
-      className={`rounded-md text-[11px] font-mono leading-snug ${isRunning ? 'border border-accent-yellow/20' : ''}`}
-      style={{ background: isRunning ? 'rgba(255, 200, 60, 0.06)' : 'rgba(255,255,255,0.04)' }}
+      className="rounded-md text-[11px] font-mono leading-snug"
+      style={{ background: isRunning ? 'rgba(255, 200, 60, 0.04)' : 'rgba(255,255,255,0.03)' }}
     >
+      {/* Header */}
       <button
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center gap-1.5 text-white/75 px-2.5 py-1.5 hover:bg-white/5 transition-colors rounded-md text-left"
+        className="w-full text-left px-2.5 py-1.5 hover:bg-white/5 transition-colors rounded-md"
       >
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot}`} />
-        <span className="text-white/90 font-semibold font-mono shrink-0">{t.kind || 'tool'}</span>
-        {t.title && t.title !== t.kind && (
-          <span className="text-white/55 truncate flex-1">— {t.title}</span>
+        <div className="flex items-center gap-1.5">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot}`} />
+          <span className="text-white/90 font-semibold shrink-0">{headerLabel}</span>
+          {headerDetail && (() => {
+            const linkPath = filePath && (isEdit || isRead) ? filePath : extractFilePath(headerDetail)
+            if (linkPath) {
+              return (
+                <a
+                  href={`vscode://file${linkPath}`}
+                  onClick={e => e.stopPropagation()}
+                  className="text-white/45 truncate flex-1 hover:text-accent-blue hover:underline"
+                  title={linkPath}
+                >({headerDetail})</a>
+              )
+            }
+            return <span className="text-white/45 truncate flex-1">({headerDetail})</span>
+          })()}
+          <span className="text-[9px] text-white/30 shrink-0 ml-auto">{open ? '▼' : '▶'}</span>
+        </div>
+        {/* Inline summary — always visible */}
+        {isEdit && editSummary && (
+          <div className="mt-0.5 ml-4 text-[10px] text-white/40">{editSummary}</div>
         )}
-        {isRunning && (
-          <span className="text-[9px] text-accent-yellow/70 shrink-0 ml-auto mr-1 animate-pulse">
-            ⋯ {elapsedStr ? `(${elapsedStr})` : ''}
-          </span>
+        {isBash && bashDesc && (
+          <div className="mt-0.5 ml-4 text-[10px] text-white/40">{bashDesc}</div>
         )}
-        <span className="text-[9px] text-white/30 shrink-0">{open ? '▼' : '▶'}</span>
       </button>
+
+      {/* Inline diff preview for edits — shown without expanding */}
+      {isEdit && hasDiff && !open && (
+        <div className="px-2.5 pb-1.5 ml-2">
+          <pre className="text-[10px] font-mono bg-black/30 rounded px-2 py-1 max-h-24 overflow-hidden whitespace-pre-wrap break-all">
+            {(() => {
+              const lines: { text: string; type: '+' | '-' | ' ' }[] = []
+              const oldLines = (diffOld || '').split('\n')
+              const newLines = (diffNew || '').split('\n')
+              for (const l of oldLines.slice(0, 4)) lines.push({ text: l, type: '-' })
+              for (const l of newLines.slice(0, 4)) lines.push({ text: l, type: '+' })
+              return lines.slice(0, 8).map((l, i) => (
+                <div key={i} className={l.type === '+' ? 'text-green-400/80 bg-green-400/5' : l.type === '-' ? 'text-red-400/70 bg-red-400/5' : 'text-white/40'}>
+                  {l.type}{l.text}
+                </div>
+              ))
+            })()}
+            {((diffOld || '').split('\n').length + (diffNew || '').split('\n').length > 8) && (
+              <div className="text-white/25 mt-0.5">… click to expand</div>
+            )}
+          </pre>
+        </div>
+      )}
+
+      {/* Inline bash output preview — truncated, shown without expanding */}
+      {isBash && truncSummary && !open && (
+        <div className="px-2.5 pb-1.5 ml-2">
+          <pre className="text-[10px] font-mono text-white/50 bg-black/30 rounded px-2 py-1 max-h-16 overflow-hidden whitespace-pre-wrap break-all">
+            {truncSummary}
+          </pre>
+        </div>
+      )}
+
+      {/* Running indicator */}
+      {isRunning && elapsedStr && (
+        <div className={`px-2.5 pb-1.5 text-[11px] font-mono ${backgrounded ? 'text-blue-400/60' : 'text-accent-yellow/60'}`}>
+          {backgrounded ? `↳ running in background · ${elapsedStr}` : <><AnimatedDots /> tool call in progress — {elapsedStr}</>}
+        </div>
+      )}
       {open && (
         <div ref={bodyRef} className="px-2.5 pb-2 space-y-1">
           {t.locations && t.locations.length > 0 && (
@@ -1479,7 +1936,7 @@ function ThoughtsDisclosure({ thoughts }: { thoughts: string }) {
 // indicator gets a `▶` toggle that expands the streaming thoughts inline
 // so the indicator + thoughts disclosure are one combined row instead of
 // two separate ones.
-function ThinkingIndicator({ busySince, detail, thoughts }: { busySince?: string | null; detail?: string; thoughts?: string }) {
+function ThinkingIndicator({ busySince, thoughts }: { busySince?: string | null; thoughts?: string }) {
   const [, setTick] = useState(0)
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -1490,17 +1947,14 @@ function ThinkingIndicator({ busySince, detail, thoughts }: { busySince?: string
   useEffect(() => {
     if (open) bodyRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [open])
-  // detail comes from the canonical status pipeline — "thinking…" at the
-  // start of a turn, then the active tool name (e.g. "Bash: ls -la") while
-  // a tool runs. Fall back to "Ruminating…" if no detail yet.
-  const verb = detail && detail !== '' && detail !== 'finished' ? detail : 'Ruminating'
+  const verb = 'Thinking'
   const elapsed = formatElapsed(busySince)
   const hasThoughts = !!thoughts && thoughts.trim() !== ''
   return (
-    <div className="text-[12px] font-sans py-1">
-      <div className="flex items-baseline gap-2 text-white/65 italic">
+    <div className="text-[11px] font-mono">
+      <div className="flex items-baseline gap-2 text-white/50 italic">
         <span className="thinking-dots">{verb}</span>
-        {elapsed && <span className="text-white/40 not-italic font-mono text-[10px]">({elapsed})</span>}
+        {elapsed && <span className="text-white/30 not-italic text-[10px]">({elapsed})</span>}
         {hasThoughts && (
           <button
             onClick={() => setOpen(v => !v)}
@@ -1564,12 +2018,18 @@ function ChatPanelDropdown({
   onCancel,
   onClose,
   searchOpen,
+  onDebug,
+  showTimestamps,
+  onToggleTimestamps,
 }: {
   onSearch: () => void
   onMenu: (e: React.MouseEvent) => void
   onCancel?: () => void
   onClose: () => void
   searchOpen: boolean
+  onDebug?: () => void
+  showTimestamps?: boolean | 'debug'
+  onToggleTimestamps?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -1626,6 +2086,24 @@ function ChatPanelDropdown({
             <span className="text-white/40">Esc</span>
             <span>Close panel</span>
           </button>
+          {onToggleTimestamps && (
+            <button
+              onClick={() => { onToggleTimestamps(); setOpen(false) }}
+              className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-white/80 hover:bg-white/10 flex items-center gap-2"
+            >
+              <span className={`text-[9px] ${showTimestamps ? 'text-accent-green' : 'text-white/30'}`}>{showTimestamps ? '●' : '○'}</span>
+              <span>Timestamps</span>
+            </button>
+          )}
+          {onDebug && (
+            <>
+              <div className="border-t border-white/10" />
+              <button
+                onClick={() => { onDebug(); setOpen(false) }}
+                className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-amber-400/70 hover:bg-white/10"
+              >Debug panel</button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -1736,4 +2214,125 @@ function scrollToMatch(idx: number, total: number) {
     const marks = document.querySelectorAll('[data-search-match]')
     marks[wrapped]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, 0)
+}
+
+// ── Debug modal ────────────────────────────────────────────
+
+function DebugModal({
+  agent, pokegentId, streamReady, sseBusy, queuedMessages, bgShells, debugLog,
+  onClose, onForceIdle, onRespawnAcp, onReconnectSse, onReloadTranscript, onFlushQueue, onClearBgTasks,
+  showTimestamps, onToggleDebugBorders,
+}: {
+  agent: AgentState
+  pokegentId: string
+  streamReady: boolean
+  sseBusy: boolean
+  queuedMessages: string[]
+  bgShells: Map<string, BgShell>
+  debugLog: string[]
+  onClose: () => void
+  onForceIdle: () => void
+  onRespawnAcp: () => void
+  onReconnectSse: () => void
+  onReloadTranscript: () => void
+  onFlushQueue: () => void
+  onClearBgTasks: () => void
+  showTimestamps?: boolean | 'debug'
+  onToggleDebugBorders?: () => void
+}) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const iv = setInterval(() => setTick(n => n + 1), 1000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const btnClass = "px-3 py-1.5 text-[11px] font-mono rounded hover:bg-white/10 transition-colors text-left"
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60" />
+      <div
+        className="relative rounded-lg overflow-hidden w-[520px] max-h-[80vh] flex flex-col"
+        style={{ background: 'rgba(15, 25, 45, 0.97)', border: '1px solid rgba(255,255,255,0.15)', boxShadow: '0 8px 32px rgba(0,0,0,0.6)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10">
+          <span className="text-[12px] font-mono text-amber-400/80">Debug — {agent.display_name || pokegentId.slice(0, 8)}</span>
+          <button onClick={onClose} className="text-white/40 hover:text-white/80 text-[14px]">✕</button>
+        </div>
+
+        <div className="overflow-y-auto p-4 space-y-4 text-[11px] font-mono">
+          {/* State */}
+          <div>
+            <div className="text-white/30 text-[9px] uppercase tracking-wider mb-1.5">State</div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-white/70">
+              <span className="text-white/40">agent.state</span><span>{agent.state || '—'}</span>
+              <span className="text-white/40">agent.detail</span><span className="truncate">{agent.detail || '—'}</span>
+              <span className="text-white/40">sseBusy</span><span className={sseBusy ? 'text-accent-red' : 'text-accent-green'}>{String(sseBusy)}</span>
+              <span className="text-white/40">streamReady</span><span className={streamReady ? 'text-accent-green' : 'text-accent-red'}>{String(streamReady)}</span>
+              <span className="text-white/40">pokegentId</span><span className="truncate">{pokegentId}</span>
+              <span className="text-white/40">sessionId</span><span className="truncate">{agent.session_id || '—'}</span>
+              <span className="text-white/40">model</span><span>{agent.model || '—'}</span>
+              <span className="text-white/40">context</span><span>{agent.context_tokens?.toLocaleString() || '?'} / {agent.context_window?.toLocaleString() || '?'}</span>
+              <span className="text-white/40">interface</span><span>{agent.interface || '—'}</span>
+              <span className="text-white/40">queued</span><span>{queuedMessages.length}</span>
+              <span className="text-white/40">bgTasks</span><span>{bgShells.size} ({[...bgShells.values()].filter(s => s.status === 'running').length} running)</span>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div>
+            <div className="text-white/30 text-[9px] uppercase tracking-wider mb-1.5">Actions</div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button onClick={onForceIdle} className={`${btnClass} text-amber-400/80 border border-amber-400/20`}>
+                Force idle
+                <div className="text-[9px] text-white/30 mt-0.5">Override state to idle + broadcast done</div>
+              </button>
+              <button onClick={onRespawnAcp} className={`${btnClass} text-amber-400/80 border border-amber-400/20`}>
+                Respawn ACP
+                <div className="text-[9px] text-white/30 mt-0.5">Kill + relaunch ACP subprocess</div>
+              </button>
+              <button onClick={onReconnectSse} className={`${btnClass} text-blue-400/80 border border-blue-400/20`}>
+                Reconnect SSE
+                <div className="text-[9px] text-white/30 mt-0.5">Force close + reopen event stream</div>
+              </button>
+              <button onClick={onReloadTranscript} className={`${btnClass} text-blue-400/80 border border-blue-400/20`}>
+                Reload transcript
+                <div className="text-[9px] text-white/30 mt-0.5">Re-fetch transcript from disk</div>
+              </button>
+              <button onClick={onFlushQueue} className={`${btnClass} text-white/60 border border-white/10`}>
+                Flush queue ({queuedMessages.length})
+                <div className="text-[9px] text-white/30 mt-0.5">Discard all queued messages</div>
+              </button>
+              <button onClick={onClearBgTasks} className={`${btnClass} text-white/60 border border-white/10`}>
+                Clear bg tasks ({bgShells.size})
+                <div className="text-[9px] text-white/30 mt-0.5">Reset background task list</div>
+              </button>
+              {onToggleDebugBorders && (
+                <button onClick={onToggleDebugBorders} className={`${btnClass} ${showTimestamps === 'debug' ? 'text-red-400/80 border border-red-400/30' : 'text-white/60 border border-white/10'}`}>
+                  {showTimestamps === 'debug' ? 'Hide' : 'Show'} layout borders
+                  <div className="text-[9px] text-white/30 mt-0.5">Show table cell borders for debugging</div>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Event log */}
+          <div>
+            <div className="text-white/30 text-[9px] uppercase tracking-wider mb-1.5">Event log</div>
+            <div className="bg-black/40 rounded p-2 max-h-[200px] overflow-y-auto">
+              {debugLog.length === 0 ? (
+                <span className="text-white/25 italic">No events yet — interact with the agent to see logs</span>
+              ) : (
+                debugLog.map((line, i) => (
+                  <div key={i} className="text-[10px] text-white/50 leading-snug">{line}</div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }

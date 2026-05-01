@@ -235,6 +235,9 @@ func (c *chatACPClient) readLoop() {
 				_ = c.sendResponse(id, result, errResp)
 			}()
 		case raw.Method != "" && raw.ID == nil:
+			if strings.HasPrefix(raw.Method, "claude/") {
+				log.Printf("acp-ext: %s (len=%d)", raw.Method, len(raw.Params))
+			}
 			if c.onNotif != nil {
 				c.onNotif(raw.Method, raw.Params)
 			}
@@ -268,6 +271,14 @@ type ChatSession struct {
 
 	subsMu      sync.Mutex
 	subscribers map[chan ChatSessionEvent]struct{}
+	replayBuf   []ChatSessionEvent // last N events for late-connecting subscribers
+	replayMax   int
+
+	// Active background tasks — keyed by taskId. Populated from
+	// claude/task_started, removed on claude/task_notification.
+	// Replayed to new SSE subscribers so tasks survive page refresh.
+	tasksMu     sync.Mutex
+	activeTasks map[string]json.RawMessage
 
 	// Status / activity translation buffers. Updated on session/update events
 	// and flushed to disk on each turn boundary. Same field set as the bash
@@ -289,6 +300,10 @@ type ChatSession struct {
 	permMu       sync.Mutex
 	nextPermID   atomic.Int64
 	pendingPerms map[int64]*pendingPermission
+
+	// promptCtxCancel aborts the in-flight Prompt() goroutine's sendRequest.
+	// Set by Prompt(), called by Cancel(). Guarded by stateMu.
+	promptCtxCancel context.CancelFunc
 
 	// intentionalClose is set by Close() to mark a deliberate teardown
 	// (migration, user delete). The exit handler checks this and SKIPS
@@ -321,9 +336,9 @@ func (s *ChatSession) Subscribe() (chan ChatSessionEvent, func()) {
 	ch := make(chan ChatSessionEvent, 64)
 	s.subsMu.Lock()
 	s.subscribers[ch] = struct{}{}
+	n := len(s.subscribers)
 	s.subsMu.Unlock()
-	// Replay any in-flight permission requests so a late-connecting panel
-	// (e.g. user reopened the dashboard mid-prompt) still sees them.
+	log.Printf("chat-sse[%s]: subscriber connected (now %d)", shortChat(s.PokegentID), n)
 	s.permMu.Lock()
 	for _, p := range s.pendingPerms {
 		select {
@@ -332,10 +347,21 @@ func (s *ChatSession) Subscribe() (chan ChatSessionEvent, func()) {
 		}
 	}
 	s.permMu.Unlock()
+	// Replay active background tasks so they survive page refresh.
+	s.tasksMu.Lock()
+	for _, params := range s.activeTasks {
+		select {
+		case ch <- ChatSessionEvent{Type: "claude/task_started", Data: params}:
+		default:
+		}
+	}
+	s.tasksMu.Unlock()
 	return ch, func() {
 		s.subsMu.Lock()
 		delete(s.subscribers, ch)
+		n := len(s.subscribers)
 		s.subsMu.Unlock()
+		log.Printf("chat-sse[%s]: subscriber disconnected (now %d)", shortChat(s.PokegentID), n)
 		close(ch)
 	}
 }
@@ -345,16 +371,44 @@ func (s *ChatSession) broadcast(t string, payload json.RawMessage) {
 	evt := ChatSessionEvent{Type: t, Data: payload}
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
+	// Buffer for late-connecting subscribers (e.g. after server restart).
+	if s.replayMax > 0 {
+		s.replayBuf = append(s.replayBuf, evt)
+		if len(s.replayBuf) > s.replayMax {
+			s.replayBuf = s.replayBuf[len(s.replayBuf)-s.replayMax:]
+		}
+	}
 	for ch := range s.subscribers {
 		select {
 		case ch <- evt:
 		default:
-			// slow client; drop
+			log.Printf("chat-sse[%s]: DROPPED %s event (slow client, buffer full)", shortChat(s.PokegentID), t)
 		}
 	}
 }
 
 func (s *ChatSession) handleNotification(method string, params json.RawMessage) {
+	// Forward claude/* extension notifications to SSE subscribers.
+	if strings.HasPrefix(method, "claude/") {
+		// Track active background tasks for replay on new subscriber connect.
+		if method == "claude/task_started" {
+			var t struct{ TaskId string `json:"taskId"` }
+			if json.Unmarshal(params, &t) == nil && t.TaskId != "" {
+				s.tasksMu.Lock()
+				s.activeTasks[t.TaskId] = params
+				s.tasksMu.Unlock()
+			}
+		} else if method == "claude/task_notification" {
+			var t struct{ TaskId string `json:"taskId"` }
+			if json.Unmarshal(params, &t) == nil && t.TaskId != "" {
+				s.tasksMu.Lock()
+				delete(s.activeTasks, t.TaskId)
+				s.tasksMu.Unlock()
+			}
+		}
+		s.broadcast(method, params)
+		return
+	}
 	if method != "session/update" {
 		return
 	}
@@ -594,7 +648,11 @@ func (s *ChatSession) DeliverPermission(reqID int64, optionID string, cancelled 
 }
 
 func (s *ChatSession) Prompt(ctx context.Context, text string) error {
+	log.Printf("chat-prompt[%s]: starting prompt (busyCount=%d)", shortChat(s.PokegentID), s.busyCount.Load())
+	ctx, cancel := context.WithCancel(ctx)
+
 	s.stateMu.Lock()
+	s.promptCtxCancel = cancel
 	wasBusy := s.busyCount.Add(1) > 1
 	if !wasBusy {
 		s.busySince = time.Now()
@@ -604,23 +662,13 @@ func (s *ChatSession) Prompt(ctx context.Context, text string) error {
 	s.recentActions = nil
 	s.currentPrompt = text
 	s.currentDetail = "thinking…"
-	// Snapshot ACPID under the lock — same lock that Launch held when
-	// setting it, so we never observe an empty/torn value here.
 	acpID := s.ACPID
 	s.writeStatusFileLocked()
 	s.stateMu.Unlock()
 	s.broadcast("state", json.RawMessage(`{"state":"busy"}`))
 
 	// Synthesize a user_message_chunk SSE event so chat panels see the
-	// user's prompt regardless of which client submitted it (ChatPanel's
-	// own input OR the AgentCard's QuickInput, which calls the same
-	// /api/sessions/{id}/prompt endpoint but doesn't go through the
-	// panel's local appendEntry). The Zed @zed-industries/claude-agent-acp
-	// wrapper does NOT echo user prompts back over the ACP wire — verified
-	// by tapping `/api/chat/{id}/stream` during a prompt — so without this
-	// synthetic broadcast, prompts sent from the AgentCard never appear in
-	// the chat transcript. The frontend's user_message_chunk handler
-	// de-dups against entries already added locally by ChatPanel.submitText.
+	// user's prompt regardless of which client submitted it.
 	if userPayload, err := json.Marshal(map[string]any{
 		"sessionId": acpID,
 		"update": map[string]any{
@@ -631,17 +679,21 @@ func (s *ChatSession) Prompt(ctx context.Context, text string) error {
 		s.broadcast("session_update", userPayload)
 	}
 
-	// turnErr captures whether the ACP request itself errored, so the
-	// defer can flip detail to "error" instead of the misleading "finished".
 	var turnErr error
 	defer func() {
+		cancel()
 		s.stateMu.Lock()
+		s.promptCtxCancel = nil
 		stillBusy := s.busyCount.Add(-1) > 0
 		if !stillBusy {
 			s.busySince = time.Time{}
 		}
 		if turnErr != nil {
-			s.currentDetail = "error: " + turnErr.Error()
+			if ctx.Err() != nil {
+				s.currentDetail = "cancelled"
+			} else {
+				s.currentDetail = "error: " + turnErr.Error()
+			}
 		} else {
 			s.currentDetail = "finished"
 		}
@@ -730,10 +782,29 @@ func mimeForImagePath(p string) string {
 	return "application/octet-stream"
 }
 
+func (s *ChatSession) BroadcastDone() {
+	s.broadcast("state", json.RawMessage(`{"state":"done"}`))
+}
+
 func (s *ChatSession) Cancel() error {
 	s.stateMu.Lock()
 	acpID := s.ACPID
 	s.stateMu.Unlock()
+
+	// Broadcast done immediately so the frontend can proceed (flush queue,
+	// show idle). The ACP may take a while to finish its cancel loop,
+	// especially if stuck consuming background task results.
+	s.broadcast("state", json.RawMessage(`{"state":"done"}`))
+
+	// Send session/cancel to ACP and let it finish naturally. Do NOT cancel
+	// the Go context — that would make sendRequest return immediately, the
+	// Prompt() defer would fire and broadcast state:done before ACP finishes
+	// its cancel loop. The next prompt would then race with ACP's internal
+	// promptRunning flag, causing the ACP to queue-then-cancel it.
+	//
+	// Instead, ACP processes the cancel, returns the session/prompt response
+	// with stopReason:"cancelled", sendRequest receives it normally, and
+	// Prompt()'s defer broadcasts state:done only after ACP is truly done.
 	return s.client.sendNotification("session/cancel", map[string]any{"sessionId": acpID})
 }
 
@@ -832,7 +903,8 @@ func (m *ChatManager) Launch(ctx context.Context, opts ChatLaunchOptions) (*Chat
 		return nil, fmt.Errorf("cwd must be absolute: %q", opts.Cwd)
 	}
 
-	cmd := exec.Command("npx", "--yes", "--", "@zed-industries/claude-agent-acp")
+	acpBin := filepath.Join(filepath.Dir(os.Args[0]), "acp-fork", "dist", "index.js")
+	cmd := exec.Command("node", acpBin)
 	cmd.Dir = opts.Cwd
 	// Mirror Zed: scrub ANTHROPIC_API_KEY so the adapter forces its own auth flow.
 	env := os.Environ()
@@ -876,6 +948,8 @@ func (m *ChatManager) Launch(ctx context.Context, opts ChatLaunchOptions) (*Chat
 		Created:       time.Now(),
 		dataDir:       m.dataDir,
 		subscribers:   make(map[chan ChatSessionEvent]struct{}),
+		replayMax:     256,
+		activeTasks:   make(map[string]json.RawMessage),
 		recentActions: []string{},
 		pendingPerms:  make(map[int64]*pendingPermission),
 	}
@@ -1184,7 +1258,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ": heartbeat\n\n")
+			fmt.Fprintf(w, "event: heartbeat\ndata: {}\n\n")
 			flusher.Flush()
 		case evt, ok := <-ch:
 			if !ok {

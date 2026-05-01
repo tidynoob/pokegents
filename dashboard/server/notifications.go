@@ -120,6 +120,9 @@ func (n *Notifier) MaybeNotify(evt HookEvent, agent *AgentState) {
 		title = agentName
 		body = "Waiting for your response"
 	case "PermissionRequest":
+		if agent.Interface == "chat" {
+			return
+		}
 		title = agentName
 		body = fmt.Sprintf("Needs permission for %s", evt.ToolName)
 	default:

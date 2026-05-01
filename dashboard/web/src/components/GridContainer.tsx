@@ -102,7 +102,8 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
           gridTemplateColumns: `repeat(${settings.cardsPerRow}, minmax(0, 1fr))`,
           gridAutoRows: cellH,
           gap,
-          paddingBottom: 40,
+          paddingTop: 16,
+          paddingBottom: 0,
           position: 'relative',
         }}
       >
@@ -284,8 +285,8 @@ function GridCell({
         // No `overflow: hidden` on the cell itself — that would clip the
         // card's outer drop shadow + glowActive ring (which extend a couple
         // px past the rounded corners) and the bottom-right would read as
-        // square. AgentCard has its own internal `overflow-hidden` for
-        // content scrolling, so dropping the cell-level clip is safe.
+        // square. AgentCard uses `overflow-visible` so sprite bubbles
+        // can extend past the card top, so dropping the cell-level clip is safe.
         height: cellH,
         minHeight: 0,
         // Hide the source card while dragging; the ghost follows the cursor.

@@ -32,7 +32,7 @@ export function Markdown({ children }: MarkdownProps) {
           </a>
         ),
         p: ({ node: _node, children, ...props }) => (
-          <p className="my-3 text-[11px] font-mono leading-snug" {...props}>{children}</p>
+          <p className="mb-3 first:mt-0 mt-3 text-[11px] font-mono leading-snug" {...props}>{children}</p>
         ),
         ul: ({ node: _node, children, ...props }) => (
           <ul className="my-3 ml-4 list-disc text-[11px] font-mono space-y-1.5 [&_p]:my-0 [&_p]:text-[11px]" {...props}>{children}</ul>

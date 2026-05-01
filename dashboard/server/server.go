@@ -189,6 +189,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/debug/force-idle", s.handleDebugForceIdle)
+	s.mux.HandleFunc("POST /api/sessions/{id}/debug/respawn", s.handleDebugRespawn)
 	s.mux.HandleFunc("GET /api/runtimes", s.handleListRuntimes)
 	s.mux.HandleFunc("POST /api/task-groups/{name}/release", s.handleReleaseTaskGroup)
 	s.mux.HandleFunc("GET /api/task-groups/{name}/sessions", s.handleGetTaskGroupSessions)
@@ -1555,6 +1557,8 @@ func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime does not support cancel", http.StatusBadRequest)
 		return
 	}
+
+
 	if err := rt.Cancel(r.Context(), agent.PokegentID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1571,6 +1575,55 @@ func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDebugForceIdle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+	s.state.TransitionState(pgid, "idle", "")
+	sess := s.chatMgr.Get(pgid)
+	if sess != nil {
+		sess.BroadcastDone()
+	}
+	log.Printf("debug[%s]: forced idle", shortChat(pgid))
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDebugRespawn(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+	runningGlob := filepath.Join(s.dataDir, "running", "*-"+pgid+".json")
+	matches, _ := filepath.Glob(runningGlob)
+	if len(matches) == 0 {
+		http.Error(w, "no running file", http.StatusNotFound)
+		return
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var rs store.RunningSession
+	if err := json.Unmarshal(raw, &rs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	go func() {
+		s.chatMgr.Close(pgid)
+		time.Sleep(500 * time.Millisecond)
+		if err := s.relaunchChatSession(rs); err != nil {
+			log.Printf("debug-respawn[%s]: failed: %v", shortChat(pgid), err)
+		} else {
+			log.Printf("debug-respawn[%s]: respawned", shortChat(pgid))
+		}
+	}()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

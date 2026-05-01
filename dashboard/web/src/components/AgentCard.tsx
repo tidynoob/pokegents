@@ -189,14 +189,14 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   // for the user's preferred padding. Standard mode honours --card-padding.
   const cardStyle: React.CSSProperties = compact
     ? { padding: '6px 8px' }
-    : { padding: 'var(--card-padding, 16px)' }
+    : { padding: 'var(--card-padding, 10px)' }
 
   return (
     <>
       <div
         ref={cardRef ? (el) => cardRef(el) : undefined}
         onContextMenu={handleContextMenu}
-        className={`text-left cursor-default overflow-hidden flex flex-col h-full transition-all duration-300 relative group ${
+        className={`text-left cursor-default overflow-visible flex flex-col h-full transition-all duration-300 relative group ${
           isBusy ? 'gba-card-selected' : 'gba-card'
         } ${agent.ephemeral ? 'opacity-80' : ''}`}
         style={{
@@ -256,7 +256,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           {/* Click sprite → change sprite */}
           <div
             onClick={(e) => { e.stopPropagation(); setShowSpritePicker(true) }}
-            className="cursor-pointer hover:brightness-125 relative"
+            className="cursor-pointer hover:brightness-125 relative overflow-visible"
             style={{ width: iconSize, height: iconSize }}
           >
             {/* Static background box */}

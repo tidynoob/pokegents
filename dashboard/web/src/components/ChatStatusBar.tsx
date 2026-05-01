@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AgentState } from '../types'
-import { BgShell, BgShellStatus, truncateCommand } from '../utils/bgShells'
+import { BgShell, BgShellStatus, BgTaskType, truncateCommand } from '../utils/bgShells'
 import { formatElapsed } from '../utils/elapsed'
 
 // ChatStatusBar renders below the ChatPanel's input box. Two zones:
@@ -57,10 +57,6 @@ export function ChatStatusBar({ agent, shells, children }: ChatStatusBarProps) {
   return (
     <div className="shrink-0 px-3 py-1.5 border-t border-black/30 text-[10px] font-mono text-white/60 select-none">
       <div className="flex items-center gap-3">
-        <span className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full" style={dotStyle} />
-          <span className="text-white/80">{profileLabel || 'no profile'}</span>
-        </span>
         <span className="text-accent-red/70" title="Chat mode runs through ACP which bypasses Claude Code's permission prompts; use right-click → Switch to iTerm2 for full permission flow.">
           ▸▸ {permissionLabel}
         </span>
@@ -73,52 +69,60 @@ export function ChatStatusBar({ agent, shells, children }: ChatStatusBarProps) {
         {children && <span className="ml-auto">{children}</span>}
       </div>
 
-      {shells.length > 0 && (
-        <div className="mt-1.5 space-y-0.5">
-          {shells.map(s => <BgShellRow key={s.taskId} shell={s} />)}
-        </div>
-      )}
+      {shells.length > 0 && <BgShellSummary shells={shells} />}
     </div>
   )
 }
 
-function BgShellRow({ shell }: { shell: BgShell }) {
-  // Tick the elapsed timer once per second while the shell is live.
+function BgShellSummary({ shells }: { shells: BgShell[] }) {
+  const [hover, setHover] = useState(false)
+  const running = shells.filter(s => s.status === 'running')
+  const done = shells.filter(s => s.status !== 'running')
   const [, setTick] = useState(0)
   useEffect(() => {
-    if (shell.status !== 'running') return
+    if (running.length === 0) return
     const iv = setInterval(() => setTick(n => n + 1), 1000)
     return () => clearInterval(iv)
-  }, [shell.status])
+  }, [running.length])
 
-  const [open, setOpen] = useState(false)
-  const elapsed = shell.status === 'running'
-    ? formatElapsed(shell.startedAt)
-    : (shell.endedAt && shell.startedAt
-        ? Math.max(0, Math.floor((shell.endedAt - shell.startedAt) / 1000)) + 's'
-        : '')
+  const label = (() => {
+    const active = running.length
+    const finished = done.length
+    if (active === 0 && finished === 0) return ''
+    const parts: string[] = []
+    const runAgents = running.filter(s => s.type === 'agent').length
+    const runMonitors = running.filter(s => s.type === 'monitor').length
+    const runShells = active - runAgents - runMonitors
+    if (runShells > 0) parts.push(`${runShells} bg task${runShells > 1 ? 's' : ''}`)
+    if (runAgents > 0) parts.push(`${runAgents} subagent${runAgents > 1 ? 's' : ''}`)
+    if (runMonitors > 0) parts.push(`${runMonitors} monitor${runMonitors > 1 ? 's' : ''}`)
+    if (parts.length > 0) return parts.join(', ')
+    return `${finished} completed`
+  })()
 
   return (
-    <div className="rounded-sm">
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center gap-2 text-left hover:bg-white/5 px-1.5 py-0.5 rounded-sm transition-colors"
-      >
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[shell.status]}`} />
-        <span className="text-white/80 truncate flex-1 font-mono text-[10px]">
-          {truncateCommand(shell.command, 70)}
-        </span>
-        <span className="text-white/35 text-[9px] shrink-0 tabular-nums">
-          {STATUS_LABEL[shell.status]} {elapsed}
-        </span>
-        {typeof shell.exitCode === 'number' && (
-          <span className="text-white/30 text-[9px] shrink-0">exit {shell.exitCode}</span>
-        )}
-      </button>
-      {open && shell.lastOutput && (
-        <pre className="text-[9px] font-mono text-white/45 bg-black/30 rounded mx-1.5 my-1 px-2 py-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">
-          {shell.lastOutput}
-        </pre>
+    <div className="relative mt-1" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <div className="flex items-center gap-2 px-1.5 py-0.5 cursor-default">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${running.length > 0 ? 'bg-accent-yellow animate-pulse-soft' : 'bg-accent-green'}`} />
+        <span className="text-white/60 text-[10px] font-mono">{label}</span>
+      </div>
+      {hover && (
+        <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface-1 border border-white/10 rounded-md shadow-lg p-2 space-y-1 z-50">
+          {shells.map(s => {
+            const elapsed = s.status === 'running'
+              ? formatElapsed(s.startedAt)
+              : (s.endedAt && s.startedAt ? Math.max(0, Math.floor((s.endedAt - s.startedAt) / 1000)) + 's' : '')
+            const typeLabel = s.type === 'agent' ? 'agent' : s.type === 'monitor' ? 'monitor' : 'shell'
+            return (
+              <div key={s.taskId} className="flex items-center gap-2 text-[10px] font-mono">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[s.status]}`} />
+                <span className="text-white/30 text-[8px] shrink-0">{typeLabel}</span>
+                <span className="text-white/80 truncate flex-1">{truncateCommand(s.command, 45)}</span>
+                <span className="text-white/35 text-[9px] shrink-0 tabular-nums">{STATUS_LABEL[s.status]} {elapsed}</span>
+              </div>
+            )
+          })}
+        </div>
       )}
     </div>
   )

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AgentState, stableId } from '../types'
+import { AgentState, AgentMessage, stableId } from '../types'
 import { useSpriteAnimation } from './spriteAnimations'
+import { BusyBubble, DoneBubble } from './MessageAnimations'
 
 // ── Grid geometry ──────────────────────────────────────────
 // Source town.png is 768×640. We crop it to the playable inner town (drops
@@ -26,6 +27,24 @@ const MAP_H = ROWS * CELL  // 464
 // absolute-positioning + marginLeft so the cell's small width doesn't squish
 // the image (which a flexbox parent would do).
 const SPRITE_PX = 36
+
+// Wide sprites (reuniclus 46×27) look tiny with objectFit:contain in a square
+// box because height shrinks to preserve aspect ratio. We detect wide sprites
+// and scale their container so they render at the same visual prominence.
+const spriteSizeCache: Record<string, { w: number; h: number }> = {}
+function spriteContainerSize(sprite: string): number {
+  const cached = spriteSizeCache[sprite]
+  if (cached && cached.w > cached.h * 1.4) {
+    return Math.round(SPRITE_PX * (cached.w / cached.h))
+  }
+  return SPRITE_PX
+}
+function preloadSpriteSize(sprite: string) {
+  if (spriteSizeCache[sprite]) return
+  const img = new window.Image()
+  img.onload = () => { spriteSizeCache[sprite] = { w: img.naturalWidth, h: img.naturalHeight } }
+  img.src = `/sprites/${sprite}.png`
+}
 
 // Default mask: everything walkable. The crop already removes the
 // trees/mountains border, so within the visible playable area the user paints
@@ -233,6 +252,9 @@ interface TownSprite {
   // the render would fall back to a state-only ternary and visuals would
   // desync from the real step timing.
   stepMs: number
+  // Mail delivery: sprint to recipient then return to original position
+  mailTarget?: Cell | null
+  mailReturn?: Cell | null
 }
 
 function isBusy(s: AgentState['state']) {
@@ -246,15 +268,21 @@ interface TownViewProps {
   onSelect: (agent: AgentState) => void
   selectedId: string | null
   debug?: boolean
+  newMessage?: AgentMessage | null
 }
+
+// Mail-carry fields (mailTarget, mailReturn) live on TownSprite.
+// When set, the sprite sprints to the recipient and back using the normal
+// movement tick — no separate clone component needed.
 
 // Per-state step durations. Idle pokes amble (slower step + longer wander
 // cooldowns); during state transitions and once at a busy station they move
 // fast so the trip between zones reads as a sprint, not a saunter.
 const STEP_MS_IDLE = 900       // each idle-wander step within the idle area
-const STEP_MS_TRANSIT = 80     // cross-zone travel: idle→busy or busy→idle
-const IDLE_COOLDOWN_MIN = 2400
-const IDLE_COOLDOWN_MAX = 7000
+const STEP_MS_TRANSIT = 30     // cross-zone travel: idle→busy or busy→idle
+const TRANSIT_STEPS_PER_TICK = 2 // advance multiple cells per tick during transit
+const IDLE_COOLDOWN_MIN = 5000
+const IDLE_COOLDOWN_MAX = 12000
 
 // Movement tick rate. Must be ≤ the smallest STEP_MS we ever schedule —
 // otherwise the loop becomes the floor and a sprite that "should" step every
@@ -262,10 +290,34 @@ const IDLE_COOLDOWN_MAX = 7000
 // clamped transit to 8 steps/sec no matter how low STEP_MS_TRANSIT went.
 const TICK_MS = 30
 
-export function TownView({ agents, onSelect, selectedId, debug = false }: TownViewProps) {
+export function TownView({ agents, onSelect, selectedId, debug = false, newMessage }: TownViewProps) {
   const [sprites, setSprites] = useState<Record<string, TownSprite>>({})
   const spritesRef = useRef(sprites)
   spritesRef.current = sprites
+
+  // Mail-carry: when an agent sends a message, sprint to recipient then return
+  const seenMsgIds = useRef(new Set<string>())
+
+  useEffect(() => {
+    if (!newMessage || seenMsgIds.current.has(newMessage.id)) return
+    seenMsgIds.current.add(newMessage.id)
+    const cur = spritesRef.current
+    const fromSprite = Object.values(cur).find(s => s.id === newMessage.from)
+    const toSprite = Object.values(cur).find(s => s.id === newMessage.to)
+    if (!fromSprite || !toSprite) return
+    setSprites(prev => {
+      const s = prev[newMessage.from]
+      if (!s) return prev
+      return { ...prev, [newMessage.from]: {
+        ...s,
+        mailTarget: { ...toSprite.pos },
+        mailReturn: { ...s.pos },
+        target: { ...toSprite.pos },
+        nextMoveAt: Date.now(),
+        stepMs: STEP_MS_TRANSIT,
+      }}
+    })
+  }, [newMessage])
 
   // Walkable mask, fetched from server on mount.
   const [mask, setMask] = useState<string[]>(() => mutableMask)
@@ -395,7 +447,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
             agentState: newState,
             taskGroup,
             pos: spawn,
-            target: nowBusy ? initialBusyTarget : null,
+            target: nowBusy ? initialBusyTarget : randomWalkableCell(),
             facing: 'right',
             nextMoveAt: now + 300 + Math.random() * 600, // stagger first moves
             stepMs: nowBusy ? STEP_MS_TRANSIT : STEP_MS_IDLE,
@@ -426,7 +478,9 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
           const busy = isBusy(s.agentState)
           const atIdleArea = !busy && idlePool.length > 0 && inCells(s.pos, idlePool)
 
-          if (busy) {
+          const isDelivering = !!s.mailTarget || !!s.mailReturn
+
+          if (busy && !isDelivering) {
             const targetIsBusy = s.target ? inCells(s.target, busyPool) : false
 
             if (busyPool.length === 0) {
@@ -454,12 +508,19 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
           //  - idle inside idle area (or no idle area painted): amble
           // The two transit modes share STEP_MS_TRANSIT — both feel like a
           // dash between zones, vs the slow STEP_MS_IDLE wander.
-          const stepDelay = busy || (idlePool.length > 0 && !atIdleArea)
+          const stepDelay = busy || isDelivering || (idlePool.length > 0 && !atIdleArea)
             ? STEP_MS_TRANSIT
             : STEP_MS_IDLE
 
           // If at target:
           if (s.target && s.pos.col === s.target.col && s.pos.row === s.target.row) {
+            // Mail delivery: arrived at recipient → sprint back to origin
+            if (s.mailTarget && s.pos.col === s.mailTarget.col && s.pos.row === s.mailTarget.row && s.mailReturn) {
+              next[id] = { ...s, target: s.mailReturn, mailTarget: undefined, mailReturn: undefined, nextMoveAt: now, stepMs: STEP_MS_TRANSIT }
+              changed = true
+              continue
+            }
+            // Mail return complete: clear and resume normal behavior
             if (!busy) {
               // Idle cooldown then pick a new wander target
               if (now >= s.nextMoveAt) {
@@ -476,18 +537,22 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
             continue
           }
 
-          // If we have a target, step one cell closer (pathfinding)
+          // If we have a target, step closer (pathfinding)
           if (s.target && now >= s.nextMoveAt) {
-            const step = stepToward(s.pos, s.target)
-            if (step) {
-              const facing: 'left' | 'right' = step.col < s.pos.col ? 'left' : step.col > s.pos.col ? 'right' : s.facing
-              next[id] = {
-                ...s,
-                pos: step,
-                facing,
-                nextMoveAt: now + stepDelay,
-                stepMs: stepDelay,
-              }
+            const isTransit = stepDelay === STEP_MS_TRANSIT
+            const steps = isTransit ? TRANSIT_STEPS_PER_TICK : 1
+            let cur = s
+            let stepped = false
+            for (let i = 0; i < steps; i++) {
+              if (!cur.target || (cur.pos.col === cur.target.col && cur.pos.row === cur.target.row)) break
+              const step = stepToward(cur.pos, cur.target)
+              if (!step) break
+              const facing: 'left' | 'right' = step.col < cur.pos.col ? 'left' : step.col > cur.pos.col ? 'right' : cur.facing
+              cur = { ...cur, pos: step, facing }
+              stepped = true
+            }
+            if (stepped) {
+              next[id] = { ...cur, nextMoveAt: now + stepDelay, stepMs: stepDelay }
               changed = true
             } else {
               // No path — wait and retry
@@ -680,6 +745,9 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
           const px = s.pos.col * CELL
           const py = s.pos.row * CELL
           const selected = selectedId === s.id
+          const atTarget = !s.target || (s.pos.col === s.target.col && s.pos.row === s.target.row)
+          const inTransit = !atTarget && s.stepMs === STEP_MS_TRANSIT
+          const isDone = s.agentState === 'done'
           return (
             <button
               key={s.id}
@@ -713,53 +781,26 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
                   }}
                 />
               )}
-              {/* State badge — anchored to the sprite's top-right area */}
-              {isBusy(s.agentState) && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: SPRITE_PX - 4,
-                    left: '50%',
-                    marginLeft: SPRITE_PX / 2 - 12,
-                    width: 10,
-                    height: 10,
-                    borderRadius: '50%',
-                    background: '#ff5050',
-                    boxShadow: '0 0 0 1.5px #301010, 0 0 6px rgba(255,80,80,0.7)',
-                    animation: 'pulse 1.2s infinite',
-                    zIndex: 1,
-                  }}
-                />
-              )}
-              {/* Sprite — absolute-positioned and centered on the cell so the
-                  parent's small width (CELL=16) doesn't squish it. The img is
-                  intentionally larger than the cell and overflows visibly.
-                  Wrapper carries the per-state animation class (sprite-hop,
-                  sprite-bump-*, etc.) reused from the agent-card system; the
-                  inner img keeps its facing flip + aspect-preserving fit.
-                  `stationary` gates the animation cycle: when the sprite is
-                  walking between cells the bump-left/bump-right animations
-                  conflict with the parent translate and read as the sprite
-                  reversing direction. So we only animate at-rest, matching
-                  the card preview where the sprite never moves. */}
+              {/* Busy/done bubble — reuses the same cycling emoji bubbles from AgentCard */}
+              <div style={{ position: 'absolute', bottom: SPRITE_PX + 2, left: '50%', transform: 'translateX(-50%) scale(0.85)', transformOrigin: 'bottom center', zIndex: 1 }}>
+                <div className="relative" style={{ width: 0, height: 0 }}>
+                  <BusyBubble isBusy={isBusy(s.agentState)} />
+                  <DoneBubble isDone={isDone} />
+                </div>
+              </div>
               <TownSpritePoke
                 sprite={s.sprite}
                 state={s.agentState}
                 facing={s.facing}
-                stationary={!s.target || (s.pos.col === s.target.col && s.pos.row === s.target.row)}
+                inTransit={inTransit}
               />
             </button>
           )
         })}
 
+
       </div>
 
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50%      { opacity: 0.6; transform: scale(0.85); }
-        }
-      `}</style>
     </div>
   )
 }
@@ -768,27 +809,26 @@ export function TownView({ agents, onSelect, selectedId, debug = false }: TownVi
 // own useSpriteAnimation cycle (the hook holds setTimeout state — sharing it
 // would mean every sprite hops on the same beat). Reuses the same animation
 // registry as the agent-card preview, so card-busy and town-busy match.
-function TownSpritePoke({ sprite, state, facing, stationary }: {
+function TownSpritePoke({ sprite, state, facing, inTransit }: {
   sprite: string
   state: AgentState['state']
   facing: 'left' | 'right'
-  stationary: boolean
+  inTransit: boolean
 }) {
-  // active=false makes the hook hold the defaultClass (gentle sprite-idle bob)
-  // instead of cycling through busy hop/bump/shake. We only want the cycle
-  // when the sprite has arrived at its target — during transit the wrapper's
-  // animation transforms fight the parent translate.
-  const animClass = useSpriteAnimation(state, stationary)
+  const animClass = useSpriteAnimation(state, !inTransit)
+  const cls = inTransit ? 'sprite-transit-hop' : animClass
+  const sz = spriteContainerSize(sprite)
+  useEffect(() => { preloadSpriteSize(sprite) }, [sprite])
   return (
     <div
-      className={animClass}
+      className={cls}
       style={{
         position: 'absolute',
         bottom: 0,
         left: '50%',
-        marginLeft: -SPRITE_PX / 2,
-        width: SPRITE_PX,
-        height: SPRITE_PX,
+        marginLeft: -sz / 2,
+        width: sz,
+        height: sz,
         pointerEvents: 'none',
       }}
     >
@@ -799,26 +839,18 @@ function TownSpritePoke({ sprite, state, facing, stationary }: {
         style={{
           width: '100%',
           height: '100%',
-          // Tailwind preflight sets img { max-width: 100% } — leave that
-          // alone here since the wrapper already pins us to SPRITE_PX.
-          // Sprites have varied native aspect ratios (kakuna is 13×18,
-          // pikachu 21×20). `contain` preserves aspect so narrow sprites
-          // don't stretch into squares; `bottom` keeps feet grounded.
           objectFit: 'contain',
           objectPosition: 'bottom',
           imageRendering: 'pixelated',
           filter: 'drop-shadow(1px 2px 0 rgba(0,0,0,0.45))',
           userSelect: 'none',
-          // Facing flip lives on the img so the wrapper's animation class
-          // (which sets transform: translate/rotate) doesn't fight it.
-          // Source sprite art faces LEFT, so we mirror when the agent is
-          // moving right. Inverting this reads as walking backward.
           transform: facing === 'right' ? 'scaleX(-1)' : undefined,
         }}
       />
     </div>
   )
 }
+
 
 // ── Helpers ────────────────────────────────────────────────
 

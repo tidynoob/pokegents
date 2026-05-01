@@ -128,6 +128,21 @@ body::before {
   background: linear-gradient(180deg, #b898c8 0%, #9880b0 100%);
 }
 
+.gba-button-red {
+  background: linear-gradient(180deg, #b86858 0%, #a04838 100%);
+  border: 2px solid #804030;
+  border-radius: 16px;
+  color: #f8f0f0;
+  box-shadow:
+    inset 1px 1px 0 rgba(255,255,255,0.2),
+    1px 1px 0 rgba(0,0,0,0.3);
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.5);
+}
+
+.gba-button-red:hover {
+  background: linear-gradient(180deg, #c87868 0%, #b05848 100%);
+}
+
 /* Teal panel (like the left panel behind Charizard) */
 .gba-panel {
   background:
@@ -311,6 +326,17 @@ body::before {
 }
 .sprite-hop-loop {
   animation: sprite-celebrate-kf 1.2s ease-in-out infinite;
+}
+
+/* Transit hop: quick bouncy walk cycle for sprites moving between zones */
+@keyframes sprite-transit-hop-kf {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-5px); }
+  60% { transform: translateY(-5px) scaleY(1.03); }
+  80% { transform: translateY(0); }
+}
+.sprite-transit-hop {
+  animation: sprite-transit-hop-kf 0.28s ease-out infinite;
 }
 
 /* Legacy aliases — kept for any stray references */
