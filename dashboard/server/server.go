@@ -144,7 +144,7 @@ func NewServer(cfg Config) (*Server, error) {
 	// Phase 3: chat-backed pokegent supervisor.
 	s.chatMgr = NewChatManager(cfg.DataDir, func() {
 		eventBus.Publish("state_update", state.GetAgents())
-	})
+	}, eventBus)
 
 	// Runtime registry — every backend implements the same interface; HTTP
 	// handlers dispatch through this map keyed by `agent.interface`.
@@ -211,6 +211,10 @@ func (s *Server) routes() {
 	// `/api/sessions/{id}/...` and are NOT duplicated here.
 	s.mux.HandleFunc("GET /api/chat/{id}/stream", s.handleChatStream)
 	s.mux.HandleFunc("POST /api/chat/{id}/permission/{request_id}", s.handleChatPermission)
+	// Phase 1: event ring buffer — cursor-based fetch for reconnecting clients.
+	s.mux.HandleFunc("GET /api/chat/{id}/events", s.handleChatEvents)
+	// Phase 1: prompt queue — inspect pending queued prompts.
+	s.mux.HandleFunc("GET /api/sessions/{id}/queue", s.handleGetQueue)
 
 	// Phase 4: interface migration — swap an agent's runtime backend without
 	// changing identity (pokegent_id, session_id, mailbox all preserved).
@@ -379,7 +383,7 @@ func (s *Server) startTracePoller() {
 				// Update context usage — detect compaction (tokens decrease)
 				ctx := extractContextUsage(transcriptPath)
 				if ctx.Tokens > 0 && (ctx.Tokens != a.ContextTokens || ctx.Window != a.ContextWindow) {
-					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && (a.State == "done" || a.State == "idle") {
+					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && a.State == "idle" {
 						// Context shrunk on a done agent — compaction detected
 						s.state.UpdateSummary(a.SessionID, "Compacted")
 					}
@@ -396,7 +400,7 @@ func (s *Server) startTracePoller() {
 				}
 				// Detect Ctrl+C interrupt: agent is busy but transcript shows "[Request interrupted by user]"
 				if a.State == "busy" && isTranscriptInterrupted(transcriptPath) {
-					s.state.TransitionState(a.SessionID, "done", "interrupted")
+					s.state.TransitionState(a.SessionID, "idle", "interrupted")
 					changed = true
 					continue
 				}
@@ -908,7 +912,7 @@ func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 	s.notifier.MaybeNotify(evt, agent)
 
 	// When an agent transitions to done/idle, nudge if pending messages exist
-	if agent != nil && (agent.State == "done" || agent.State == "idle") {
+	if agent != nil && agent.State == "idle" {
 		s.msgSvc.NudgeIfPending(s.resolveToPokegentID(evt.SessionID))
 	}
 
@@ -1516,6 +1520,7 @@ func (s *Server) resolveAgentAndRuntime(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSendPrompt(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Prompt string `json:"prompt"`
+		Nonce  string `json:"nonce,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -1529,11 +1534,28 @@ func (s *Server) handleSendPrompt(w http.ResponseWriter, r *http.Request) {
 	if done {
 		return
 	}
+
+	// Chat agents: route through the state machine's queue so busy
+	// agents enqueue instead of fire-and-forget into a blocked Prompt().
+	if agent.Interface == "chat" {
+		sess := s.chatMgr.Get(agent.PokegentID)
+		if sess != nil {
+			queued, err := sess.SubmitPrompt(body.Prompt, body.Nonce)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "queued": queued, "nonce": body.Nonce})
+			return
+		}
+	}
+
+	// Non-chat agents: existing behavior.
 	if err := rt.SendPrompt(r.Context(), agent.PokegentID, body.Prompt); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]bool{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "nonce": body.Nonce})
 }
 
 func (s *Server) handleCheckMessages(w http.ResponseWriter, r *http.Request) {
@@ -1576,6 +1598,47 @@ func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleChatEvents returns events from the in-memory ring buffer for a chat
+// session. Supports cursor-based pagination via ?after=<seqNo>. Reconnecting
+// clients fetch only the events they missed instead of replaying the full
+// SSE stream.
+func (s *Server) handleChatEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess := s.chatMgr.Get(id)
+	if sess == nil {
+		http.Error(w, "chat session not found", http.StatusNotFound)
+		return
+	}
+	var after uint64
+	if v := r.URL.Query().Get("after"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			after = n
+		}
+	}
+	events, hasGap := sess.EventsSince(after)
+	writeJSON(w, map[string]any{
+		"events":  events,
+		"has_gap": hasGap,
+	})
+}
+
+// handleGetQueue returns the pending queued prompts for a chat session.
+func (s *Server) handleGetQueue(w http.ResponseWriter, r *http.Request) {
+	hint := r.PathValue("id")
+	pgid := s.resolveToPokegentID(hint)
+	sess := s.chatMgr.Get(pgid)
+	if sess == nil {
+		// No active chat session — return empty queue.
+		writeJSON(w, []QueuedPrompt{})
+		return
+	}
+	if sess.queue == nil {
+		writeJSON(w, []QueuedPrompt{})
+		return
+	}
+	writeJSON(w, sess.queue.Pending())
 }
 
 func (s *Server) handleDebugForceIdle(w http.ResponseWriter, r *http.Request) {
@@ -1652,7 +1715,7 @@ func (s *Server) handleReleaseTaskGroup(w http.ResponseWriter, r *http.Request) 
 	for _, agent := range agents {
 		if agent.Ephemeral {
 			// Dismiss completed ephemerals immediately
-			if agent.State == "done" {
+			if agent.State == "idle" {
 				s.state.DeleteEphemeral(agent.SessionID)
 			}
 			continue
@@ -2101,7 +2164,7 @@ func (s *Server) relaunchIfIdle(sessionID string) string {
 		cmd += fmt.Sprintf(" --pokegent-id %s", pokegentID)
 	}
 
-	if agent.State == "done" || agent.State == "idle" {
+	if agent.State == "idle" {
 		if agent.ITermSessionID != "" || agent.TTY != "" {
 			go func() {
 				s.terminal.WriteText(agent.ITermSessionID, agent.TTY, "/exit")

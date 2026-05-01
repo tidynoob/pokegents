@@ -747,7 +747,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
           const selected = selectedId === s.id
           const atTarget = !s.target || (s.pos.col === s.target.col && s.pos.row === s.target.row)
           const inTransit = !atTarget && s.stepMs === STEP_MS_TRANSIT
-          const isDone = s.agentState === 'done'
+          const isDone = false // Phase 2: done collapsed into idle
           return (
             <button
               key={s.id}

@@ -88,6 +88,19 @@ func (s *Server) reattachChatSessions() {
 		waitForOrphansGone(t.rs.SessionID, reattachOrphanKillTimeout)
 	}
 	for _, t := range pending {
+		// If the status file says "busy" but the ACP subprocess is dead
+		// (it's being respawned), overwrite state to idle so the agent
+		// doesn't appear permanently stuck in busy state during recovery.
+		sf, err := s.state.store.Status.Get(t.rs.PokegentID)
+		if err == nil && sf != nil && sf.State == "busy" {
+			sf.State = "idle"
+			sf.Detail = "recovered after restart"
+			sf.BusySince = ""
+			s.state.store.Status.Upsert(*sf)
+			log.Printf("chat-reattach[%s]: status was busy-but-dead, reset to idle",
+				shortChat(t.rs.PokegentID))
+		}
+
 		// Re-touch before each spawn — the 30s grace period may have
 		// expired if earlier spawns took a while.
 		os.Chtimes(t.jsonPath, time.Now(), time.Now())

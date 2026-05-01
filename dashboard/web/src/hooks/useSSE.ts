@@ -64,6 +64,35 @@ export function useSSE() {
       } catch { /* ignore */ }
     })
 
+    // Phase 1: targeted state patch from chat agent transitions —
+    // applies a surgical update to a single agent's state fields,
+    // bypassing the full state_update rebuild cycle.
+    es.addEventListener('agent_state_patch', (e) => {
+      touch()
+      try {
+        const patch = JSON.parse(e.data) as {
+          pokegent_id: string
+          state: string
+          busy_since: string
+          background_tasks: number
+        }
+        setAgents(prev => {
+          const idx = prev.findIndex(a =>
+            a.pokegent_id === patch.pokegent_id || a.session_id === patch.pokegent_id
+          )
+          if (idx < 0) return prev
+          const updated = [...prev]
+          updated[idx] = {
+            ...updated[idx],
+            state: patch.state,
+            busy_since: patch.busy_since,
+            background_tasks: patch.background_tasks,
+          }
+          return updated
+        })
+      } catch { /* ignore */ }
+    })
+
     es.addEventListener('connections_update', (e) => {
       touch()
       try {

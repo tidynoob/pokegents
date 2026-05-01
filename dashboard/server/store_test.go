@@ -234,40 +234,40 @@ func TestStatusUpsert(t *testing.T) {
 		t.Errorf("state = %q, want busy", got.State)
 	}
 
-	// Upsert: update state to done
-	sf.State = "done"
+	// Upsert: update state to idle (finished)
+	sf.State = "idle"
 	sf.Detail = "finished"
 	writeTestJSON(t, path, sf)
 
 	got2 := readTestJSON[StatusFile](t, path)
-	if got2.State != "done" {
-		t.Errorf("state after upsert = %q, want done", got2.State)
+	if got2.State != "idle" {
+		t.Errorf("state after upsert = %q, want idle", got2.State)
 	}
 }
 
 func TestStatusRaceGuard(t *testing.T) {
-	// PostToolUse (busy) must NOT overwrite Stop (done)
+	// PostToolUse (busy) must NOT overwrite Stop (idle)
 	// This simulates the race condition we've seen in production
 	dir := setupTestDir(t)
 	path := filepath.Join(dir, "status", "abc.json")
 
-	// Agent finishes: state = done
-	writeTestJSON(t, path, StatusFile{SessionID: "abc", State: "done", Detail: "finished"})
+	// Agent finishes: state = idle
+	writeTestJSON(t, path, StatusFile{SessionID: "abc", State: "idle", Detail: "finished"})
 
 	// Late PostToolUse arrives — should be rejected
 	newState := "busy"
 	event := "PostToolUse"
 
 	current := readTestJSON[StatusFile](t, path)
-	if current.State == "done" || current.State == "error" || current.State == "idle" {
+	if current.State == "error" || current.State == "idle" {
 		if newState == "busy" && event != "UserPromptSubmit" {
-			// Guard: don't overwrite done/error/idle with busy (except on new prompt)
+			// Guard: don't overwrite error/idle with busy (except on new prompt)
 			newState = current.State // keep existing
 		}
 	}
 
-	if newState != "done" {
-		t.Errorf("race guard failed: state = %q, should stay done", newState)
+	if newState != "idle" {
+		t.Errorf("race guard failed: state = %q, should stay idle", newState)
 	}
 }
 

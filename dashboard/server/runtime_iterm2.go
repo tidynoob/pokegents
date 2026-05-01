@@ -102,3 +102,7 @@ func (r *iterm2Runtime) CheckMessages(_ context.Context, pgid string) error {
 	go r.terminal.WriteText(itermSID, tty, "check messages")
 	return nil
 }
+
+func (r *iterm2Runtime) StopTask(_ context.Context, _, _ string) error {
+	return fmt.Errorf("iterm2 runtime does not support StopTask")
+}

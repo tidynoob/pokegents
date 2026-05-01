@@ -2,15 +2,18 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { renameAgent, focusAgent, setSprite, sendPrompt, ProjectInfo, RoleInfo } from '../api'
+import { focusAgent, setSprite, sendPrompt, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
 import { useSpriteAnimation } from './spriteAnimations'
 import { PromptInput } from './PromptInput'
 import { AgentMenu } from './AgentMenu'
+import { StateBadge, AgentLifecycleState } from './StateBadge'
 import { formatElapsed } from '../utils/elapsed'
 import { renderMiniMarkdown } from '../utils/miniMarkdown'
 import { useRuntimeCapabilities, capsFor } from '../utils/runtimes'
+import { useAgentRename } from '../hooks/useAgentRename'
+import { useAgentState } from '../hooks/useAgentState'
 
 export function ProfilePill({ name, color }: { name: string; color?: [number, number, number] }) {
   const [r, g, b] = color || [100, 100, 100]
@@ -134,48 +137,34 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const title = agent.display_name || agent.profile_name || 'Agent'
   const showDetail = agent.detail && !HIDE_DETAILS.has(agent.detail)
   const [r, g, b] = agent.color
-  const isBusy = agent.state === 'busy'
-  const isDone = agent.state === 'done'
-  const isIdle = agent.state === 'idle'
-  const isError = agent.state === 'error'
+  const agentState = useAgentState(agent)
+  const { isBusy, isError, isIdle } = agentState
+  const isDone = false // Phase 2: done collapsed into idle
   const ageSeconds = agent.last_updated ? (Date.now() - new Date(agent.last_updated).getTime()) / 1000 : 0
   const isCompacting = agent.detail === 'compacting'
   const outputText = isCompacting ? null : (isBusy ? agent.last_trace : agent.last_summary)
 
-  const [editing, setEditing] = useState(false)
-  const [editValue, setEditValue] = useState(title)
+  const rename = useAgentRename(agent.session_id, title)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [showSpritePicker, setShowSpritePicker] = useState(false)
   const [flashDismissed, setFlashDismissed] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const allCaps = useRuntimeCapabilities()
   const caps = capsFor(allCaps, agent.interface)
 
   useEffect(() => {
-    if (editing) {
-      inputRef.current?.focus()
-      inputRef.current?.select()
+    if (rename.isRenaming) {
+      renameInputRef.current?.focus()
+      renameInputRef.current?.select()
     }
-  }, [editing])
+  }, [rename.isRenaming])
 
   // Reset flash dismissed when agent starts a new turn
   useEffect(() => {
     if (isBusy) setFlashDismissed(false)
   }, [isBusy])
-
-  const renamePending = useRef(false)
-  const handleRename = async () => {
-    if (renamePending.current) return
-    const newName = editValue.trim()
-    setEditing(false)
-    if (newName && newName !== title) {
-      renamePending.current = true
-      await renameAgent(agent.session_id, newName)
-      renamePending.current = false
-    }
-  }
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -275,15 +264,15 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
                 {/* Click name → rename */}
-                {editing ? (
+                {rename.isRenaming ? (
                   <input
-                    ref={inputRef}
-                    value={editValue}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    onBlur={handleRename}
+                    ref={renameInputRef}
+                    value={rename.newName}
+                    onChange={(e) => rename.setNewName(e.target.value)}
+                    onBlur={rename.submitRename}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleRename()
-                      if (e.key === 'Escape') setEditing(false)
+                      if (e.key === 'Enter') rename.submitRename()
+                      if (e.key === 'Escape') rename.cancelRename()
                     }}
                     onClick={(e) => e.stopPropagation()}
                     className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white bg-transparent border-b border-white/50 outline-none w-full pixel-shadow`}
@@ -291,7 +280,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
                 ) : (
                   <h3
                     className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white truncate cursor-pointer hover:text-accent-yellow pixel-shadow`}
-                    onClick={(e) => { e.stopPropagation(); setEditValue(title); setEditing(true) }}
+                    onClick={(e) => { e.stopPropagation(); rename.startRename() }}
                   >
                     {title}
                   </h3>
@@ -301,6 +290,14 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               <div className="flex flex-col items-end gap-0.5 shrink-0">
                 {!compact && (
                   <>
+                    <div className="flex items-center gap-1">
+                      <StateBadge state={(agent.state || 'idle') as AgentLifecycleState} busySince={agent.busy_since} compact />
+                      {agentState.backgroundTasks > 0 && (
+                        <span className="text-[10px] text-amber-400/80 ml-1">
+                          {agentState.backgroundTasks} bg
+                        </span>
+                      )}
+                    </div>
                     {agent.ephemeral && <SubagentPill type={agent.subagent_type} />}
                     {agent.task_group && <TaskGroupPill name={agent.task_group} />}
                     {agent.role && <RolePill name={agent.role} />}
@@ -356,7 +353,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           agent={agent}
           capabilities={caps}
           onClose={() => setMenuOpen(false)}
-          onRename={() => { setMenuOpen(false); setEditValue(title); setEditing(true) }}
+          onRename={() => { setMenuOpen(false); rename.startRename() }}
           onChangeSprite={() => { setMenuOpen(false); setShowSpritePicker(true) }}
           onCollapse={onCollapse}
           projects={projects}

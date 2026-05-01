@@ -266,13 +266,10 @@ type ChatSession struct {
 
 	client *chatACPClient
 
-	busyCount   atomic.Int32 // number of in-flight Prompt() goroutines
 	lastUpdated atomic.Int64 // unix millis
 
 	subsMu      sync.Mutex
 	subscribers map[chan ChatSessionEvent]struct{}
-	replayBuf   []ChatSessionEvent // last N events for late-connecting subscribers
-	replayMax   int
 
 	// Active background tasks — keyed by taskId. Populated from
 	// claude/task_started, removed on claude/task_notification.
@@ -288,11 +285,11 @@ type ChatSession struct {
 	recentActions  []string
 	contextTokens  int
 	contextWindow  int
-	lastSummary    string
-	lastTrace      string
-	currentDetail  string
-	currentPrompt  string
-	busySince      time.Time
+	lastSummary         string
+	lastSummaryStaging  string // accumulates during a turn; committed on busy→idle
+	lastTrace           string
+	currentDetail       string
+	currentPrompt       string
 
 	// Phase 5: parked ACP `session/request_permission` requests waiting for
 	// a user decision. Replayed to any late-connecting SSE subscriber so a
@@ -319,6 +316,32 @@ type ChatSession struct {
 	// we get a useless `read |0: file already closed` after the fact.
 	stderrMu   sync.Mutex
 	stderrTail []string
+
+	// State machine — single source of truth for busy/idle (Phase 5)
+	smMu         sync.Mutex
+	smState      string // "idle" | "busy" | "error"
+	smTurnID     uint64
+	smSeqNo      uint64
+	smBusySince  time.Time
+	smCancelWdog *time.Timer
+
+	// Event ring buffer for cursor-based fetch
+	eventRingMu  sync.RWMutex
+	eventRing    []RuntimeEvent
+	eventRingCap int
+
+	// Phase 1: debounce status file writes — streaming chunks fire
+	// translateUpdate on every chunk; the debouncer coalesces writes to
+	// a 500ms trailing edge. State transitions (busy↔idle) flush immediately.
+	statusDebounce *time.Timer
+
+	// Phase 1: direct SSE broadcast to dashboard EventBus, bypassing
+	// the file→fsnotify→rebuild indirection for state transitions.
+	dashboardBus *EventBus
+
+	// Phase 1: server-side prompt queue — persists queued prompts to
+	// ~/.pokegents/queues/{pgid}.json so they survive page refresh.
+	queue *PromptQueue
 }
 
 type pendingPermission struct {
@@ -371,13 +394,6 @@ func (s *ChatSession) broadcast(t string, payload json.RawMessage) {
 	evt := ChatSessionEvent{Type: t, Data: payload}
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
-	// Buffer for late-connecting subscribers (e.g. after server restart).
-	if s.replayMax > 0 {
-		s.replayBuf = append(s.replayBuf, evt)
-		if len(s.replayBuf) > s.replayMax {
-			s.replayBuf = s.replayBuf[len(s.replayBuf)-s.replayMax:]
-		}
-	}
 	for ch := range s.subscribers {
 		select {
 		case ch <- evt:
@@ -406,7 +422,24 @@ func (s *ChatSession) handleNotification(method string, params json.RawMessage) 
 				s.tasksMu.Unlock()
 			}
 		}
-		s.broadcast(method, params)
+
+		// Translate to RuntimeEvent → state machine + ring buffer.
+		// applyEvent handles state transitions and side effects (broadcast
+		// state, publish agent_state_patch, status file write, queue drain).
+		s.smMu.Lock()
+		turnID := s.smTurnID
+		s.smMu.Unlock()
+		if evt, ok := translateACPEvent(method, params, turnID); ok {
+			s.applyEvent(evt)
+			s.appendEvent(evt)
+		}
+
+		// Forward raw event to chat SSE for frontend display (task badges,
+		// rate limit warnings, API retry messages). State changes are NOT
+		// broadcast here — applyEvent handles that via the "state" event type.
+		if method != "claude/session_state" {
+			s.broadcast(method, params)
+		}
 		return
 	}
 	if method != "session/update" {
@@ -456,16 +489,19 @@ func (s *ChatSession) translateUpdate(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Update, &u)
 		if u.Content.Type == "text" {
-			// Last summary = most recent agent text, truncated.
-			s.lastSummary = truncateChat(s.lastSummary+u.Content.Text, 280)
+			// Accumulate into staging — committed on busy→idle so the
+			// AgentCard preview never flashes empty mid-turn.
+			s.lastSummaryStaging = truncateChat(s.lastSummaryStaging+u.Content.Text, 280)
 			s.currentDetail = ""
 		}
 	case "tool_call", "tool_call_update":
-		// Reset lastSummary when a tool call starts so the card preview
-		// shows the LAST assistant text block (after all tools), not the
-		// first 280 chars of the entire turn.
+		// Reset the staging buffer when a new tool call starts so the
+		// final committed summary is the LAST assistant text block (after
+		// all tools), not the first 280 chars of the entire turn.
+		// lastSummary itself is NOT cleared — it retains the previous
+		// turn's value until the staging buffer overwrites it on completion.
 		if disc.SessionUpdate == "tool_call" {
-			s.lastSummary = ""
+			s.lastSummaryStaging = ""
 		}
 		var u struct {
 			Title     string `json:"title"`
@@ -516,7 +552,47 @@ func (s *ChatSession) translateUpdate(params json.RawMessage) {
 			s.contextWindow = u.Size
 		}
 	}
-	s.writeStatusFileLocked()
+	s.debouncedStatusWrite()
+}
+
+// debouncedStatusWrite coalesces high-frequency status file writes (e.g. per
+// streaming chunk) into a single write per 500ms trailing edge. State
+// transitions (busy↔idle, →error) call writeStatusFileLocked directly
+// instead — they bypass the debounce for immediate on-disk visibility.
+// Caller must hold s.stateMu.
+func (s *ChatSession) debouncedStatusWrite() {
+	if s.statusDebounce != nil {
+		s.statusDebounce.Stop()
+	}
+	s.statusDebounce = time.AfterFunc(500*time.Millisecond, func() {
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
+		s.writeStatusFileLocked()
+	})
+}
+
+// publishAgentStatePatchWith broadcasts a targeted state update to the
+// dashboard SSE EventBus using the provided state values. Called from
+// applyEvent which already holds the values under smMu — avoids re-reading
+// smState after releasing the lock (TOCTOU).
+func (s *ChatSession) publishAgentStatePatchWith(state string, busySince time.Time) {
+	if s.dashboardBus == nil {
+		return
+	}
+	busySinceStr := ""
+	if !busySince.IsZero() {
+		busySinceStr = busySince.UTC().Format(time.RFC3339)
+	}
+	s.tasksMu.Lock()
+	taskCount := len(s.activeTasks)
+	s.tasksMu.Unlock()
+
+	s.dashboardBus.Publish("agent_state_patch", map[string]any{
+		"pokegent_id":      s.PokegentID,
+		"state":            state,
+		"busy_since":       busySinceStr,
+		"background_tasks": taskCount,
+	})
 }
 
 func (s *ChatSession) writeStatusFileLocked() {
@@ -535,13 +611,20 @@ func (s *ChatSession) writeStatusFileLocked() {
 	if s.ACPID == "" {
 		return
 	}
-	state := "idle"
-	if s.busyCount.Load() > 0 {
-		state = "busy"
-	}
+	s.smMu.Lock()
+	state := s.smState
 	busySince := ""
-	if !s.busySince.IsZero() {
-		busySince = s.busySince.UTC().Format(time.RFC3339)
+	if !s.smBusySince.IsZero() {
+		busySince = s.smBusySince.UTC().Format(time.RFC3339)
+	}
+	s.smMu.Unlock()
+	// During a busy turn, prefer the staging buffer so the status file
+	// reflects in-progress text. When idle (staging already committed), or
+	// when staging is empty (mid tool-call), fall back to the committed
+	// lastSummary so the card never flashes empty.
+	summary := s.lastSummary
+	if s.lastSummaryStaging != "" {
+		summary = s.lastSummaryStaging
 	}
 	_ = writeStatusFile(s.dataDir, s.PokegentID, store.StatusFile{
 		SessionID:     s.ACPID,
@@ -549,7 +632,7 @@ func (s *ChatSession) writeStatusFileLocked() {
 		Detail:        s.currentDetail,
 		CWD:           s.Cwd,
 		BusySince:     busySince,
-		LastSummary:   s.lastSummary,
+		LastSummary:   summary,
 		LastTrace:     s.lastTrace,
 		UserPrompt:    s.currentPrompt,
 		RecentActions: append([]string(nil), s.recentActions...),
@@ -648,24 +731,28 @@ func (s *ChatSession) DeliverPermission(reqID int64, optionID string, cancelled 
 }
 
 func (s *ChatSession) Prompt(ctx context.Context, text string) error {
-	log.Printf("chat-prompt[%s]: starting prompt (busyCount=%d)", shortChat(s.PokegentID), s.busyCount.Load())
+	log.Printf("chat-prompt[%s]: starting prompt", shortChat(s.PokegentID))
 	ctx, cancel := context.WithCancel(ctx)
+
+	// Increment turnID and transition to busy via the state machine.
+	s.smMu.Lock()
+	s.smTurnID++
+	turnID := s.smTurnID
+	s.smMu.Unlock()
 
 	s.stateMu.Lock()
 	s.promptCtxCancel = cancel
-	wasBusy := s.busyCount.Add(1) > 1
-	if !wasBusy {
-		s.busySince = time.Now()
-	}
-	s.lastSummary = ""
+	s.lastSummaryStaging = ""
 	s.lastTrace = ""
 	s.recentActions = nil
 	s.currentPrompt = text
 	s.currentDetail = "thinking…"
 	acpID := s.ACPID
-	s.writeStatusFileLocked()
 	s.stateMu.Unlock()
-	s.broadcast("state", json.RawMessage(`{"state":"busy"}`))
+
+	// State transition through the state machine — broadcasts to both SSE
+	// streams, flushes status file, publishes agent_state_patch.
+	s.applyEvent(RuntimeEvent{Type: EventAgentBusy, TurnID: turnID})
 
 	// Synthesize a user_message_chunk SSE event so chat panels see the
 	// user's prompt regardless of which client submitted it.
@@ -684,10 +771,10 @@ func (s *ChatSession) Prompt(ctx context.Context, text string) error {
 		cancel()
 		s.stateMu.Lock()
 		s.promptCtxCancel = nil
-		stillBusy := s.busyCount.Add(-1) > 0
-		if !stillBusy {
-			s.busySince = time.Time{}
+		if s.lastSummaryStaging != "" {
+			s.lastSummary = s.lastSummaryStaging
 		}
+		s.lastSummaryStaging = ""
 		if turnErr != nil {
 			if ctx.Err() != nil {
 				s.currentDetail = "cancelled"
@@ -697,11 +784,13 @@ func (s *ChatSession) Prompt(ctx context.Context, text string) error {
 		} else {
 			s.currentDetail = "finished"
 		}
-		s.writeStatusFileLocked()
 		s.stateMu.Unlock()
-		if !stillBusy {
-			s.broadcast("state", json.RawMessage(`{"state":"done"}`))
-		}
+
+		// Fallback idle: if session_state_changed:idle hasn't already
+		// fired (e.g. background tasks finished first), transition now.
+		// The turnID guard in applyEvent makes this a no-op if a newer
+		// turn has started or if idle was already reached.
+		s.applyEvent(RuntimeEvent{Type: EventAgentIdle, TurnID: turnID})
 	}()
 
 	prompt, err := buildACPPromptBlocks(text)
@@ -783,7 +872,7 @@ func mimeForImagePath(p string) string {
 }
 
 func (s *ChatSession) BroadcastDone() {
-	s.broadcast("state", json.RawMessage(`{"state":"done"}`))
+	s.broadcast("state", json.RawMessage(`{"state":"idle"}`))
 }
 
 func (s *ChatSession) Cancel() error {
@@ -791,20 +880,29 @@ func (s *ChatSession) Cancel() error {
 	acpID := s.ACPID
 	s.stateMu.Unlock()
 
-	// Broadcast done immediately so the frontend can proceed (flush queue,
-	// show idle). The ACP may take a while to finish its cancel loop,
-	// especially if stuck consuming background task results.
-	s.broadcast("state", json.RawMessage(`{"state":"done"}`))
+	// Do NOT broadcast idle/done immediately. The UI stays in "busy" state
+	// until ACP confirms idle via session_state_changed (processed by
+	// applyEvent). A 10s watchdog is the safety net for when ACP gets stuck.
+	s.smMu.Lock()
+	if s.smCancelWdog != nil {
+		s.smCancelWdog.Stop()
+	}
+	turnID := s.smTurnID // capture NOW — if a new prompt starts, the watchdog's stale turnID is harmlessly ignored by applyEvent
+	s.smCancelWdog = time.AfterFunc(10*time.Second, func() {
+		log.Printf("chat-cancel[%s]: watchdog fired — ACP did not confirm idle within 10s", shortChat(s.PokegentID))
+		s.applyEvent(RuntimeEvent{Type: EventAgentIdle, TurnID: turnID})
+	})
+	s.smMu.Unlock()
 
 	// Send session/cancel to ACP and let it finish naturally. Do NOT cancel
 	// the Go context — that would make sendRequest return immediately, the
-	// Prompt() defer would fire and broadcast state:done before ACP finishes
+	// Prompt() defer would fire and broadcast state:idle before ACP finishes
 	// its cancel loop. The next prompt would then race with ACP's internal
 	// promptRunning flag, causing the ACP to queue-then-cancel it.
 	//
 	// Instead, ACP processes the cancel, returns the session/prompt response
 	// with stopReason:"cancelled", sendRequest receives it normally, and
-	// Prompt()'s defer broadcasts state:done only after ACP is truly done.
+	// Prompt()'s defer broadcasts state:idle only after ACP is truly done.
 	return s.client.sendNotification("session/cancel", map[string]any{"sessionId": acpID})
 }
 
@@ -829,15 +927,17 @@ type ChatManager struct {
 	// pass to clean up.
 	wg sync.WaitGroup
 
-	dataDir  string
-	onChange func()
+	dataDir      string
+	onChange      func()
+	dashboardBus *EventBus // Phase 1: direct SSE broadcast
 }
 
-func NewChatManager(dataDir string, onChange func()) *ChatManager {
+func NewChatManager(dataDir string, onChange func(), dashboardBus *EventBus) *ChatManager {
 	return &ChatManager{
-		sessions: make(map[string]*ChatSession),
-		dataDir:  dataDir,
-		onChange: onChange,
+		sessions:     make(map[string]*ChatSession),
+		dataDir:      dataDir,
+		onChange:     onChange,
+		dashboardBus: dashboardBus,
 	}
 }
 
@@ -948,10 +1048,13 @@ func (m *ChatManager) Launch(ctx context.Context, opts ChatLaunchOptions) (*Chat
 		Created:       time.Now(),
 		dataDir:       m.dataDir,
 		subscribers:   make(map[chan ChatSessionEvent]struct{}),
-		replayMax:     256,
 		activeTasks:   make(map[string]json.RawMessage),
 		recentActions: []string{},
 		pendingPerms:  make(map[int64]*pendingPermission),
+		smState:       "idle",
+		eventRingCap:  2000,
+		dashboardBus:  m.dashboardBus,
+		queue:         NewPromptQueue(opts.PokegentID),
 	}
 	sess.lastUpdated.Store(time.Now().UnixMilli())
 
@@ -1309,6 +1412,181 @@ func (s *Server) handleChatPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── State machine (Phase 0) ───────────────────────────────
+
+// applyEvent implements the v3 transition table. All state transitions and
+// their side effects (SSE broadcast, status file write, queue drain) flow
+// through here. No other code should broadcast state directly.
+func (s *ChatSession) applyEvent(evt RuntimeEvent) {
+	s.smMu.Lock()
+	if evt.TurnID < s.smTurnID {
+		s.smMu.Unlock()
+		return
+	}
+
+	prevState := s.smState
+
+	switch evt.Type {
+	case EventAgentBusy:
+		if s.smState != "busy" {
+			s.smState = "busy"
+			s.smBusySince = time.Now()
+		}
+	case EventAgentIdle:
+		if s.smState == "busy" {
+			s.smState = "idle"
+			s.smBusySince = time.Time{}
+			if s.smCancelWdog != nil {
+				s.smCancelWdog.Stop()
+				s.smCancelWdog = nil
+			}
+		}
+	case EventError:
+		s.smState = "error"
+	}
+
+	newState := s.smState
+	busySince := s.smBusySince
+	s.smMu.Unlock()
+
+	// Side effects on state change.
+	if newState != prevState {
+		stateJSON, _ := json.Marshal(map[string]string{"state": newState})
+		s.broadcast("state", stateJSON)
+		s.publishAgentStatePatchWith(newState, busySince)
+
+		s.stateMu.Lock()
+		if s.statusDebounce != nil {
+			s.statusDebounce.Stop()
+		}
+		s.writeStatusFileLocked()
+		s.stateMu.Unlock()
+
+		if newState == "idle" {
+			s.drainQueue()
+		}
+	}
+}
+
+// drainQueue pops the next prompt from the server-side queue and sends it.
+// Called by applyEvent on busy→idle transitions.
+func (s *ChatSession) drainQueue() {
+	if s.queue == nil {
+		return
+	}
+	item, ok := s.queue.Dequeue()
+	if !ok {
+		return
+	}
+	if s.client == nil {
+		log.Printf("chat-queue[%s]: no ACP client, cannot drain", shortChat(s.PokegentID))
+		return
+	}
+	log.Printf("chat-queue[%s]: draining queued prompt (len=%d remaining)", shortChat(s.PokegentID), s.queue.Len())
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), chatPromptTimeout)
+		defer cancel()
+		if err := s.Prompt(ctx, item.Text); err != nil {
+			log.Printf("chat-queue[%s]: drain error: %v", shortChat(s.PokegentID), err)
+		}
+	}()
+}
+
+// SubmitPrompt checks the state machine and either sends immediately or
+// enqueues. Returns (true, nil) if queued. Sets smState="busy" under the
+// lock before launching the goroutine to prevent a second concurrent
+// caller from also seeing idle and launching a duplicate Prompt().
+func (s *ChatSession) SubmitPrompt(text, nonce string) (queued bool, err error) {
+	s.smMu.Lock()
+	if s.smState == "busy" {
+		s.smMu.Unlock()
+		s.queue.Enqueue(text, nonce)
+		return true, nil
+	}
+	s.smState = "busy"
+	s.smBusySince = time.Now()
+	s.smMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), chatPromptTimeout)
+		defer cancel()
+		if err := s.Prompt(ctx, text); err != nil {
+			log.Printf("chat prompt error (%s): %v", shortChat(s.PokegentID), err)
+		}
+	}()
+	return false, nil
+}
+
+func (s *ChatSession) appendEvent(evt RuntimeEvent) {
+	s.eventRingMu.Lock()
+	defer s.eventRingMu.Unlock()
+	s.smSeqNo++
+	evt.SeqNo = s.smSeqNo
+	s.eventRing = append(s.eventRing, evt)
+	if len(s.eventRing) > s.eventRingCap {
+		s.eventRing = s.eventRing[len(s.eventRing)-s.eventRingCap:]
+	}
+}
+
+func (s *ChatSession) EventsSince(seqNo uint64) (events []RuntimeEvent, hasGap bool) {
+	s.eventRingMu.RLock()
+	defer s.eventRingMu.RUnlock()
+	if len(s.eventRing) == 0 {
+		return nil, false
+	}
+	oldest := s.eventRing[0].SeqNo
+	if seqNo > 0 && seqNo+1 < oldest {
+		result := make([]RuntimeEvent, len(s.eventRing))
+		copy(result, s.eventRing)
+		return result, true
+	}
+	for i, evt := range s.eventRing {
+		if evt.SeqNo > seqNo {
+			result := make([]RuntimeEvent, len(s.eventRing)-i)
+			copy(result, s.eventRing[i:])
+			return result, false
+		}
+	}
+	return nil, false
+}
+
+func (s *ChatSession) StopTask(taskId string) error {
+	return fmt.Errorf("StopTask not yet implemented")
+}
+
+func translateACPEvent(acpSubtype string, payload json.RawMessage, turnID uint64) (RuntimeEvent, bool) {
+	switch acpSubtype {
+	case "claude/session_state":
+		var d struct{ State string `json:"state"` }
+		if json.Unmarshal(payload, &d) != nil {
+			return RuntimeEvent{}, false
+		}
+		switch d.State {
+		case "busy", "processing", "waiting":
+			return RuntimeEvent{Type: EventAgentBusy, TurnID: turnID, Payload: payload}, true
+		case "idle":
+			return RuntimeEvent{Type: EventAgentIdle, TurnID: turnID, Payload: payload}, true
+		default:
+			return RuntimeEvent{}, false
+		}
+	case "claude/task_started":
+		return RuntimeEvent{Type: EventTaskStarted, TurnID: turnID, Payload: payload}, true
+	case "claude/task_notification":
+		var d struct{ Status string `json:"status"` }
+		if json.Unmarshal(payload, &d) == nil && (d.Status == "completed" || d.Status == "stopped" || d.Status == "failed") {
+			return RuntimeEvent{Type: EventTaskCompleted, TurnID: turnID, Payload: payload}, true
+		}
+		return RuntimeEvent{Type: EventTaskProgress, TurnID: turnID, Payload: payload}, true
+	case "claude/task_progress":
+		return RuntimeEvent{Type: EventTaskProgress, TurnID: turnID, Payload: payload}, true
+	case "claude/api_retry":
+		return RuntimeEvent{Type: EventAPIRetry, TurnID: turnID, Payload: payload}, true
+	case "claude/rate_limit_event":
+		return RuntimeEvent{Type: EventRateLimit, TurnID: turnID, Payload: payload}, true
+	default:
+		return RuntimeEvent{}, false
+	}
 }
 
 // ── Helpers ────────────────────────────────────────────────

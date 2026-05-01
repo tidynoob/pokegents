@@ -95,11 +95,11 @@ func TestFileStatusStore(t *testing.T) {
 	}
 
 	// Update
-	sf.State = "done"
+	sf.State = "idle"
 	s.Upsert(sf)
 	got, _ = s.Get("test-1")
-	if got.State != "done" {
-		t.Errorf("after Upsert, State = %q, want %q", got.State, "done")
+	if got.State != "idle" {
+		t.Errorf("after Upsert, State = %q, want %q", got.State, "idle")
 	}
 
 	// Delete

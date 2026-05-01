@@ -63,10 +63,12 @@ export function PromptInput({
   maxHeight = 120,
   isBusy,
 }: PromptInputProps) {
-  const [value, setValue] = useState('')
+  const draftKey = `pokegents-draft-${sessionId}`
+  const [value, setValue] = useState(() => sessionStorage.getItem(draftKey) || '')
   const [sending, setSending] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const [selectedIdx, setSelectedIdx] = useState(0)
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Slash-command autocomplete: active when input starts with `/` and has
   // no spaces yet (i.e. user is still typing the command name).
@@ -80,6 +82,19 @@ export function PromptInput({
   // Reset selection when completions list changes.
   useEffect(() => { setSelectedIdx(0) }, [completions.length])
 
+  // Phase 1: debounce 300ms save of draft to sessionStorage.
+  useEffect(() => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
+    draftTimerRef.current = setTimeout(() => {
+      if (value) {
+        sessionStorage.setItem(draftKey, value)
+      } else {
+        sessionStorage.removeItem(draftKey)
+      }
+    }, 300)
+    return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current) }
+  }, [value, draftKey])
+
   useEffect(() => {
     if (autoFocus && !disabled) ref.current?.focus()
   }, [autoFocus, disabled])
@@ -91,6 +106,7 @@ export function PromptInput({
       await onSend(value.trim())
     } finally {
       setValue('')
+      sessionStorage.removeItem(draftKey)
       setSending(false)
       if (ref.current) ref.current.style.height = 'auto'
     }

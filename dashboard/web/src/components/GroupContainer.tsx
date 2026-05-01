@@ -32,7 +32,7 @@ function statusColor(state: string): string {
   if (state === 'busy') return '#e87848'
   if (state === 'needs_input') return '#d84848'
   if (state === 'error') return '#a858a8'
-  if (state === 'done') return '#58a868'
+  // Phase 2: done collapsed into idle — no separate done color
   return '#788890'
 }
 
@@ -40,7 +40,7 @@ function statusLabel(state: string): string {
   if (state === 'busy') return 'ATK'
   if (state === 'needs_input') return 'WAIT'
   if (state === 'error') return 'PSN'
-  if (state === 'done') return 'OK'
+  // Phase 2: done collapsed into idle — no separate done label
   return 'SLP'
 }
 

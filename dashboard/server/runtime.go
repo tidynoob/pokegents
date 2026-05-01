@@ -40,6 +40,9 @@ type Runtime interface {
 	// CheckMessages prompts the agent to read its mailbox. iTerm2: types
 	// "check messages" into the TTY. Chat: sends as a session/prompt.
 	CheckMessages(ctx context.Context, pgid string) error
+
+	// StopTask cancels a running background task by taskId.
+	StopTask(ctx context.Context, pgid, taskId string) error
 }
 
 // RuntimeCapabilities tells the dashboard what features each backend

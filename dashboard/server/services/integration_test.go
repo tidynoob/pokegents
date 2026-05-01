@@ -13,7 +13,7 @@ func TestFullMessageWorkflow(t *testing.T) {
 	fs := store.NewFileStore(dir)
 	agents := map[string]*AgentInfo{
 		"sender-11111111": {State: "busy", IsAlive: true},
-		"recver-22222222": {State: "done", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-r", LastUpdated: "2020-01-01T00:00:00Z"},
+		"recver-22222222": {State: "idle", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-r", LastUpdated: "2020-01-01T00:00:00Z"},
 	}
 	svc := NewMessagingService(fs.Messages, nil, func(id string) *AgentInfo { return agents[id] }, nil)
 
@@ -104,8 +104,8 @@ func TestStateMachineWorkflow(t *testing.T) {
 
 	// 6. Agent finishes
 	r = core.ApplyEvent(state, "", core.HookEvent{HookEventName: "Stop", LastAssistantMessage: "Bug fixed"})
-	if r.NewState != core.StateDone {
-		t.Fatalf("Stop: expected done, got %s", r.NewState)
+	if r.NewState != core.StateIdle {
+		t.Fatalf("Stop: expected idle, got %s", r.NewState)
 	}
 	if r.Summary != "Bug fixed" {
 		t.Errorf("Summary = %q, want %q", r.Summary, "Bug fixed")
@@ -165,7 +165,7 @@ func TestCloneIsolation(t *testing.T) {
 	dir := t.TempDir()
 	fs := store.NewFileStore(dir)
 	svc := NewMessagingService(fs.Messages, nil, func(id string) *AgentInfo {
-		return &AgentInfo{State: "done", IsAlive: true}
+		return &AgentInfo{State: "idle", IsAlive: true}
 	}, nil)
 
 	// Send to original and clone separately

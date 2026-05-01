@@ -393,7 +393,7 @@ export default function App() {
         // Skip grouped agents — they're managed by GroupContainer, not pokéball collapse
         if (a.task_group) continue
         const age = a.last_updated ? now - new Date(a.last_updated).getTime() : 0
-        const inactive = a.state === 'idle' || a.state === 'done'
+        const inactive = a.state === 'idle'
         const active = a.state === 'busy' || a.state === 'needs_input'
 
         const aid = stableId(a)

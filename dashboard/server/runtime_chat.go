@@ -92,3 +92,11 @@ func (r *chatRuntime) CheckMessages(ctx context.Context, pgid string) error {
 	// SendPrompt above.
 	return r.SendPrompt(ctx, pgid, "check messages")
 }
+
+func (r *chatRuntime) StopTask(_ context.Context, pgid, taskId string) error {
+	sess, err := r.session(pgid)
+	if err != nil {
+		return err
+	}
+	return sess.StopTask(taskId)
+}

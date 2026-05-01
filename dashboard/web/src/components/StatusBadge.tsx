@@ -18,7 +18,6 @@ function formatDuration(seconds: number): string {
 
 function getTimeLabel(status: string, seconds: number): string {
   if (status === 'busy') return formatDuration(seconds)
-  if (status === 'done') return `${formatDuration(seconds)} ago`
   if (status === 'idle') return formatDuration(seconds)
   if (status === 'needs_input') return formatDuration(seconds)
   return formatDuration(seconds)
@@ -45,8 +44,8 @@ export function StatusBadge({ status, lastUpdated, busySince }: StatusBadgeProps
     ? Math.max(0, (now - new Date(timeRef).getTime()) / 1000)
     : 0
 
-  // After 30 minutes of "done", show as idle
-  const effectiveStatus = (status === 'done' && seconds > 1800) ? 'idle' : status
+  // Phase 2: done collapsed into idle — normalize any lingering "done" from hooks
+  const effectiveStatus = status === 'done' ? 'idle' : status
   const config = STATUS_CONFIG[effectiveStatus] || STATUS_CONFIG.idle
   const timeLabel = timeRef ? getTimeLabel(effectiveStatus, seconds) : ''
 

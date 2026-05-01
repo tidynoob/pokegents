@@ -16,7 +16,7 @@ func newTestMessaging(t *testing.T) (*MessagingService, string) {
 	}
 	_ = nudgedSessions // kept for future assertions; compiler-quiet for now
 	agents := map[string]*AgentInfo{
-		"agent-aaa-1111": {State: "done", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-a", LastUpdated: "2020-01-01T00:00:00Z"},
+		"agent-aaa-1111": {State: "idle", IsAlive: true, TTY: "/dev/ttys001", ITermSessionID: "iterm-a", LastUpdated: "2020-01-01T00:00:00Z"},
 		"agent-bbb-2222": {State: "busy", IsAlive: true, TTY: "/dev/ttys002", ITermSessionID: "iterm-b"},
 		"clone-aaa-3333": {State: "idle", IsAlive: true, TTY: "/dev/ttys003", ITermSessionID: "iterm-c", LastUpdated: "2020-01-01T00:00:00Z"},
 	}

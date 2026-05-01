@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
-import { fetchTranscript, TranscriptEntry, renameAgent, setSprite, fetchProjectList, fetchRoleList, ProjectInfo, RoleInfo } from '../api'
+import { fetchTranscript, TranscriptEntry, setSprite, fetchProjectList, fetchRoleList, ProjectInfo, RoleInfo } from '../api'
 import { Markdown } from './Markdown'
 import { PromptInput } from './PromptInput'
 import { StateBadge, AgentLifecycleState } from './StateBadge'
@@ -14,6 +14,7 @@ import { CreatureIcon } from './CreatureIcon'
 import { useSpriteAnimation } from './spriteAnimations'
 import { HealthBar, ProfilePill, RolePill, TaskGroupPill } from './AgentCard'
 import { BusyBubble, DoneBubble } from './MessageAnimations'
+import { useAgentRename } from '../hooks/useAgentRename'
 import {
   BgShell,
   extractTaskId,
@@ -70,8 +71,10 @@ interface PermissionOption {
   kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
 }
 
+type DeliveryState = 'sending' | 'confirmed' | 'failed' | 'queued'
+
 type Entry =
-  | { kind: 'user'; id: string; text: string; ts?: number }
+  | { kind: 'user'; id: string; text: string; ts?: number; nonce?: string; deliveryState?: DeliveryState }
   | { kind: 'assistant'; id: string; text: string; thoughts: string; ts?: number }
   | { kind: 'tool'; id: string; data: ToolCall; ts?: number }
   | { kind: 'system'; id: string; text: string; ts?: number }
@@ -111,21 +114,18 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [showSpritePicker, setShowSpritePicker] = useState(false)
-  const [editingName, setEditingName] = useState(false)
-  const [editName, setEditName] = useState(agent.display_name || '')
+  const rename = useAgentRename(agent.session_id, agent.display_name || '')
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [roles, setRoles] = useState<RoleInfo[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
-  const editNameRef = useRef<HTMLInputElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const turnIdRef = useRef(0)
   // Queued messages: prompts the user typed while the agent was busy.
   // Held locally — NOT sent to the server until the current turn finishes.
   // Follows the Zed pattern: one prompt in flight at a time, queue in UI.
   const [queuedMessages, setQueuedMessages] = useState<string[]>([])
-  // SSE-driven busy state — single source of truth from the Go backend's
-  // Prompt() lifecycle (busyCount > 0 → busy, busyCount == 0 → done).
-  const [sseBusy, setSseBusy] = useState(false)
-  const [sseBusySince, setSseBusySince] = useState<string | null>(null)
+  // Phase 5: sseBusy removed — agent.state (from dashboard SSE via
+  // publishAgentStatePatch) is now the single source of truth for busy.
   const allCaps = useRuntimeCapabilities()
   const caps = capsFor(allCaps, agent.interface)
 
@@ -154,20 +154,11 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
   }, [])
 
   useEffect(() => {
-    if (editingName) {
-      editNameRef.current?.focus()
-      editNameRef.current?.select()
+    if (rename.isRenaming) {
+      renameInputRef.current?.focus()
+      renameInputRef.current?.select()
     }
-  }, [editingName])
-
-  async function commitRename() {
-    const newName = editName.trim()
-    setEditingName(false)
-    if (newName && newName !== agent.display_name) {
-      await renameAgent(agent.session_id, newName)
-    }
-  }
-
+  }, [rename.isRenaming])
 
   // Background shells the agent has spawned via Bash(run_in_background=true).
   // Tracked separately from the transcript so the StatusBar below the input
@@ -215,12 +206,8 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
     return () => clearTimeout(t)
   }, [reconfiguring])
 
-  // Busy = Chat SSE says busy, OR dashboard SSE says busy (fallback for
-  // when the chat SSE drops). Chat SSE is faster (~10ms) but dashboard SSE
-  // (~50-200ms) is the safety net. Both derive from the same Go-side
-  // busyCount, so they always converge.
-  const isBusy = sseBusy || agent.state === 'busy'
-  const busySinceTs = sseBusySince || agent.busy_since
+  const isBusy = agent.state === 'busy'
+  const busySinceTs = agent.busy_since
   const bgToolIds = useMemo(() => new Set(bgShells.keys()), [bgShells])
   // Reconfiguring overrides connecting/busy when active — the user
   // triggered the restart, so the disconnect dance shouldn't read as
@@ -235,17 +222,13 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         ? 'error'
         : agent.state === 'needs_input'
           ? 'needs_input'
-          : agent.state === 'done'
-            ? 'done'
-            : 'idle'
+          : 'idle'
 
   // Reset transcript when switching agents.
   useEffect(() => {
     setEntries([])
     setStreamReady(false)
     setTitle('')
-    setSseBusy(false)
-    setSseBusySince(null)
     setQueuedMessages([])
     setBgShells(new Map())
     pendingSpawnRef.current = new Map()
@@ -370,22 +353,31 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
         try {
           const data = JSON.parse((e as MessageEvent).data) as { state?: string }
           addDebugLog(`SSE state: ${data?.state}`)
-          if (data?.state === 'busy') {
-            setSseBusy(true)
-            setSseBusySince(new Date().toISOString())
-          }
-          if (data?.state === 'idle' || data?.state === 'done') {
-            setSseBusy(false)
-            setSseBusySince(null)
+          if (data?.state === 'idle') {
             setQueuedMessages(prev => {
               if (prev.length === 0) return prev
               const [next, ...rest] = prev
-              appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text: next })
+              // Transition the queued entry to 'sending' if it exists, otherwise append fresh.
+              const queuedNonce = crypto.randomUUID()
+              setEntries(ents => {
+                // Find the first queued user entry matching this text and promote it.
+                const idx = ents.findIndex(e => e.kind === 'user' && e.deliveryState === 'queued' && e.text === next)
+                if (idx >= 0) {
+                  const copy = [...ents]
+                  copy[idx] = { ...copy[idx], deliveryState: 'sending', nonce: queuedNonce } as Entry
+                  return copy
+                }
+                return [...ents, { kind: 'user', id: `u-${turnIdRef.current++}`, text: next, nonce: queuedNonce, deliveryState: 'sending', ts: Date.now() }]
+              })
               fetch(`/api/sessions/${pokegentId}/prompt`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: next }),
-              }).catch(() => {})
+                body: JSON.stringify({ prompt: next, nonce: queuedNonce }),
+              }).then(r => {
+                updateDeliveryState(queuedNonce, r.ok ? 'confirmed' : 'failed')
+              }).catch(() => {
+                updateDeliveryState(queuedNonce, 'failed')
+              })
               return rest
             })
           }
@@ -570,6 +562,29 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
 
   function appendEntry(e: Entry) { setEntries(prev => [...prev, { ...e, ts: e.ts || Date.now() }]) }
 
+  function updateDeliveryState(nonce: string, state: DeliveryState) {
+    setEntries(prev => prev.map(e =>
+      e.kind === 'user' && e.nonce === nonce
+        ? { ...e, deliveryState: state }
+        : e
+    ))
+  }
+
+  async function retryMessage(entry: Entry) {
+    if (entry.kind !== 'user' || !entry.nonce) return
+    updateDeliveryState(entry.nonce, 'sending')
+    try {
+      const r = await fetch(`/api/sessions/${pokegentId}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: entry.text, nonce: entry.nonce }),
+      })
+      updateDeliveryState(entry.nonce, r.ok ? 'confirmed' : 'failed')
+    } catch {
+      updateDeliveryState(entry.nonce, 'failed')
+    }
+  }
+
   const applyUpdate = useCallback((u: SessionUpdate) => {
     setEntries(prev => {
       const next = [...prev]
@@ -598,6 +613,12 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           // Synthetic event emitted server-side by ChatSession.Prompt so
           // prompts sent from anywhere (ChatPanel here, AgentCard's
           // QuickInput, future API consumers) appear in the transcript.
+          // Nonce de-dup: if the event carries a nonce matching an existing
+          // optimistic entry, skip it — the local entry already covers it.
+          const echoNonce = (u as { nonce?: string }).nonce
+          if (echoNonce && next.some(e => e.kind === 'user' && e.nonce === echoNonce)) {
+            return next
+          }
           // ChatPanel.submitText also appends the user message locally for
           // instant feedback, so de-dup here: if the last entry is already
           // a user message with the same text, skip — that's our own echo.
@@ -881,25 +902,31 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           return
       }
     }
+    const nonce = crypto.randomUUID()
     if (isBusy) {
-      // Agent is busy — queue locally. The SSE state:done handler will
-      // pop and send the next message when the current turn finishes.
+      // Agent is busy — show optimistic entry as queued, then queue locally.
+      // The SSE state:idle handler will pop and send when the turn finishes.
+      appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text, nonce, deliveryState: 'queued' })
       setQueuedMessages(prev => [...prev, text])
       return
     }
-    // Not busy — send immediately.
-    appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text })
+    // Not busy — optimistic append with 'sending', POST in background.
+    appendEntry({ kind: 'user', id: `u-${turnIdRef.current++}`, text, nonce, deliveryState: 'sending' })
     try {
       const r = await fetch(`/api/sessions/${pokegentId}/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({ prompt: text, nonce }),
       })
-      if (!r.ok) {
+      if (r.ok) {
+        updateDeliveryState(nonce, 'confirmed')
+      } else {
+        updateDeliveryState(nonce, 'failed')
         const msg = await r.text()
         appendEntry({ kind: 'system', id: `e-${turnIdRef.current++}`, text: `Error: ${msg}` })
       }
     } catch (err) {
+      updateDeliveryState(nonce, 'failed')
       appendEntry({ kind: 'system', id: `e-${turnIdRef.current++}`, text: `Error: ${String(err)}` })
     }
   }
@@ -1000,22 +1027,22 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
             <div className={`relative ${useSpriteAnimation(agent.state || 'idle', true)}`}>
               <CreatureIcon sessionId={agent.session_id} size={32} noGlow={false} doneFlash={false} spriteOverride={agent.sprite} noBg />
               <BusyBubble isBusy={isBusy} />
-              <DoneBubble isDone={agent.state === 'done'} />
+              <DoneBubble isDone={false} />
             </div>
           </div>
           {/* Name + HP bar */}
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
-                {editingName ? (
+                {rename.isRenaming ? (
                   <input
-                    ref={editNameRef}
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    onBlur={commitRename}
+                    ref={renameInputRef}
+                    value={rename.newName}
+                    onChange={(e) => rename.setNewName(e.target.value)}
+                    onBlur={rename.submitRename}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') commitRename()
-                      if (e.key === 'Escape') setEditingName(false)
+                      if (e.key === 'Enter') rename.submitRename()
+                      if (e.key === 'Escape') rename.cancelRename()
                     }}
                     className="text-[8px] font-pixel text-white bg-transparent border-b border-white/50 outline-none w-full pixel-shadow"
                   />
@@ -1023,7 +1050,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
                   <div className="flex items-center gap-1.5">
                     <h3
                       className="text-[8px] font-pixel text-white truncate cursor-pointer hover:text-accent-yellow pixel-shadow uppercase"
-                      onClick={() => { setEditName(agent.display_name || ''); setEditingName(true) }}
+                      onClick={() => rename.startRename()}
                     >
                       {agent.display_name || 'chat'}
                     </h3>
@@ -1097,7 +1124,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           {streamReady && entries.length === 0 && (
             <div className="text-[10px] font-mono text-white/40">Ready. Type a prompt below.</div>
           )}
-          {entries.map(e => <EntryRow key={e.id} entry={e} onDecidePermission={decidePermission} searchQuery={searchQuery} backgroundedToolIds={bgToolIds} showTimestamps={showTimestamps} />)}
+          {entries.map(e => <EntryRow key={e.id} entry={e} onDecidePermission={decidePermission} onRetry={retryMessage} searchQuery={searchQuery} backgroundedToolIds={bgToolIds} showTimestamps={showTimestamps} />)}
           {/* Sentinel "Thinking..." row — visible while the agent is busy
               AND we haven't received any assistant-message-chunk *text* for
               this turn yet (disappears as soon as text starts streaming).
@@ -1197,7 +1224,7 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           projects={projects}
           roles={roles}
           onClose={() => setMenuOpen(false)}
-          onRename={() => { setMenuOpen(false); setEditName(agent.display_name || ''); setEditingName(true) }}
+          onRename={() => { setMenuOpen(false); rename.startRename() }}
           onChangeSprite={() => { setMenuOpen(false); setShowSpritePicker(true) }}
         />,
         document.body,
@@ -1215,15 +1242,12 @@ export function ChatPanel({ agent, onClose }: ChatPanelProps) {
           agent={agent}
           pokegentId={pokegentId}
           streamReady={streamReady}
-          sseBusy={sseBusy}
           queuedMessages={queuedMessages}
           bgShells={bgShells}
           debugLog={debugLogRef.current}
           onClose={() => setDebugOpen(false)}
           onForceIdle={async () => {
             await fetch(`/api/sessions/${pokegentId}/debug/force-idle`, { method: 'POST' })
-            setSseBusy(false)
-            setSseBusySince(null)
             addDebugLog('action: force idle')
           }}
           onRespawnAcp={async () => {
@@ -1350,12 +1374,14 @@ function entriesFromTranscript(transcript: TranscriptEntry[]): Entry[] {
 function EntryRow({
   entry,
   onDecidePermission,
+  onRetry,
   searchQuery,
   backgroundedToolIds,
   showTimestamps,
 }: {
   entry: Entry
   onDecidePermission: (requestId: number, optionId: string, cancelled: boolean) => void
+  onRetry?: (entry: Entry) => void
   searchQuery?: string
   backgroundedToolIds?: Set<string>
   showTimestamps?: boolean | 'debug'
@@ -1370,13 +1396,27 @@ function EntryRow({
           return <TaskNotificationRow text={entry.text} summary={taskMatch[1].trim()} />
         }
         if (isLocalCommandArtifact(entry.text)) return null
+        const ds = entry.deliveryState
+        const borderClass = ds === 'failed'
+          ? 'border-l-2 border-red-500'
+          : ds === 'queued'
+            ? 'border-l-2 border-amber-500'
+            : 'border-l-2 border-amber-400/70'
+        const opacityClass = ds === 'sending' || ds === 'queued' ? 'opacity-50' : ''
         return (
-          <div className="pt-4" data-user-entry>
+          <div className={`pt-4 ${opacityClass}`} data-user-entry>
             <div
-              className="rounded-md px-2.5 py-2 text-[11px] font-mono text-white whitespace-pre-wrap break-words leading-snug border-l-2 border-amber-400/70"
+              className={`rounded-md px-2.5 py-2 text-[11px] font-mono text-white whitespace-pre-wrap break-words leading-snug ${borderClass}`}
               style={{ background: 'rgba(180, 130, 40, 0.12)' }}
             >
               <span className="text-amber-300/70 mr-1">&gt;</span><HighlightText text={entry.text} query={searchQuery} />
+              {ds === 'failed' && onRetry && (
+                <button
+                  type="button"
+                  onClick={() => onRetry(entry)}
+                  className="ml-2 text-[9px] font-pixel text-red-400 hover:text-red-300 transition-colors"
+                >retry</button>
+              )}
             </div>
           </div>
         )
@@ -2219,14 +2259,13 @@ function scrollToMatch(idx: number, total: number) {
 // ── Debug modal ────────────────────────────────────────────
 
 function DebugModal({
-  agent, pokegentId, streamReady, sseBusy, queuedMessages, bgShells, debugLog,
+  agent, pokegentId, streamReady, queuedMessages, bgShells, debugLog,
   onClose, onForceIdle, onRespawnAcp, onReconnectSse, onReloadTranscript, onFlushQueue, onClearBgTasks,
   showTimestamps, onToggleDebugBorders,
 }: {
   agent: AgentState
   pokegentId: string
   streamReady: boolean
-  sseBusy: boolean
   queuedMessages: string[]
   bgShells: Map<string, BgShell>
   debugLog: string[]
@@ -2269,7 +2308,7 @@ function DebugModal({
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-white/70">
               <span className="text-white/40">agent.state</span><span>{agent.state || '—'}</span>
               <span className="text-white/40">agent.detail</span><span className="truncate">{agent.detail || '—'}</span>
-              <span className="text-white/40">sseBusy</span><span className={sseBusy ? 'text-accent-red' : 'text-accent-green'}>{String(sseBusy)}</span>
+              <span className="text-white/40">isBusy</span><span className={agent.state === 'busy' ? 'text-accent-red' : 'text-accent-green'}>{String(agent.state === 'busy')}</span>
               <span className="text-white/40">streamReady</span><span className={streamReady ? 'text-accent-green' : 'text-accent-red'}>{String(streamReady)}</span>
               <span className="text-white/40">pokegentId</span><span className="truncate">{pokegentId}</span>
               <span className="text-white/40">sessionId</span><span className="truncate">{agent.session_id || '—'}</span>
@@ -2287,7 +2326,7 @@ function DebugModal({
             <div className="grid grid-cols-2 gap-1.5">
               <button onClick={onForceIdle} className={`${btnClass} text-amber-400/80 border border-amber-400/20`}>
                 Force idle
-                <div className="text-[9px] text-white/30 mt-0.5">Override state to idle + broadcast done</div>
+                <div className="text-[9px] text-white/30 mt-0.5">Override state to idle + broadcast idle</div>
               </button>
               <button onClick={onRespawnAcp} className={`${btnClass} text-amber-400/80 border border-amber-400/20`}>
                 Respawn ACP

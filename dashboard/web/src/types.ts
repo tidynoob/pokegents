@@ -34,6 +34,8 @@ export interface AgentState {
   is_alive: boolean
   duration_sec: number
   created_at: string
+  /** Number of active background tasks (subagents, bg shells, monitors). */
+  background_tasks?: number
   /** Runtime backend bound to this agent. "" / "iterm2" → terminal tab.
    *  "chat" → embedded ACP chat panel. Drives card click routing. */
   interface?: 'iterm2' | 'chat'

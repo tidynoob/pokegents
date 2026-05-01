@@ -13,19 +13,19 @@ func TestApplyEvent(t *testing.T) {
 	}{
 		// UserPromptSubmit → busy from any state
 		{"idle→busy", StateIdle, "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
-		{"done→busy", StateDone, "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
+		{"idle→busy (was done→busy)", StateIdle, "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
 		{"error→busy", StateError, "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
 		{"needs_input→busy", StateNeedsInput, "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
 		{"empty→busy", "", "", HookEvent{HookEventName: "UserPromptSubmit"}, StateBusy, false},
 
 		// Tool events — only if busy
 		{"busy+PreToolUse", StateBusy, "", HookEvent{HookEventName: "PreToolUse", ToolName: "Bash"}, StateBusy, false},
-		{"done blocks PreToolUse", StateDone, "", HookEvent{HookEventName: "PreToolUse"}, "", true},
+		{"done blocks PreToolUse", StateIdle, "", HookEvent{HookEventName: "PreToolUse"}, "", true},
 		{"idle blocks PostToolUse", StateIdle, "", HookEvent{HookEventName: "PostToolUse"}, "", true},
 		{"error blocks PreToolUse", StateError, "", HookEvent{HookEventName: "PreToolUse"}, "", true},
 
-		// Stop → done
-		{"busy→done", StateBusy, "", HookEvent{HookEventName: "Stop"}, StateDone, false},
+		// Stop → idle (Phase 2: done collapsed)
+		{"busy→idle on Stop", StateBusy, "", HookEvent{HookEventName: "Stop"}, StateIdle, false},
 
 		// StopFailure → error
 		{"busy→error", StateBusy, "", HookEvent{HookEventName: "StopFailure"}, StateError, false},
@@ -33,15 +33,15 @@ func TestApplyEvent(t *testing.T) {
 		// PermissionRequest → needs_input
 		{"busy→needs_input", StateBusy, "", HookEvent{HookEventName: "PermissionRequest", ToolName: "Bash"}, StateNeedsInput, false},
 
-		// idle_prompt: busy→done, others skip
-		{"busy→done on idle_prompt", StateBusy, "", HookEvent{HookEventName: "Notification", NotificationType: "idle_prompt"}, StateDone, false},
-		{"done stays on idle_prompt", StateDone, "", HookEvent{HookEventName: "Notification", NotificationType: "idle_prompt"}, "", true},
+		// idle_prompt: busy→idle, others skip
+		{"busy→idle on idle_prompt", StateBusy, "", HookEvent{HookEventName: "Notification", NotificationType: "idle_prompt"}, StateIdle, false},
+		{"idle stays on idle_prompt", StateIdle, "", HookEvent{HookEventName: "Notification", NotificationType: "idle_prompt"}, "", true},
 		{"idle stays on idle_prompt", StateIdle, "", HookEvent{HookEventName: "Notification", NotificationType: "idle_prompt"}, "", true},
 
 		// SessionStart
 		{"new→idle", "", "", HookEvent{HookEventName: "SessionStart"}, StateIdle, false},
 		{"busy blocks SessionStart (clone protection)", StateBusy, "", HookEvent{HookEventName: "SessionStart"}, "", true},
-		{"compacting→done+Compacted", "", "compacting", HookEvent{HookEventName: "SessionStart"}, StateDone, false},
+		{"compacting→idle+Compacted", "", "compacting", HookEvent{HookEventName: "SessionStart"}, StateIdle, false},
 
 		// SessionEnd
 		{"end removes", StateBusy, "", HookEvent{HookEventName: "SessionEnd"}, "", false},
@@ -67,13 +67,13 @@ func TestApplyEvent(t *testing.T) {
 }
 
 func TestPostToolUseRaceGuard(t *testing.T) {
-	// Simulate: busy → Stop(done) → late PostToolUse arrives
+	// Simulate: busy → Stop(idle) → late PostToolUse arrives
 	r1 := ApplyEvent(StateBusy, "", HookEvent{HookEventName: "Stop"})
-	if r1.NewState != StateDone {
-		t.Fatalf("Stop should produce done, got %s", r1.NewState)
+	if r1.NewState != StateIdle {
+		t.Fatalf("Stop should produce idle, got %s", r1.NewState)
 	}
 
-	r2 := ApplyEvent(StateDone, "", HookEvent{HookEventName: "PostToolUse", ToolName: "Bash"})
+	r2 := ApplyEvent(StateIdle, "", HookEvent{HookEventName: "PostToolUse", ToolName: "Bash"})
 	if !r2.Skip {
 		t.Errorf("late PostToolUse after Stop should be skipped, got state=%s", r2.NewState)
 	}
@@ -81,8 +81,8 @@ func TestPostToolUseRaceGuard(t *testing.T) {
 
 func TestCompactionPreservation(t *testing.T) {
 	r := ApplyEvent("", "compacting", HookEvent{HookEventName: "SessionStart"})
-	if r.NewState != StateDone {
-		t.Errorf("compacting SessionStart should produce done, got %s", r.NewState)
+	if r.NewState != StateIdle {
+		t.Errorf("compacting SessionStart should produce idle, got %s", r.NewState)
 	}
 	if r.Summary != "Compacted" {
 		t.Errorf("summary should be 'Compacted', got %q", r.Summary)

@@ -90,7 +90,7 @@ func (s *MessagingService) Send(from, fromName, to, toName, content string) (*st
 	// Determine if recipient needs a nudge
 	needsNudge := false
 	if agent := s.getAgent(to); agent != nil {
-		needsNudge = agent.IsAlive && (agent.State == "done" || agent.State == "idle")
+		needsNudge = agent.IsAlive && agent.State == "idle"
 	}
 
 	return msg, needsNudge, nil
@@ -194,7 +194,7 @@ func (s *MessagingService) executeNudge(sessionID string) {
 		return
 	}
 
-	if agent.State != "done" && agent.State != "idle" {
+	if agent.State != "idle" {
 		log.Printf("nudger: skip %s — state changed to %s", sessionID[:8], agent.State)
 		return
 	}

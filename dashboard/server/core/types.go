@@ -8,7 +8,6 @@ type SessionState string
 const (
 	StateIdle       SessionState = "idle"
 	StateBusy       SessionState = "busy"
-	StateDone       SessionState = "done"
 	StateNeedsInput SessionState = "needs_input"
 	StateError      SessionState = "error"
 )
@@ -20,7 +19,7 @@ func (s SessionState) IsActive() bool {
 
 // CanInterrupt returns true if a tool event (PreToolUse/PostToolUse) is
 // allowed to set the state. Only busy and needs_input can be overwritten
-// by tool events — done/error/idle require UserPromptSubmit to transition.
+// by tool events — error/idle require UserPromptSubmit to transition.
 func (s SessionState) CanInterrupt() bool {
 	return s == StateBusy || s == StateNeedsInput || s == ""
 }

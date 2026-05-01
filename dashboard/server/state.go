@@ -96,7 +96,7 @@ func (sm *StateManager) LoadAll() error {
 	sm.rebuildAgents()
 	sm.reconcileNameOverrides()
 
-	// Load initial context usage for all agents
+	// Load initial context usage, last messages, and activity feeds for all agents
 	for sid := range sm.agents {
 		path := sm.findTranscriptPathLocked(sid)
 		if path != "" {
@@ -106,6 +106,28 @@ func (sm *StateManager) LoadAll() error {
 				if a, ok := sm.agents[sid]; ok {
 					a.ContextTokens = ctx.Tokens
 					a.ContextWindow = ctx.Window
+				}
+			}
+			// Backfill last user prompt and assistant summary from transcript
+			// so cards show useful content immediately after server restart.
+			if a, ok := sm.agents[sid]; ok {
+				if a.LastSummary == "" || a.UserPrompt == "" {
+					userPrompt, lastSummary := extractLastMessages(path)
+					if a.UserPrompt == "" && userPrompt != "" {
+						a.UserPrompt = userPrompt
+					}
+					if a.LastSummary == "" && lastSummary != "" {
+						a.LastSummary = lastSummary
+					}
+				}
+			}
+			// Backfill activity feed from transcript if no live feed exists yet
+			if _, hasFeed := sm.activityFeeds[sid]; !hasFeed {
+				if feed := extractActivityFeed(path); len(feed) > 0 {
+					sm.activityFeeds[sid] = feed
+					if a, ok := sm.agents[sid]; ok {
+						a.ActivityFeed = feed
+					}
 				}
 			}
 		}
@@ -133,7 +155,7 @@ func (sm *StateManager) GetAgents() []AgentState {
 	for _, ea := range sm.ephemeral {
 		state := "busy"
 		if ea.State == "completed" {
-			state = "done"
+			state = "idle"
 		}
 		a := AgentState{
 			SessionID:       ea.AgentID,
@@ -482,38 +504,11 @@ func (sm *StateManager) GetPendingRelaunch(sessionID string) string {
 	return cmd
 }
 
-// TransitionDoneToIdle transitions agents that have been "done" for more than
-// 10 minutes to "idle" state. Returns true if any agent was transitioned.
+// TransitionDoneToIdle is a no-op after Phase 2 collapsed done→idle.
+// Kept for backward compatibility — callers still invoke it from the
+// poller tick, but there are no "done" agents to transition anymore.
 func (sm *StateManager) TransitionDoneToIdle() bool {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	changed := false
-	for _, a := range sm.agents {
-		if a.State != "done" {
-			continue
-		}
-		if a.LastUpdated == "" {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, a.LastUpdated)
-		if err != nil {
-			continue
-		}
-		if time.Since(t) > 10*time.Minute {
-			a.State = "idle"
-			a.LastUpdated = time.Now().UTC().Format(time.RFC3339)
-			// Also update the status file on disk via store
-			if sf, ok := sm.statuses[a.SessionID]; ok {
-				sf.State = "idle"
-				sf.Timestamp = a.LastUpdated
-				sm.statuses[a.SessionID] = sf
-				sm.store.Status.Upsert(sf)
-			}
-			changed = true
-		}
-	}
-	return changed
+	return false
 }
 
 // TransitionState forces a state/detail change for a session (used by poller for interrupt detection).
@@ -928,13 +923,19 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 	}
 
 	// Guard against race conditions: a slow PreToolUse/PostToolUse arriving after
-	// Stop should not overwrite "done" with "busy". Only UserPromptSubmit can
+	// Stop should not overwrite idle/error with "busy". Only UserPromptSubmit can
 	// transition out of done/error/idle.
 	if exists && sf.State != "busy" && sf.State != "needs_input" && sf.State != "" {
 		switch evt.HookEventName {
 		case "PreToolUse", "PostToolUse", "PostToolUseFailure":
 			return nil
 		}
+	}
+
+	// Normalize incoming "done" from hooks to "idle" — the hook's status-update.sh
+	// still writes "done" but the server treats it as idle (Phase 2 collapse).
+	if sf.State == "done" {
+		sf.State = "idle"
 	}
 
 	sf.CWD = evt.CWD
@@ -980,7 +981,7 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 		sf.RecentActions = nil
 		sf.BusySince = ""
 	case "Stop":
-		sf.State = "done"
+		sf.State = "idle"
 		sf.Detail = "finished"
 		sf.RecentActions = nil
 		sf.BusySince = ""
@@ -990,10 +991,10 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 		sf.Detail = "needs permission for " + evt.ToolName
 	case "Notification":
 		if evt.NotificationType == "idle_prompt" {
-			// idle_prompt only transitions busy → done (never sets needs_input;
+			// idle_prompt only transitions busy → idle (never sets needs_input;
 			// that's exclusively for PermissionRequest)
 			if sf.State == "busy" {
-				sf.State = "done"
+				sf.State = "idle"
 				sf.Detail = "finished"
 				sf.BusySince = ""
 				if evt.TranscriptPath != "" {

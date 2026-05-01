@@ -77,7 +77,6 @@ export function useSpriteAnimation(state: string, active: boolean): string {
   activeRef.current = active
 
   const config = state === 'busy' ? BUSY_ANIMATIONS
-    : state === 'done' ? DONE_ANIMATIONS
     : IDLE_ANIMATIONS
 
   useEffect(() => {

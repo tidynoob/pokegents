@@ -56,7 +56,7 @@ func ApplyEvent(current SessionState, currentDetail string, evt HookEvent) State
 
 	case "Stop":
 		return StateTransitionResult{
-			NewState:     StateDone,
+			NewState:     StateIdle,
 			Detail:       "finished",
 			Summary:      truncate(evt.LastAssistantMessage, 200),
 			ClearActions: true,
@@ -77,11 +77,11 @@ func ApplyEvent(current SessionState, currentDetail string, evt HookEvent) State
 
 	case "Notification":
 		if evt.NotificationType == "idle_prompt" {
-			// idle_prompt only transitions busy → done
+			// idle_prompt only transitions busy → idle
 			// Never sets needs_input (that's exclusively PermissionRequest)
 			if current == StateBusy {
 				return StateTransitionResult{
-					NewState: StateDone,
+					NewState: StateIdle,
 					Detail:   "finished",
 				}
 			}
@@ -99,7 +99,7 @@ func ApplyEvent(current SessionState, currentDetail string, evt HookEvent) State
 		// Preserve compaction state
 		if currentDetail == "compacting" {
 			return StateTransitionResult{
-				NewState: StateDone,
+				NewState: StateIdle,
 				Detail:   "finished",
 				Summary:  "Compacted",
 			}
