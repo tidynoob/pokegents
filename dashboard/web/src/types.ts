@@ -1,6 +1,14 @@
+export interface CardPreview {
+  state: string
+  phase: 'thinking' | 'tool' | 'streaming' | 'waiting' | 'complete' | 'error' | 'empty' | string
+  prompt?: string
+  text?: string
+  feed?: { time: string; type: string; text: string }[]
+  updated_at?: string
+}
+
 export interface AgentState {
   session_id: string
-  ccd_session_id?: string
   pokegent_id?: string
   profile_name: string
   display_name: string
@@ -25,6 +33,7 @@ export interface AgentState {
   user_prompt: string
   recent_actions: string[]
   activity_feed: { time: string; type: string; text: string }[]
+  card_preview?: CardPreview
   context_tokens: number
   context_window: number
   last_updated: string
@@ -39,6 +48,8 @@ export interface AgentState {
   /** Runtime backend bound to this agent. "" / "iterm2" → terminal tab.
    *  "chat" → embedded ACP chat panel. Drives card click routing. */
   interface?: 'iterm2' | 'chat'
+  /** ACP backend/provider ID (e.g. "claude", "codex") from backends.json config. */
+  agent_backend?: string
 }
 
 export interface Profile {
@@ -69,6 +80,8 @@ export interface PokegentSummary {
   project?: string
   task_group?: string
   profile_name?: string
+  interface?: 'iterm2' | 'chat'
+  agent_backend?: string
   role_emoji?: string
   project_color?: [number, number, number]
   created_at?: string
@@ -80,9 +93,9 @@ export interface PokegentSummary {
 
 export type AgentStatus = 'running' | 'idle' | 'error' | 'permission' | 'waiting' | 'started' | 'ended'
 
-/** Stable identity for an agent — pokegent_id is the primary, falls back to ccd_session_id then session_id. */
+/** Stable identity for an agent — pokegent_id is the primary, session_id is the fallback. */
 export function stableId(a: AgentState): string {
-  return a.pokegent_id || a.ccd_session_id || a.session_id
+  return a.pokegent_id || a.session_id
 }
 
 export interface AgentMessage {
@@ -94,13 +107,4 @@ export interface AgentMessage {
   content: string
   timestamp: string
   delivered: boolean
-}
-
-export interface AgentConnection {
-  agent_a: string
-  agent_b: string
-  agent_a_name: string
-  agent_b_name: string
-  message_count: number
-  last_message: string
 }

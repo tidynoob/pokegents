@@ -68,7 +68,7 @@ function RecallAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
           <div style={{
             width: 80, height: 80,
             borderRadius: '50%',
-            background: 'radial-gradient(circle, rgba(255,50,50,0.7) 0%, transparent 70%)',
+            background: 'radial-gradient(circle, var(--theme-accent-red) 0%, transparent 70%)',
             animation: 'recallPulse 400ms ease-in forwards',
           }} />
           {/* Sprite shrinking into beam */}
@@ -91,11 +91,11 @@ function RecallAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
           style={{
             position: 'fixed', width: 28, height: 28,
             imageRendering: 'pixelated',
-            filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+            filter: 'drop-shadow(0 2px 6px var(--theme-panel-muted-bg))',
             '--sx': `${cx - 14}px`, '--sy': `${cy - 14}px`,
             '--ex': `${anim.bubbleX - 14}px`, '--ey': `${anim.bubbleY - 14}px`,
             '--my': `${Math.min(cy, anim.bubbleY) - 60}px`,
-            animation: 'pokeballFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
+            animation: 'agent-orbFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
           } as React.CSSProperties}
         />
       )}
@@ -126,7 +126,7 @@ function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
 
   return (
     <>
-      {/* Phase 1: Pokéball flies from bubble to card center */}
+      {/* Phase 1: Agent orb flies from bubble to card center */}
       {phase === 'fly' && (
         <img
           src="/sprites/pokeball.png"
@@ -134,11 +134,11 @@ function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
           style={{
             position: 'fixed', width: 28, height: 28,
             imageRendering: 'pixelated',
-            filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
+            filter: 'drop-shadow(0 2px 6px var(--theme-panel-muted-bg))',
             '--sx': `${anim.bubbleX - 14}px`, '--sy': `${anim.bubbleY - 14}px`,
             '--ex': `${cx - 14}px`, '--ey': `${cy - 14}px`,
             '--my': `${Math.min(cy, anim.bubbleY) - 80}px`,
-            animation: 'pokeballFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
+            animation: 'agent-orbFly 800ms cubic-bezier(0.3, 0, 0.2, 1) forwards',
           } as React.CSSProperties}
         />
       )}
@@ -146,7 +146,7 @@ function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
       {/* Phase 2: Bounce → white circle morphs into white card shape → fades */}
       {phase === 'bounce' && (
         <>
-          {/* Pokéball bounces up once then fades */}
+          {/* Agent orb bounces up once then fades */}
           <div style={{ position: 'fixed', left: cx, top: cy, transform: 'translate(-50%, -50%)' }}>
             <img
               src="/sprites/pokeball.png"
@@ -154,8 +154,8 @@ function DeployAnimation({ anim, onComplete }: { anim: PokeballAnim; onComplete:
               style={{
                 width: 28, height: 28,
                 imageRendering: 'pixelated',
-                filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))',
-                animation: 'pokeballPopOpen 400ms ease-out forwards',
+                filter: 'drop-shadow(0 2px 6px var(--theme-panel-muted-bg))',
+                animation: 'agent-orbPopOpen 400ms ease-out forwards',
               }}
             />
           </div>

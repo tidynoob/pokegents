@@ -1,20 +1,106 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, Component, ErrorInfo, ReactNode, type MouseEvent as ReactMouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
-import { fetchSessions, focusAgent, fetchConnections, fetchMessageHistory, fetchActivity, fetchProfiles, fetchProjectList, fetchRoleList, shutdownAgent, dismissEphemeral, assignTaskGroup, ActivityEntry, ProfileInfo, ProjectInfo, RoleInfo } from './api'
-import { AgentState, AgentConnection, AgentMessage, stableId } from './types'
+import { fetchSessions, focusAgent, fetchProfiles, fetchProjectList, fetchRoleList, shutdownAgent, dismissEphemeral, assignTaskGroup, fetchSetupStatus, completeOnboarding, renameAgent, setSprite, ProfileInfo, ProjectInfo, RoleInfo, SetupStatus } from './api'
+import { AgentState, AgentMessage, stableId } from './types'
+import type { Entry, ToolCall } from './types/chat'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
 import { GroupContainer } from './components/GroupContainer'
 import { SessionBrowser } from './components/SessionBrowser'
 import { TownView } from './components/TownView'
 import { ChatPanel } from './components/ChatPanel'
+import { useChatWebSockets } from './hooks/useChatWebSocket'
 import { hashString } from './components/CreatureIcon'
 import { useMessageAnimations, DeliveryOverlay } from './components/MessageAnimations'
 import { useSettings } from './hooks/useSettings'
-import { SettingsPanel } from './components/SettingsPanel'
+import { SettingsPanel } from './components/settings/SettingsPanel'
+import { OnboardingModal } from './components/onboarding/OnboardingModal'
 import { LaunchModal } from './components/LaunchModal'
 import { PokeballAnimationLayer, usePokeballAnimations } from './components/PokeballAnimation'
+import { AgentMenu } from './components/AgentMenu'
+import { PixelSprite } from './components/PixelSprite'
+import { SpritePicker } from './components/SpritePicker'
+import { capsFor, useRuntimeCapabilities } from './utils/runtimes'
+
+export class DashboardErrorBoundary extends Component<{children: ReactNode}, {error: Error | null}> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Dashboard crash:', error, info.componentStack)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 20, color: 'var(--theme-accent-red)', background: 'var(--theme-app-bg)', height: '100vh', fontFamily: 'var(--theme-font-mono)', overflow: 'auto' }}>
+          <h2>Dashboard crashed</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', fontSize: 'var(--theme-type-l)' }}>{this.state.error.message}{'\n'}{this.state.error.stack}</pre>
+          <button onClick={() => { this.setState({ error: null }); window.location.reload() }}
+            style={{ marginTop: 16, padding: '8px 16px', background: '#333', color: '#fff', border: 'none', cursor: 'pointer' }}>
+            Reload
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+
+function entryTime(ts?: number): string {
+  return new Date(ts || Date.now()).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function toolLabel(tc: ToolCall): string {
+  const raw = tc.rawInput as Record<string, unknown> | undefined
+  const arg = raw && typeof raw === 'object'
+    ? String(raw.command || raw.cmd || raw.file_path || raw.pattern || raw.query || raw.description || '')
+    : ''
+  const base = tc.title || tc.kind || 'Tool'
+  return arg ? `${base}: ${arg.length > 80 ? `${arg.slice(0, 77)}…` : arg}` : base
+}
+
+function livePreviewFromChat(agent: AgentState, entries: Entry[], wsBusy?: boolean, busySince?: string | null): AgentState {
+  if (!wsBusy) return agent
+  let lastUserIdx = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].kind === 'user') { lastUserIdx = i; break }
+  }
+  const currentTurn = lastUserIdx >= 0 ? entries.slice(lastUserIdx + 1) : entries
+  const prompt = lastUserIdx >= 0 && entries[lastUserIdx].kind === 'user'
+    ? (entries[lastUserIdx] as Extract<Entry, { kind: 'user' }>).text
+    : agent.user_prompt
+  const feed = currentTurn.flatMap(e => {
+    if (e.kind === 'tool') return [{ time: entryTime(e.ts), type: 'tool', text: toolLabel(e.data) }]
+    if (e.kind === 'assistant') {
+      const out: { time: string; type: string; text: string }[] = []
+      if (e.thoughts?.trim()) out.push({ time: entryTime(e.ts), type: 'thinking', text: e.thoughts.trim().slice(-280) })
+      if (e.text?.trim()) out.push({ time: entryTime(e.ts), type: 'text', text: e.text.trim().slice(-280) })
+      return out
+    }
+    if (e.kind === 'system') return [{ time: entryTime(e.ts), type: 'thinking', text: e.text }]
+    return []
+  }).slice(-8)
+  const last = feed[feed.length - 1]
+  return {
+    ...agent,
+    state: 'busy',
+    busy_since: busySince || agent.busy_since,
+    user_prompt: prompt,
+    last_summary: feed.length ? '' : '',
+    last_trace: '',
+    activity_feed: feed,
+    card_preview: {
+      state: 'busy',
+      phase: last ? (last.type === 'tool' ? 'tool' : 'streaming') : 'thinking',
+      prompt,
+      text: feed.length ? undefined : 'Working...',
+      feed,
+      updated_at: new Date().toISOString(),
+    },
+  }
+}
 
 const STATUS_PILLS: Record<string, { label: string; bg: string; pulse?: boolean }> = {
   idle:        { label: 'SLP',  bg: '#788890' },
@@ -33,9 +119,10 @@ function formatInactive(lastUpdated?: string): string {
   return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`
 }
 
-function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
+function CollapsedBubble({ agent, sprite, onExpand, bubbleRef, onMenu }: {
   agent: AgentState; sprite: string; onExpand: () => void
   bubbleRef?: (el: HTMLDivElement | null) => void
+  onMenu?: (e: ReactMouseEvent) => void
 }) {
   const [hovered, setHovered] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -50,9 +137,21 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
       className="relative"
       onMouseEnter={() => { hoverTimer.current = setTimeout(() => setHovered(true), 300) }}
       onMouseLeave={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); setHovered(false) }}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setHovered(false)
+        onMenu?.(e)
+      }}
     >
       <button
         onClick={() => { setHovered(false); onExpand() }}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setHovered(false)
+          onMenu?.(e)
+        }}
         className="relative flex items-center justify-center group" style={{ width: 32, height: 32 }}
         title={`${agent.display_name} — click to expand`}
       >
@@ -62,13 +161,12 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
           className="absolute opacity-50 group-hover:opacity-80 transition-opacity"
           style={{ imageRendering: 'pixelated', width: 32, height: 32 }}
         />
-        <img
-          src={`/sprites/${sprite}.png`}
+        <PixelSprite
+          sprite={sprite}
           alt=""
+          scale={0.8}
           className="relative z-10"
-          style={{ imageRendering: 'pixelated', transform: 'scale(0.8)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
-          onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
-          onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
+          style={{ filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
         />
       </button>
 
@@ -77,27 +175,27 @@ function CollapsedBubble({ agent, sprite, onExpand, bubbleRef }: {
         <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 pointer-events-none"
           style={{ animation: 'fadeIn 0.15s ease' }}
         >
-          <div className="gba-card rounded-lg px-3 py-2.5 border border-white/10 min-w-[180px] max-w-[220px]"
+          <div className="gba-card rounded-lg px-3 py-2.5 border theme-border-subtle min-w-[180px] max-w-[220px]"
             style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.6)' }}
           >
             <div className="flex items-center gap-2 mb-1.5">
-              <img src={`/sprites/${sprite}.png`} alt="" style={{ imageRendering: 'pixelated', width: 28, height: 28 }} />
+              <div className="shrink-0 flex items-center justify-center" style={{ width: 28, height: 28 }}><PixelSprite sprite={sprite} alt="" scale={0.875} /></div>
               <div className="flex-1 min-w-0">
-                <div className="text-[8px] font-pixel text-white pixel-shadow truncate">{agent.display_name}</div>
+                <div className="text-s theme-font-display theme-text-primary pixel-shadow truncate">{agent.display_name}</div>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span
-                    className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
+                    className={`text-xs theme-font-display theme-text-primary px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
                     style={{ backgroundColor: st.bg, textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
                   >{st.label}</span>
-                  {dur && <span className="text-[6px] font-mono text-white/30">{dur}</span>}
+                  {dur && <span className="text-xs theme-font-mono theme-text-faint">{dur}</span>}
                 </div>
               </div>
             </div>
             {agent.detail && (
-              <div className="text-[7px] font-mono text-white/50 truncate mt-1 border-t border-white/10 pt-1">{agent.detail}</div>
+              <div className="text-s theme-font-mono theme-text-muted truncate mt-1 border-t theme-border-subtle pt-1">{agent.detail}</div>
             )}
             {agent.user_prompt && (
-              <div className="text-[7px] font-mono text-white/35 truncate mt-1">{agent.user_prompt.slice(0, 80)}</div>
+              <div className="text-s theme-font-mono theme-text-faint truncate mt-1">{agent.user_prompt.slice(0, 80)}</div>
             )}
           </div>
         </div>
@@ -134,17 +232,16 @@ function CollapsedGroupBubble({ name, members, sprite, onExpand, bubbleRef }: {
           className="absolute opacity-50 group-hover:opacity-80 transition-opacity"
           style={{ imageRendering: 'pixelated', width: 32, height: 32 }}
         />
-        <img
-          src={`/sprites/${sprite}.png`}
+        <PixelSprite
+          sprite={sprite}
           alt=""
+          scale={0.8}
           className="relative z-10"
-          style={{ imageRendering: 'pixelated', transform: 'scale(0.8)', filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
-          onMouseEnter={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0) brightness(1)' }}
-          onMouseLeave={e => { (e.target as HTMLImageElement).style.filter = 'grayscale(0.4) brightness(0.8)' }}
+          style={{ filter: 'grayscale(0.4) brightness(0.8)', transition: 'filter 0.15s' }}
         />
         {/* Count badge */}
         <span
-          className="absolute -bottom-1 -right-1.5 z-20 text-[5px] font-pixel text-white rounded-full px-0.5 leading-tight"
+          className="absolute -bottom-1 -right-1.5 z-20 text-xs theme-font-display theme-text-primary rounded-full px-0.5 leading-tight"
           style={{ background: `rgb(${r},${g},${b})`, textShadow: '1px 1px 0 rgba(0,0,0,0.5)' }}
         >{members.length}</span>
       </button>
@@ -154,19 +251,19 @@ function CollapsedGroupBubble({ name, members, sprite, onExpand, bubbleRef }: {
         <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 pointer-events-none"
           style={{ animation: 'fadeIn 0.15s ease' }}
         >
-          <div className="gba-card rounded-lg px-3 py-2 border border-white/10 min-w-[140px] max-w-[200px]"
+          <div className="gba-card rounded-lg px-3 py-2 border theme-border-subtle min-w-[140px] max-w-[200px]"
             style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.6)' }}
           >
-            <div className="text-[8px] font-pixel pixel-shadow uppercase mb-1" style={{ color: `rgb(${r},${g},${b})` }}>{name}</div>
+            <div className="text-s theme-font-display pixel-shadow uppercase mb-1" style={{ color: `rgb(${r},${g},${b})` }}>{name}</div>
             {members.map(m => {
               const st = STATUS_PILLS[m.state] || STATUS_PILLS.idle
               return (
                 <div key={m.session_id} className="flex items-center gap-1.5 py-0.5">
                   <span
-                    className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
+                    className={`text-xs theme-font-display theme-text-primary px-1 py-px rounded-full leading-none ${st.pulse ? 'animate-pulse-soft' : ''}`}
                     style={{ backgroundColor: st.bg, textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
                   >{st.label}</span>
-                  <span className="text-[7px] font-pixel text-white/60 truncate">{m.display_name || m.profile_name}</span>
+                  <span className="text-s theme-font-display theme-text-muted truncate">{m.display_name || m.profile_name}</span>
                 </div>
               )
             })}
@@ -179,16 +276,24 @@ function CollapsedGroupBubble({ name, members, sprite, onExpand, bubbleRef }: {
 
 export default function App() {
   const { settings, setSettings, reset: resetSettings, DEFAULTS } = useSettings()
-  const { agents: sseAgents, connections: sseConnections, newMessage, connected } = useSSE()
+  const { agents: sseAgents, newMessage, connected } = useSSE()
   const [agents, setAgents] = useState<AgentState[]>([])
-  const [connections, setConnections] = useState<AgentConnection[]>([])
   const [showBrowser, setShowBrowser] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-  // chatAgentId is the pokegent_id of the chat-backed agent whose ChatPanel
-  // is open on the right. Persisted across reloads so the panel re-opens.
+  const [showTownEditor, setShowTownEditor] = useState(false)
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
+  const [showOnboarding, setShowOnboarding] = useState(false)
+  const [serverRestarting, setServerRestarting] = useState(false)
   const [chatAgentId, setChatAgentId] = useState<string | null>(() => {
     try { return localStorage.getItem('pokegents-chat-agent') || null } catch { return null }
   })
+  const [shortcutOverlay, setShortcutOverlay] = useState(false)
+  const [showLauncher, setShowLauncher] = useState(false)
+  const [menuAgent, setMenuAgent] = useState<AgentState | null>(null)
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
+  const [spritePickerAgent, setSpritePickerAgent] = useState<AgentState | null>(null)
+  const allCaps = useRuntimeCapabilities()
+  const chatConnections = useChatWebSockets(agents, chatAgentId)
   useEffect(() => {
     try {
       if (chatAgentId) localStorage.setItem('pokegents-chat-agent', chatAgentId)
@@ -201,6 +306,16 @@ export default function App() {
   // routes through this custom event instead).
   const chatAgentIdRef = useRef(chatAgentId)
   chatAgentIdRef.current = chatAgentId
+  useEffect(() => {
+    const restartHandler = () => setServerRestarting(true)
+    window.addEventListener('server-restart-requested', restartHandler)
+    return () => window.removeEventListener('server-restart-requested', restartHandler)
+  }, [])
+
+  useEffect(() => {
+    if (connected) setServerRestarting(false)
+  }, [connected])
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { pokegentId?: string }
@@ -267,17 +382,28 @@ export default function App() {
     window.addEventListener('pointerup', onUp)
   }
   // CMD-hold overlay: shows numbered shortcuts on agent cards.
-  // CMD+1..9 opens the chat panel for that agent. We used to also show a
-  // dimming "⌘1, ⌘2…" overlay over each card while Meta was held; that was
-  // removed because Cmd is the modifier for macOS screenshots (Cmd+Shift+4)
-  // and the overlay flashed onto every card the moment you held Cmd, ruining
-  // captures.
+  // CMD+1..5 switches to the agent at that visual grid position.
   const gridIdsRef = useRef<string[]>([])
   const agentMapRef = useRef<Record<string, AgentState>>({})
   useEffect(() => {
+    const isEditable = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null
+      return !!el && (
+        el.tagName === 'INPUT' ||
+        el.tagName === 'TEXTAREA' ||
+        el.isContentEditable
+      )
+    }
     const onDown = (e: KeyboardEvent) => {
-      // CMD+1..9 → open agent at that grid position
-      if (e.metaKey && e.key >= '1' && e.key <= '9') {
+      const hasSelection = !!window.getSelection()?.toString()
+      // Do not rerender the dashboard while the user is copying selected text.
+      // The shortcut-number overlay is only useful for navigation; showing it
+      // on Cmd/Cmd+C can clear the browser selection in the chat transcript.
+      if (hasSelection) return
+      if (e.key === 'Meta' || e.metaKey) setShortcutOverlay(true)
+
+      // CMD+1..5 → open agent at that visual grid position.
+      if (e.metaKey && e.key >= '1' && e.key <= '5') {
         e.preventDefault()
         const idx = parseInt(e.key) - 1
         const ids = gridIdsRef.current
@@ -291,18 +417,55 @@ export default function App() {
             focusAgent(targetId)
           }
         }
+        return
+      }
+
+      // CMD+N → launcher/new agent.
+      if (e.metaKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault()
+        setShowLauncher(true)
+        return
+      }
+
+      // CMD+P → PC box.
+      if (e.metaKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setShowBrowser(true)
+        return
+      }
+
+      // CMD+F is handled by ChatPanel when one is open; prevent browser find
+      // so search is scoped to the selected agent transcript.
+      if (e.metaKey && e.key.toLowerCase() === 'f') {
+        if (chatAgentIdRef.current) e.preventDefault()
+        return
+      }
+
+      // Escape → settings, unless user is typing or another modal/menu is open.
+      if (e.key === 'Escape' && !isEditable(e.target)) {
+        const anyOverlayOpen =
+          showBrowser || showSettings || showLauncher || showOnboarding ||
+          showTownEditor || !!menuAgent || !!spritePickerAgent
+        if (!anyOverlayOpen) {
+          e.preventDefault()
+          setShowSettings(true)
+        }
       }
     }
+    const onUp = (e: KeyboardEvent) => {
+      if (e.key === 'Meta' || !e.metaKey) setShortcutOverlay(false)
+    }
+    const onBlur = () => setShortcutOverlay(false)
     window.addEventListener('keydown', onDown)
+    window.addEventListener('keyup', onUp)
+    window.addEventListener('blur', onBlur)
     return () => {
       window.removeEventListener('keydown', onDown)
+      window.removeEventListener('keyup', onUp)
+      window.removeEventListener('blur', onBlur)
     }
-  }, [])
-  const settingsRef = useRef<HTMLDivElement>(null)
+  }, [showBrowser, showSettings, showLauncher, showOnboarding, showTownEditor, menuAgent, spritePickerAgent])
   const [messages, setMessages] = useState<AgentMessage[]>([])
-  const [activity, setActivity] = useState<ActivityEntry[]>([])
-  const [bottomTab, setBottomTab] = useState<'messages' | 'activity'>('messages')
-  const [bottomOpen, setBottomOpen] = useState(false)
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
   // 'expanded' was supported when groups could span multiple grid cells. In
@@ -324,7 +487,6 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [roles, setRoles] = useState<RoleInfo[]>([])
-  const [showLauncher, setShowLauncher] = useState(false)
   const [gridSliderDragging, setGridSliderDragging] = useState(false)
 
   // Restore from localStorage AFTER first agents load (so we know which IDs are valid)
@@ -379,93 +541,36 @@ export default function App() {
     localStorage.setItem('pokegents-manual-expand', JSON.stringify([...manualExpandRef.current]))
   }
 
-  // Auto-collapse after 15 min of inactivity (idle/done only), auto-expand when busy/needs_input
-  useEffect(() => {
-    if (!collapsedInitialized.current || agents.length === 0 || settings.autoCollapseMinutes === 0) return
-    const AUTO_COLLAPSE_MS = settings.autoCollapseMinutes * 60 * 1000
-
-    const check = () => {
-      const now = Date.now()
-      const toCollapse: string[] = []
-      const toExpand: string[] = []
-
-      for (const a of agents) {
-        // Skip grouped agents — they're managed by GroupContainer, not pokéball collapse
-        if (a.task_group) continue
-        const age = a.last_updated ? now - new Date(a.last_updated).getTime() : 0
-        const inactive = a.state === 'idle'
-        const active = a.state === 'busy' || a.state === 'needs_input'
-
-        const aid = stableId(a)
-        if (inactive && age >= AUTO_COLLAPSE_MS && !manualExpandRef.current.has(aid)) {
-          toCollapse.push(aid)
-        }
-        if (active) {
-          toExpand.push(aid)
-          manualExpandRef.current.delete(aid); persistManualExpand() // reset manual flag when agent becomes active
-        }
-      }
-
-      if (toCollapse.length > 0 || toExpand.length > 0) {
-        setCollapsedIds(prev => {
-          const next = new Set(prev)
-          for (const id of toCollapse) next.add(id)
-          for (const id of toExpand) next.delete(id)
-          if (next.size === prev.size && [...next].every(id => prev.has(id))) return prev
-          return next
-        })
-      }
-
-      // Auto-expand groups when any member enters needs_input → switch to 'single' at that agent
-      const groupUpdates: Record<string, number> = {}
-      for (const a of agents) {
-        if (a.state === 'needs_input' && a.task_group &&
-            (groupViewModes[a.task_group] || 'collapsed') === 'collapsed') {
-          // Find index of this agent in its group
-          const members = agents.filter(m => m.task_group === a.task_group)
-          const idx = members.findIndex(m => stableId(m) === stableId(a))
-          groupUpdates[a.task_group] = Math.max(idx, 0)
-        }
-      }
-      if (Object.keys(groupUpdates).length > 0) {
-        setGroupViewModes(prev => {
-          const next = { ...prev }
-          for (const g of Object.keys(groupUpdates)) next[g] = 'single'
-          return next
-        })
-        setGroupPageIndex(prev => ({ ...prev, ...groupUpdates }))
-      }
-    }
-
-    check()
-    const iv = setInterval(check, 30000)
-    return () => clearInterval(iv)
-  }, [agents, settings.autoCollapseMinutes, groupViewModes])
-
-  const msgLogRef = useRef<HTMLDivElement>(null)
-  const actLogRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   // useMessageAnimations moved below getSpriteForId (needs it as dependency)
   // Layout computed after gridIds (below)
   // showHeader computed after layout (below)
 
+  const refreshSetupStatus = async () => {
+    const status = await fetchSetupStatus()
+    setSetupStatus(status)
+    return status
+  }
+
+  const closeOnboarding = async () => {
+    setShowOnboarding(false)
+    try {
+      const status = await completeOnboarding()
+      if (status) setSetupStatus(status)
+    } catch {
+      // Do not trap the user in onboarding if persistence fails; Settings can reopen it.
+    }
+  }
+
   useEffect(() => {
     fetchSessions().then(setAgents).catch(() => {})
-    fetchConnections().then(setConnections).catch(() => {})
-    fetchMessageHistory().then(setMessages).catch(() => {})
-    fetchActivity().then(setActivity).catch(() => {})
     fetchProfiles().then(p => setProfiles(p.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
     fetchProjectList().then(p => setProjects(p.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
     fetchRoleList().then(r => setRoles(r.sort((a, b) => a.title.localeCompare(b.title)))).catch(() => {})
-    // Poll messages + activity every 5s, fallback session poll every 10s
-    const interval = setInterval(() => {
-      fetchMessageHistory().then(msgs => {
-        setMessages(prev => msgs.length !== prev.length ? msgs : prev)
-      }).catch(() => {})
-      fetchActivity().then(acts => {
-        setActivity(prev => acts.length !== prev.length ? acts : prev)
-      }).catch(() => {})
-    }, 5000)
+    refreshSetupStatus().then(status => {
+      if (status && status.onboarding_complete === false) setShowOnboarding(true)
+    }).catch(() => {})
+    // Fallback session poll for cases where SSE reconnects late.
     const fallbackPoll = setInterval(() => {
       fetchSessions().then(fresh => {
         setAgents(prev => {
@@ -481,16 +586,12 @@ export default function App() {
         })
       }).catch(() => {})
     }, 10000)
-    return () => { clearInterval(interval); clearInterval(fallbackPoll) }
+    return () => { clearInterval(fallbackPoll) }
   }, [])
 
   useEffect(() => {
     if (sseAgents.length > 0) setAgents(sseAgents)
   }, [sseAgents])
-
-  useEffect(() => {
-    if (sseConnections.length > 0) setConnections(sseConnections)
-  }, [sseConnections])
 
   // Instantly append new messages from SSE (no poll delay)
   useEffect(() => {
@@ -523,7 +624,7 @@ export default function App() {
       for (const a of list) {
         if (a.ephemeral) continue
         result.push(a)
-        const children = ephByParent[a.session_id] || ephByParent[a.ccd_session_id || ''] || []
+        const children = ephByParent[a.session_id] || ephByParent[a.pokegent_id || ''] || []
         result.push(...children)
       }
       // Append orphaned ephemerals at the end
@@ -582,6 +683,7 @@ export default function App() {
   // Show header when cells are tall enough for standard mode
   const showHeader = gridEngine.cellH >= 140
   const isCompact = gridEngine.cellH < 120
+  const isServerConnecting = serverRestarting || (!connected && agents.length > 0)
 
 
   const getSpriteForId = useMemo(() => {
@@ -589,7 +691,6 @@ export default function App() {
     for (const a of agents) {
       if (a.sprite) {
         m[a.session_id] = a.sprite
-        if (a.ccd_session_id) m[a.ccd_session_id] = a.sprite
         if (a.pokegent_id) m[a.pokegent_id] = a.sprite
       }
     }
@@ -597,46 +698,6 @@ export default function App() {
   }, [agents])
 
   const { deliveries, hiddenSprites, readingAgents, triggerTestDelivery } = useMessageAnimations(messages, cardRefs, getSpriteForId)
-
-  // Build a map of session_id / pokegent_id → connected agent info (for icons)
-  const agentInfoMap = useMemo(() => {
-    const m: Record<string, { session_id: string; emoji: string; display_name: string }> = {}
-    for (const a of agents) {
-      m[a.session_id] = { session_id: a.session_id, emoji: a.emoji, display_name: a.display_name || a.profile_name }
-      if (a.ccd_session_id && a.ccd_session_id !== a.session_id) {
-        m[a.ccd_session_id] = m[a.session_id]
-      }
-      if (a.pokegent_id && a.pokegent_id !== a.session_id && a.pokegent_id !== a.ccd_session_id) {
-        m[a.pokegent_id] = m[a.session_id]
-      }
-    }
-    return m
-  }, [agents])
-
-  const connectedAgentsMap = useMemo(() => {
-    const map: Record<string, { session_id: string; emoji: string; display_name: string }[]> = {}
-    for (const conn of connections) {
-      const a = agentInfoMap[conn.agent_a]
-      const b = agentInfoMap[conn.agent_b]
-      if (a) {
-        if (!map[conn.agent_a]) map[conn.agent_a] = []
-        if (b && !map[conn.agent_a].some(x => x.session_id === b.session_id)) map[conn.agent_a].push(b)
-      }
-      if (b) {
-        if (!map[conn.agent_b]) map[conn.agent_b] = []
-        if (a && !map[conn.agent_b].some(x => x.session_id === a.session_id)) map[conn.agent_b].push(a)
-      }
-    }
-    return map
-  }, [connections, agentInfoMap])
-
-  // Auto-scroll message/activity logs
-  useEffect(() => {
-    if (msgLogRef.current) msgLogRef.current.scrollTop = msgLogRef.current.scrollHeight
-  }, [messages.length])
-  useEffect(() => {
-    if (actLogRef.current) actLogRef.current.scrollTop = actLogRef.current.scrollHeight
-  }, [activity.length])
 
   // Keyboard shortcut: / to search
   useEffect(() => {
@@ -661,6 +722,14 @@ export default function App() {
     }
     return m
   }, [agents])
+  const shortcutById = useMemo(() => {
+    const out: Record<string, string> = {}
+    visualOrder
+      .filter(id => !id.startsWith('town') && !id.startsWith('group:') && !!agentMap[id])
+      .slice(0, 5)
+      .forEach((id, idx) => { out[id] = String(idx + 1) })
+    return out
+  }, [visualOrder, agentMap])
   // Keep agentMapRef in sync for the CMD+N keydown handler.
   useEffect(() => { agentMapRef.current = agentMap }, [agentMap])
 
@@ -670,9 +739,9 @@ export default function App() {
       {/* Header — always visible */}
       {(
         <div className="flex items-center shrink-0 mb-2">
-          <div className="flex items-center gap-3">
-            <h1 className="text-[10px] font-pixel text-white pixel-shadow">POKéGENTS</h1>
-            <span className="text-[8px] font-pixel text-white/50">
+          <div className="flex items-center gap-3 pl-2">
+            <h1 className="text-m theme-font-display theme-text-primary pixel-shadow">POKéGENTS</h1>
+            <span className="text-s theme-font-display theme-text-muted">
               {agents.length - collapsedAgents.length} active{collapsedAgents.length > 0 && <>, {collapsedAgents.length} idle</>}
               <span className={`ml-1.5 ${connected ? 'text-accent-green' : 'text-accent-red'}`}>●</span>
             </span>
@@ -737,6 +806,10 @@ export default function App() {
                   if (el) bubbleRefs.current.set(aid, el)
                   else bubbleRefs.current.delete(aid)
                 }}
+                onMenu={(e) => {
+                  setMenuAgent(agent)
+                  setMenuPos({ x: e.clientX, y: e.clientY })
+                }}
                 onExpand={() => {
                   const bubbleEl = bubbleRefs.current.get(aid)
                   if (bubbleEl) {
@@ -774,36 +847,23 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowLauncher(true)}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              className="gba-button text-s theme-font-display px-3 py-1.5 transition-colors"
             >
               NEW AGENT
             </button>
             <button
               onClick={() => setShowBrowser(true)}
-              className="gba-button text-[7px] font-pixel px-3 py-1.5 transition-colors"
+              className="gba-button text-s theme-font-display px-3 py-1.5 transition-colors"
             >
               PC BOX
             </button>
-            <div className="relative" ref={settingsRef}>
-              <button
-                onClick={() => setShowSettings(v => !v)}
-                className="gba-button text-[7px] font-pixel px-2.5 py-1.5 transition-colors"
-                title="Settings"
-              >
-                SETTINGS
-              </button>
-              {showSettings && (
-                <SettingsPanel
-                  settings={settings}
-                  defaults={DEFAULTS}
-                  onChange={setSettings}
-                  onReset={resetSettings}
-                  onClose={() => setShowSettings(false)}
-                  onTestMessaging={triggerTestDelivery}
-                  onGridDragging={setGridSliderDragging}
-                />
-              )}
-            </div>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="gba-button text-s theme-font-display px-2.5 py-1.5 transition-colors"
+              title="Settings"
+            >
+              SETTINGS
+            </button>
           </div>
         </div>
       )}
@@ -814,8 +874,8 @@ export default function App() {
       {agents.length === 0 && !settings.showTownCard ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="gba-dialog text-center px-8 py-6">
-            <p className="text-[9px] font-pixel text-gba-dialog-border">No POKéMON in party</p>
-            <p className="text-[7px] font-pixel text-gba-dialog-border/60 mt-3">
+            <p className="text-m theme-font-display text-gba-dialog-border">No avatar in party</p>
+            <p className="text-s theme-font-display text-gba-dialog-border/60 mt-3">
               Start with <span className="text-gba-card">pokegents &lt;profile&gt;</span>
             </p>
           </div>
@@ -845,8 +905,33 @@ export default function App() {
                     agents={agents}
                     onSelect={(a) => focusAgent(stableId(a))}
                     selectedId={null}
-                    debug={settings.townDebug}
+                    debug={showTownEditor}
                     newMessage={newMessage}
+                    geometry={{
+                      scale: settings.townScale,
+                      cellSize: settings.townCellSize,
+                      cellOffsetX: settings.townCellOffsetX,
+                      cellOffsetY: settings.townCellOffsetY,
+                      cropLeft: settings.townCropLeft,
+                      cropTop: settings.townCropTop,
+                      cropRight: settings.townCropRight,
+                      cropBottom: settings.townCropBottom,
+                    }}
+                    editorOpen={showTownEditor}
+                    onCloseEditor={() => setShowTownEditor(false)}
+                    onSaveGeometry={(g) => setSettings({
+                      townScale: g.scale,
+                      townCellSize: g.cellSize,
+                      townCellOffsetX: g.cellOffsetX,
+                      townCellOffsetY: g.cellOffsetY,
+                      townCropLeft: g.cropLeft,
+                      townCropTop: g.cropTop,
+                      townCropRight: g.cropRight,
+                      townCropBottom: g.cropBottom,
+                    })}
+                    projects={projects}
+                    roles={roles}
+                    existingGroups={existingGroupNames}
                   />
                 </div>
               )
@@ -890,6 +975,7 @@ export default function App() {
                   projects={projects}
                   roles={roles}
                   existingGroups={existingGroupNames}
+                  isConnecting={isServerConnecting}
                 />
               )
             }
@@ -900,9 +986,13 @@ export default function App() {
             const aid = stableId(agent)
             const isChat = agent.interface === 'chat'
             const isActiveChatTarget = isChat && chatAgentId === aid
+            const chatConn = isChat ? chatConnections.getConnection(aid) : null
+            const isConnecting = isServerConnecting || (isChat && isActiveChatTarget && (!chatConn || !chatConn.streamReady))
+            const cardAgent = chatConn ? livePreviewFromChat(agent, chatConn.entries, chatConn.wsBusy, chatConn.busySince) : agent
             return (
               <AgentCard
-                agent={agent}
+                agent={cardAgent}
+                isConnecting={isConnecting}
                 onClick={() => {
                   if (isChat) {
                     if (chatAgentId === aid) {
@@ -916,8 +1006,24 @@ export default function App() {
                   }
                 }}
                 glowActive={isActiveChatTarget}
+                quickSendPrompt={isChat && chatConn ? async (text) => {
+                  setChatAgentId(aid)
+                  window.dispatchEvent(new Event('chat-panel-ping'))
+                  await chatConn.sendPrompt(text)
+                } : undefined}
+                quickInputDisabled={isChat ? (!chatConn?.streamReady || chatConn.reconfiguring) : undefined}
+                quickInputPlaceholder={isChat
+                  ? (chatConn?.reconfiguring
+                    ? 'Reconfiguring… hang tight'
+                    : chatConn?.streamReady
+                      ? `Ask ${agent.display_name || 'agent'}…`
+                      : 'Connecting…')
+                  : undefined}
+                quickInputBusy={isChat ? (chatConn?.wsBusy ?? agent.state === 'busy') : undefined}
+                quickInputSlashCommands={isChat}
                 mode={cardMode}
-                connectedAgents={connectedAgentsMap[aid] || connectedAgentsMap[agent.session_id]}
+                shortcutLabel={shortcutById[aid]}
+                shortcutVisible={shortcutOverlay}
                 spriteOverride={agent.sprite}
                 isReading={readingAgents.has(aid) || readingAgents.has(agent.session_id)}
                 hideSprite={hiddenSprites.has(aid) || hiddenSprites.has(agent.session_id)}
@@ -974,19 +1080,20 @@ export default function App() {
          className="group/divider shrink-0 -mx-1.5 px-1 cursor-col-resize relative z-20 select-none"
          style={{ width: 6 }}
        >
-         <div className="h-full w-px mx-auto bg-white/10 group-hover/divider:bg-accent-blue transition-colors" />
+         <div className="h-full w-px mx-auto theme-bg-panel-subtle group-hover/divider:bg-accent-blue transition-colors" />
        </div>
        <div className="shrink-0 min-h-0" style={{ width: chatPanelWidth }}>
          {(() => {
            const chatAgent = chatAgentId ? agentMap[chatAgentId] : null
            if (chatAgent) {
-             return <ChatPanel agent={chatAgent} onClose={() => setChatAgentId(null)} />
+             const conn = chatConnections.getConnection(chatAgent.pokegent_id || chatAgent.session_id)
+             return <ChatPanel agent={chatAgent} connection={conn} onClose={() => setChatAgentId(null)} />
            }
            return (
              <div className="h-full w-full flex items-center justify-center gba-card" style={{ borderRadius: 8, background: 'linear-gradient(180deg, #3a78b0 0%, #2e6498 30%, #1f4878 100%)' }}>
-               <div className="text-center text-white/30">
-                 <div className="text-[8px] font-pixel pixel-shadow">No agent selected</div>
-                 <div className="text-[7px] font-pixel mt-1">Click a chat agent to open</div>
+               <div className="text-center theme-text-faint">
+                 <div className="text-s theme-font-display pixel-shadow">No agent selected</div>
+                 <div className="text-s theme-font-display mt-1">Click a chat agent to open</div>
                </div>
              </div>
            )
@@ -994,91 +1101,7 @@ export default function App() {
        </div>
       </div>{/* end body flex-row */}
 
-      {/* Bottom bar — Messages + Activity tabs. Lives inside the root flex
-          column as a shrink-0 child so the body's flex-1 sizing accounts
-          for it (grid cell-height calc + chat panel both respect it). */}
-      {(messages.length > 0 || activity.length > 0) && (
-        <div className="shrink-0 -mx-3 -mb-3 mt-2 border-t-2 border-gba-teal-dark pt-2 pb-2 px-3 z-30" style={{ background: 'linear-gradient(180deg, rgba(42,104,88,0.95) 0%, rgba(42,104,88,1) 30%)' }}>
-          <div className="flex items-center gap-3 mb-1 px-0.5">
-            <button
-              onClick={() => setBottomOpen(o => !o)}
-              className="text-[9px] text-white/40 hover:text-white/70 mr-1"
-            >
-              {bottomOpen ? '▼' : '▶'}
-            </button>
-            <button
-              onClick={() => { setBottomTab('messages'); setBottomOpen(true) }}
-              className={`text-[8px] font-pixel uppercase pixel-shadow ${bottomTab === 'messages' ? 'text-white' : 'text-white/40 hover:text-white/70'}`}
-            >
-              MAIL{messages.length > 0 ? ` (${messages.length})` : ''}
-            </button>
-            <button
-              onClick={() => { setBottomTab('activity'); setBottomOpen(true) }}
-              className={`text-[8px] font-pixel uppercase pixel-shadow ${bottomTab === 'activity' ? 'text-white' : 'text-white/40 hover:text-white/70'}`}
-            >
-              LOG{activity.length > 0 ? ` (${activity.length})` : ''}
-            </button>
-          </div>
-
-          {bottomOpen && (bottomTab === 'messages' ? (
-            <div ref={msgLogRef} className="max-h-28 overflow-y-auto overflow-x-hidden space-y-1 gba-panel p-2">
-              {messages.length === 0 ? (
-                <div className="text-[10px] font-mono text-white/30">No mail yet</div>
-              ) : messages.map((msg) => {
-                const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-                const fromSprite = getSpriteForId(msg.from)
-                const toSprite = getSpriteForId(msg.to)
-                return (
-                  <div key={msg.id + (msg.delivered ? '-d' : '')} className="flex items-start gap-1.5 text-[10px] font-mono">
-                    <span className="text-white/30 shrink-0 mt-0.5">{time}</span>
-                    <span className="inline-flex items-center gap-1 bg-gba-card/40 rounded-full px-1.5 py-0.5 shrink-0">
-                      <img src={`/sprites/${fromSprite}.png`} alt="" className="w-3 h-3" style={{ imageRendering: 'pixelated' }} />
-                      <span className="text-white/80 text-[9px]">{msg.from_name}</span>
-                    </span>
-                    <span className="text-accent-yellow shrink-0 mt-0.5">→</span>
-                    <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 shrink-0 ${
-                      msg.delivered
-                        ? 'bg-gba-card/40'
-                        : 'bg-transparent border border-dashed border-white/30 animate-pulse-soft'
-                    }`}>
-                      <img src={`/sprites/${toSprite}.png`} alt="" className="w-3 h-3" style={{ imageRendering: 'pixelated' }} />
-                      <span className={`text-[9px] ${msg.delivered ? 'text-white/80' : 'text-white/40'}`}>{msg.to_name}</span>
-                    </span>
-                    <span className="text-white/50 truncate mt-0.5">{msg.content.slice(0, 100)}</span>
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <div ref={actLogRef} className="max-h-28 overflow-y-auto overflow-x-hidden space-y-1 gba-panel p-2">
-              {activity.length === 0 ? (
-                <div className="text-[10px] font-mono text-white/30">No activity yet</div>
-              ) : activity.map((entry, i) => {
-                const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-                const sprite = getSpriteForId(entry.session_id)
-                return (
-                  <div
-                    key={i}
-                    className="flex items-start gap-1.5 text-[10px] font-mono cursor-pointer hover:bg-white/10 rounded px-0.5"
-                    onClick={() => focusAgent(entry.session_id)}
-                  >
-                    <span className="text-white/30 shrink-0 mt-0.5">{time}</span>
-                    <span className="inline-flex items-center gap-1 bg-gba-card/40 rounded-full px-1.5 py-0.5 shrink-0">
-                      <img src={`/sprites/${sprite}.png`} alt="" className="w-3 h-3" style={{ imageRendering: 'pixelated' }} />
-                      <span className="text-white/80 text-[9px]">{entry.agent_name}</span>
-                    </span>
-                    {entry.files && <span className="text-accent-yellow/70 truncate mt-0.5">{entry.files}</span>}
-                    {entry.files && entry.summary && <span className="text-white/20 shrink-0 mt-0.5">—</span>}
-                    <span className="text-white/50 truncate mt-0.5">{entry.summary}</span>
-                  </div>
-                )
-              })}
-            </div>
-          ))}
-        </div>
-      )}
-
-      </div>{/* ← end ROOT flex container (now AFTER bottom bar so flex-1 body respects it) */}
+      </div>{/* end ROOT flex container */}
 
       <DeliveryOverlay deliveries={deliveries} />
       <PokeballAnimationLayer animations={animations} onComplete={onAnimComplete} />
@@ -1087,7 +1110,73 @@ export default function App() {
         activePokegentIds={new Set(agents.map(a => stableId(a)))}
         onResume={(id) => setCollapsedIds(prev => { const next = new Set(prev); next.delete(id); return next })}
       />}
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          defaults={DEFAULTS}
+          setupStatus={setupStatus}
+          onChange={setSettings}
+          onReset={resetSettings}
+          onClose={() => setShowSettings(false)}
+          onTestMessaging={triggerTestDelivery}
+          onGridDragging={setGridSliderDragging}
+          onOpenOnboarding={() => {
+            setShowSettings(false)
+            setShowOnboarding(true)
+            refreshSetupStatus().catch(() => {})
+          }}
+          onOpenTownEditor={() => {
+            setSettings({ showTownCard: true })
+            setShowSettings(false)
+            setShowTownEditor(true)
+          }}
+        />
+      )}
       {showLauncher && <LaunchModal projects={projects} roles={roles} agents={agents} onClose={() => setShowLauncher(false)} />}
+      {menuAgent && createPortal(
+        <AgentMenu
+          x={menuPos.x}
+          y={menuPos.y}
+          agent={menuAgent}
+          capabilities={capsFor(allCaps, menuAgent.interface)}
+          onClose={() => setMenuAgent(null)}
+          onRename={async () => {
+            const current = menuAgent.display_name || menuAgent.profile_name || 'Agent'
+            setMenuAgent(null)
+            const next = window.prompt('Rename agent', current)
+            const trimmed = next?.trim()
+            if (trimmed && trimmed !== current) {
+              await renameAgent(menuAgent.pokegent_id || menuAgent.session_id, trimmed)
+            }
+          }}
+          onChangeSprite={() => {
+            setSpritePickerAgent(menuAgent)
+            setMenuAgent(null)
+          }}
+          projects={projects}
+          roles={roles}
+          existingGroups={existingGroupNames}
+        />,
+        document.body
+      )}
+      {spritePickerAgent && createPortal(
+        <SpritePicker
+          currentSprite={spritePickerAgent.sprite || 'pokeball'}
+          onSelect={async (sprite) => {
+            await setSprite(spritePickerAgent.session_id, sprite)
+            setSpritePickerAgent(null)
+          }}
+          onClose={() => setSpritePickerAgent(null)}
+        />,
+        document.body
+      )}
+      {showOnboarding && (
+        <OnboardingModal
+          status={setupStatus}
+          onClose={closeOnboarding}
+          onRefresh={async () => { await refreshSetupStatus() }}
+        />
+      )}
     </>
   )
 }

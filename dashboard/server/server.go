@@ -7,11 +7,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"pokegents/dashboard/server/services"
@@ -20,43 +23,48 @@ import (
 
 // Server is the main dashboard HTTP server.
 type Server struct {
-	state     *StateManager
-	eventBus  *EventBus
-	notifier  *Notifier
+	state        *StateManager
+	eventBus     *EventBus
+	notifier     *Notifier
 	storeWatcher *store.StoreWatcher
-	msgSvc    *services.MessagingService
-	searchSvc *services.SearchService
-	terminal  TerminalIntegration
-	fileStore *store.Store
-	dataDir   string
-	chatMgr    *ChatManager
-	runtimes   runtimeRegistry
-	mux        *http.ServeMux
-	httpServer *http.Server
-	port       int
-	webDir     string
+	msgSvc       *services.MessagingService
+	searchSvc    *services.SearchService
+	terminal     TerminalIntegration
+	fileStore    *store.Store
+	dataDir      string
+	chatMgr      *ChatManager
+	runtimes     runtimeRegistry
+	backendStore *store.BackendStore
+	paths        PathService
+	mux          *http.ServeMux
+	httpServer   *http.Server
+	port         int
+	bindHost     string
+	webDir       string
+	usageLog     *UsageLogger
 
 	pendingResumeTaskGroups map[string]string // old session_id → task group
-	pendingResumeSpriteMu   sync.Mutex       // guards pendingResumeTaskGroups
+	pendingResumeSpriteMu   sync.Mutex        // guards pendingResumeTaskGroups
 }
 
 // Config holds server configuration.
 type Config struct {
 	Port             int
+	BindHost         string
 	DataDir          string
 	ClaudeProjectDir string
 	SearchDBPath     string
 	WebDir           string
 }
 
-// DefaultConfig returns config with sensible defaults, reading port from ~/.ccsession/config.json.
+// DefaultConfig returns config with sensible defaults, reading port from the
+// Pokegents data dir config.
 func DefaultConfig() Config {
-	home, _ := os.UserHomeDir()
-	dataDir := filepath.Join(home, ".pokegents")
+	paths := NewPathService("")
 
 	// Read port from config file
 	port := 7834
-	if data, err := os.ReadFile(filepath.Join(dataDir, "config.json")); err == nil {
+	if data, err := os.ReadFile(paths.ConfigPath()); err == nil {
 		var cfg struct {
 			Port int `json:"port"`
 		}
@@ -67,18 +75,15 @@ func DefaultConfig() Config {
 
 	return Config{
 		Port:             port,
-		DataDir:          dataDir,
-		ClaudeProjectDir: filepath.Join(home, ".claude", "projects"),
-		SearchDBPath:     filepath.Join(dataDir, "search.db"),
+		BindHost:         "127.0.0.1",
+		DataDir:          paths.DataDir,
+		ClaudeProjectDir: paths.ClaudeProjectsDir(),
+		SearchDBPath:     filepath.Join(paths.DataDir, "search.db"),
 		WebDir:           "", // set at runtime
 	}
 }
 
 func NewServer(cfg Config) (*Server, error) {
-	// One-time migration: re-key mailboxes from ccd_session_id → pokegent_id.
-	// Idempotent — safe across restarts. (See mailbox_migration.go for the
-	// removal-when-fleet-migrated note.)
-	migrateMailboxesToPokegentID(cfg.DataDir)
 	// One-time fixup: chat status files written before the runtime-parity
 	// refactor stored pokegent_id in the `session_id` field, which made
 	// state.go's status lookup miss for chat agents (causing last_summary
@@ -124,27 +129,33 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	sw := store.NewStoreWatcher(cfg.DataDir)
+	backendStore := store.NewBackendStore(cfg.DataDir)
+	state.SetBackendStore(backendStore)
 
 	s := &Server{
-		state:        state,
-		eventBus:     eventBus,
-		notifier:     notifier,
-		storeWatcher: sw,
-		msgSvc:       msgSvc,
-		searchSvc:    searchSvc,
-		terminal:     terminal,
-		fileStore:    fileStore,
-		dataDir:      cfg.DataDir,
-		mux:                  http.NewServeMux(),
-		port:                 cfg.Port,
-		webDir:               cfg.WebDir,
+		state:                   state,
+		eventBus:                eventBus,
+		notifier:                notifier,
+		storeWatcher:            sw,
+		msgSvc:                  msgSvc,
+		searchSvc:               searchSvc,
+		terminal:                terminal,
+		fileStore:               fileStore,
+		dataDir:                 cfg.DataDir,
+		backendStore:            backendStore,
+		paths:                   NewPathService(cfg.DataDir),
+		mux:                     http.NewServeMux(),
+		port:                    cfg.Port,
+		bindHost:                cfg.BindHost,
+		webDir:                  cfg.WebDir,
+		usageLog:                NewUsageLogger(cfg.DataDir),
 		pendingResumeTaskGroups: make(map[string]string),
 	}
 
 	// Phase 3: chat-backed pokegent supervisor.
 	s.chatMgr = NewChatManager(cfg.DataDir, func() {
 		eventBus.Publish("state_update", state.GetAgents())
-	}, eventBus)
+	}, eventBus, s.usageLog)
 
 	// Runtime registry — every backend implements the same interface; HTTP
 	// handlers dispatch through this map keyed by `agent.interface`.
@@ -189,9 +200,36 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/check-messages", s.handleCheckMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/clone", s.handleCloneSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/shutdown", s.handleShutdownSession)
+	s.mux.HandleFunc("POST /api/sessions/{id}/acknowledge", s.handleAcknowledge)
 	s.mux.HandleFunc("POST /api/sessions/{id}/debug/force-idle", s.handleDebugForceIdle)
 	s.mux.HandleFunc("POST /api/sessions/{id}/debug/respawn", s.handleDebugRespawn)
+	s.mux.HandleFunc("POST /api/sessions/{id}/restart-backend", s.handleRestartBackend)
+	s.mux.HandleFunc("POST /api/server/restart", s.handleServerRestart)
 	s.mux.HandleFunc("GET /api/runtimes", s.handleListRuntimes)
+	s.mux.HandleFunc("GET /api/backends", s.handleListBackends)
+	s.mux.HandleFunc("POST /api/backends", s.handleUpsertBackend)
+	s.mux.HandleFunc("PUT /api/backends/{id}", s.handleUpsertBackend)
+	s.mux.HandleFunc("DELETE /api/backends/{id}", s.handleDeleteBackend)
+	s.mux.HandleFunc("POST /api/backends/{id}/default", s.handleSetDefaultBackend)
+	s.mux.HandleFunc("POST /api/sessions/{id}/switch-backend", s.handleSwitchBackend)
+	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
+	s.mux.HandleFunc("POST /api/setup/apply", s.handleSetupApply)
+	s.mux.HandleFunc("POST /api/setup/repair-hooks", s.handleSetupRepairHooks)
+	s.mux.HandleFunc("POST /api/setup/repair-mcp", s.handleSetupRepairMCP)
+	s.mux.HandleFunc("POST /api/setup/install-launch-agent", s.handleSetupInstallLaunchAgent)
+	s.mux.HandleFunc("POST /api/setup/open-at-login", s.handleSetupOpenAtLogin)
+	s.mux.HandleFunc("POST /api/setup/preferences", s.handleSetupPreferences)
+	s.mux.HandleFunc("POST /api/setup/onboarding/complete", s.handleSetupOnboardingComplete)
+	s.mux.HandleFunc("POST /api/setup/defaults/roles", s.handleSetupDefaultRoles)
+	s.mux.HandleFunc("POST /api/setup/defaults/project", s.handleSetupDefaultProject)
+	s.mux.HandleFunc("POST /api/setup/open-config", s.handleSetupOpenConfig)
+	s.mux.HandleFunc("POST /api/setup/open-auth", s.handleSetupOpenAuth)
+	s.mux.HandleFunc("POST /api/open-external", s.handleOpenExternal)
+	s.mux.HandleFunc("GET /api/dev/diagnostics", s.handleDevDiagnostics)
+	s.mux.HandleFunc("GET /api/dev/logs", s.handleDevLogs)
+	s.mux.HandleFunc("GET /api/dev/acp/connections", s.handleDevACPConnections)
+	s.mux.HandleFunc("POST /api/dev/acp/{id}/close", s.handleDevACPClose)
+	s.mux.HandleFunc("POST /api/dev/acp/{id}/force-idle", s.handleDevACPForceIdle)
 	s.mux.HandleFunc("POST /api/task-groups/{name}/release", s.handleReleaseTaskGroup)
 	s.mux.HandleFunc("GET /api/task-groups/{name}/sessions", s.handleGetTaskGroupSessions)
 	s.mux.HandleFunc("GET /api/sessions/{id}/transcript", s.handleGetTranscript)
@@ -205,16 +243,10 @@ func (s *Server) routes() {
 	// Phase 2: unified launch endpoint. Single entry point regardless of interface.
 	s.mux.HandleFunc("POST /api/pokegents/launch", s.handleUnifiedLaunch)
 
-	// Chat-only endpoints — streaming and permission UI are genuinely
-	// chat-runtime-specific (no iterm2 equivalent). The prompt/cancel/
-	// delete operations dispatch via the runtime registry under
-	// `/api/sessions/{id}/...` and are NOT duplicated here.
-	s.mux.HandleFunc("GET /api/chat/{id}/stream", s.handleChatStream)
-	s.mux.HandleFunc("POST /api/chat/{id}/permission/{request_id}", s.handleChatPermission)
-	// Phase 1: event ring buffer — cursor-based fetch for reconnecting clients.
-	s.mux.HandleFunc("GET /api/chat/{id}/events", s.handleChatEvents)
+	// Chat-only endpoints — WebSocket relay is the primary interface now.
+	// SSE streams and permission endpoint removed in Phase 3 (browser owns state).
+	s.mux.HandleFunc("GET /api/chat/{id}/ws", s.handleChatWS)
 	// Phase 1: prompt queue — inspect pending queued prompts.
-	s.mux.HandleFunc("GET /api/sessions/{id}/queue", s.handleGetQueue)
 
 	// Phase 4: interface migration — swap an agent's runtime backend without
 	// changing identity (pokegent_id, session_id, mailbox all preserved).
@@ -301,7 +333,7 @@ func (s *Server) Start() error {
 	// Start search indexer — sync running session metadata after first index build
 	if s.searchSvc != nil {
 		// Wire pokegent resolver: indexer attributes JSONL → pokegent_id via
-		// session_transcripts lookup or the legacy session-id-map fallback.
+		// session_transcripts lookup or the reverse lookup map fallback.
 		s.searchSvc.SetPokegentResolver(func(sessionID string) string {
 			if pgid := s.searchSvc.GetPokegentIDForSession(sessionID); pgid != "" {
 				return pgid
@@ -310,11 +342,9 @@ func (s *Server) Start() error {
 			if a := s.state.GetAgent(sessionID); a != nil && a.PokegentID != "" {
 				return a.PokegentID
 			}
-			// Last resort: legacy session-id-map (ccd_sid → claude_sid; ccd_sid = pokegent_id)
-			for ccdSID, claudeSID := range s.state.GetSessionIDMap() {
-				if claudeSID == sessionID {
-					return ccdSID
-				}
+			// Last resort: reverse lookup from Claude session_id → pokegent_id
+			if pgid, ok := s.state.GetSessionToPokegent()[sessionID]; ok {
+				return pgid
 			}
 			return ""
 		})
@@ -332,12 +362,16 @@ func (s *Server) Start() error {
 	// session/load (typically 2-5s per agent).
 	go s.reattachChatSessions()
 
-	addr := fmt.Sprintf(":%d", s.port)
+	bindHost := s.bindHost
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", bindHost, s.port)
 	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: s.corsMiddleware(s.mux),
 	}
-	log.Printf("dashboard server listening on http://localhost%s", addr)
+	log.Printf("dashboard server listening on http://%s", addr)
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -350,6 +384,12 @@ func (s *Server) startTracePoller() {
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		type pollCacheEntry struct {
+			size    int64
+			modTime time.Time
+			batch   store.BatchResult
+		}
+		pollCache := make(map[string]pollCacheEntry)
 		for range ticker.C {
 			// Clean up stale running files, reconcile mismatched session IDs,
 			// and transition done→idle after 10 minutes
@@ -360,60 +400,81 @@ func (s *Server) startTracePoller() {
 			agents := s.state.GetAgents()
 			changed := false
 			for _, a := range agents {
-				transcriptPath := s.state.FindTranscriptPath(a.SessionID)
+				needsPrompt := a.UserPrompt == ""
+				needsSummary := a.State != "busy" && a.LastSummary == "" && a.LastTrace == ""
+				needsContext := a.ContextWindow == 0 || (a.State == "busy" && a.ContextTokens == 0)
+				needsBusyTrace := a.State == "busy"
+				if !needsPrompt && !needsSummary && !needsContext && !needsBusyTrace {
+					continue
+				}
+
+				transcriptPath := s.state.FindTranscriptPath(a.PokegentID)
 				if transcriptPath == "" {
 					continue
 				}
+				info, err := os.Stat(transcriptPath)
+				if err != nil {
+					delete(pollCache, transcriptPath)
+					continue
+				}
+				var batch store.BatchResult
+				if cached, ok := pollCache[transcriptPath]; ok && cached.size == info.Size() && cached.modTime.Equal(info.ModTime()) {
+					if needsBusyTrace {
+						// Busy traces only change when the transcript changes.
+						continue
+					}
+					batch = cached.batch
+				} else {
+					// Single-pass batch extraction (1 file open, 1 bounded tail read, all fields).
+					batch = store.BatchExtract(transcriptPath)
+					pollCache[transcriptPath] = pollCacheEntry{size: info.Size(), modTime: info.ModTime(), batch: batch}
+				}
+
 				// Backfill missing user prompt
-				if a.UserPrompt == "" {
-					prompt := extractLastUserPrompt(transcriptPath)
-					if prompt != "" {
-						s.state.UpdateUserPrompt(a.SessionID, prompt)
-						changed = true
-					}
+				if a.UserPrompt == "" && batch.LastUserPrompt != "" {
+					s.state.UpdateUserPrompt(a.PokegentID, batch.LastUserPrompt)
+					changed = true
 				}
-				// Backfill missing last summary (e.g. after cold start / session resume)
-				if a.LastSummary == "" && a.LastTrace == "" {
-					summary := extractLastAssistantMessage(transcriptPath)
-					if summary != "" {
-						s.state.UpdateSummary(a.SessionID, summary)
-						changed = true
-					}
+				// Backfill missing last summary
+				if a.State != "busy" && a.LastSummary == "" && a.LastTrace == "" && batch.LastSummary != "" {
+					s.state.UpdateSummary(a.PokegentID, batch.LastSummary)
+					changed = true
 				}
-				// Update context usage — detect compaction (tokens decrease)
-				ctx := extractContextUsage(transcriptPath)
+				// Update context usage — detect compaction (tokens decrease).
+				// Only act on non-zero transcript values; transcript extraction
+				// returns 0 for backends whose JSONL doesn't carry usage data
+				// (the live ACP usage_update path handles those correctly).
+				ctx := batch.ContextUsage
 				if ctx.Tokens > 0 && (ctx.Tokens != a.ContextTokens || ctx.Window != a.ContextWindow) {
 					if a.ContextTokens > 0 && ctx.Tokens < a.ContextTokens && a.State == "idle" {
-						// Context shrunk on a done agent — compaction detected
-						s.state.UpdateSummary(a.SessionID, "Compacted")
+						s.state.UpdateSummary(a.PokegentID, "Compacted")
 					}
-					s.state.UpdateContext(a.SessionID, ctx.Tokens, ctx.Window)
-					changed = true
-				} else if ctx.Tokens == 0 && a.ContextTokens > 0 {
-					// extractContextUsage returned 0 — the compact_boundary trimming found
-					// no assistant entries after the last compact. Reset HP bar immediately.
-					s.state.UpdateContext(a.SessionID, 0, a.ContextWindow)
-					if a.LastSummary != "Compacted" {
-						s.state.UpdateSummary(a.SessionID, "Compacted")
-					}
+					s.state.UpdateContext(a.PokegentID, ctx.Tokens, ctx.Window)
 					changed = true
 				}
-				// Detect Ctrl+C interrupt: agent is busy but transcript shows "[Request interrupted by user]"
-				if a.State == "busy" && isTranscriptInterrupted(transcriptPath) {
-					s.state.TransitionState(a.SessionID, "idle", "interrupted")
+				// Update window from transcript even when tokens are 0
+				if ctx.Tokens == 0 && ctx.Window > 0 && a.ContextWindow != ctx.Window {
+					s.state.UpdateContext(a.PokegentID, a.ContextTokens, ctx.Window)
+					changed = true
+				}
+				// Detect Ctrl+C interrupt
+				if a.State == "busy" && batch.IsInterrupted {
+					s.state.TransitionState(a.PokegentID, "idle", "interrupted")
 					changed = true
 					continue
 				}
 				// Update trace and activity feed for busy agents
 				if a.State == "busy" && len(a.RecentActions) > 0 {
-					trace := extractTraceFromTranscript(transcriptPath)
-					if trace != "" && trace != a.LastTrace {
-						s.state.UpdateTrace(a.SessionID, trace)
+					if batch.Trace != "" && batch.Trace != a.LastTrace {
+						s.state.UpdateTrace(a.PokegentID, batch.Trace)
 						changed = true
 					}
-					feed := extractActivityFeed(transcriptPath)
-					if len(feed) > 0 {
-						s.state.UpdateActivityFeed(a.SessionID, feed)
+					if len(batch.ActivityFeed) > 0 {
+						feed := make([]ActivityItem, len(batch.ActivityFeed))
+						for i, item := range batch.ActivityFeed {
+							feed[i] = ActivityItem{Time: item.Time, Type: item.Type, Text: item.Text}
+						}
+						s.state.UpdateActivityFeed(a.PokegentID, feed)
 						changed = true
 					}
 				}
@@ -493,10 +554,17 @@ func (s *Server) migratePokegentsIndex() {
 			CreatedAt:   id.CreatedAt,
 		})
 	}
-	s.searchSvc.MigrateFromSessionMeta(snapshots, s.state.GetSessionIDMap())
+	// MigrateFromSessionMeta expects pokegent_id → claude_sid format.
+	// Invert our sessionToPokegent (claude_sid → pokegent_id) to get pokegent_id → claude_sid.
+	sessionToPg := s.state.GetSessionToPokegent()
+	pgToSession := make(map[string]string, len(sessionToPg))
+	for claudeSID, pgid := range sessionToPg {
+		pgToSession[pgid] = claudeSID
+	}
+	s.searchSvc.MigrateFromSessionMeta(snapshots, pgToSession)
 }
 
-// applyPendingResumeTaskGroups re-assigns task groups to sessions resumed from PC Box.
+// applyPendingResumeTaskGroups re-assigns task groups to sessions resumed from Session Box.
 func (s *Server) applyPendingResumeTaskGroups() {
 	s.pendingResumeSpriteMu.Lock()
 	if len(s.pendingResumeTaskGroups) == 0 {
@@ -512,8 +580,8 @@ func (s *Server) applyPendingResumeTaskGroups() {
 	agents := s.state.GetAgents()
 	for oldSID, taskGroup := range pending {
 		for _, a := range agents {
-			if a.SessionID == oldSID || a.CCDSessionID == oldSID {
-				s.state.SetAgentTaskGroup(a.SessionID, taskGroup)
+			if a.SessionID == oldSID || a.PokegentID == oldSID {
+				s.state.SetAgentTaskGroup(a.PokegentID, taskGroup)
 				s.pendingResumeSpriteMu.Lock()
 				delete(s.pendingResumeTaskGroups, oldSID)
 				s.pendingResumeSpriteMu.Unlock()
@@ -525,14 +593,14 @@ func (s *Server) applyPendingResumeTaskGroups() {
 
 // Stop shuts down all background workers and cleanly terminates every
 // active chat session. Order matters here:
-//   1. httpServer.Shutdown — drain in-flight HTTP requests first so they
-//      complete normally rather than 500ing on a closed chat manager.
-//   2. chatMgr.CloseAll — kill ACP subprocesses and wait for cmd.Wait
-//      goroutines. Without this, ACP processes would survive as PPID=1
-//      orphans that the next dashboard couldn't re-attach to via stdio.
-//   3. storeWatcher.Stop — only after chat goroutines stop publishing
-//      state_updates that consumers may have already disconnected from.
-//   4. searchSvc.Close — last because indexer reads from running state.
+//  1. httpServer.Shutdown — drain in-flight HTTP requests first so they
+//     complete normally rather than 500ing on a closed chat manager.
+//  2. chatMgr.CloseAll — kill ACP subprocesses and wait for cmd.Wait
+//     goroutines. Without this, ACP processes would survive as PPID=1
+//     orphans that the next dashboard couldn't re-attach to via stdio.
+//  3. storeWatcher.Stop — only after chat goroutines stop publishing
+//     state_updates that consumers may have already disconnected from.
+//  4. searchSvc.Close — last because indexer reads from running state.
 func (s *Server) Stop() {
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -553,7 +621,18 @@ func (s *Server) Stop() {
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !isAllowedLocalOrigin(origin) {
+				if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+					http.Error(w, "forbidden origin", http.StatusForbidden)
+					return
+				}
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
@@ -562,6 +641,15 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isAllowedLocalOrigin(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // --- handlers ---
@@ -819,9 +907,16 @@ func (s *Server) townMaskPath() string {
 func (s *Server) handleGetTownMask(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile(s.townMaskPath())
 	if err != nil {
-		// 204 = "no saved mask, frontend should use its hardcoded default"
-		w.WriteHeader(http.StatusNoContent)
-		return
+		// New installs should use the checked-in town config rather than an
+		// all-walkable generated mask. User saves still override this file at
+		// ~/.pokegents/town-mask.json.
+		defaultPath := filepath.Join(resolvePokegentsRoot(), "dashboard", "defaults", "town-mask.json")
+		data, err = os.ReadFile(defaultPath)
+		if err != nil {
+			// 204 = "no saved/default mask, frontend should use its hardcoded default"
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
@@ -912,7 +1007,7 @@ func (s *Server) handlePostEvent(w http.ResponseWriter, r *http.Request) {
 	s.notifier.MaybeNotify(evt, agent)
 
 	// When an agent transitions to done/idle, nudge if pending messages exist
-	if agent != nil && agent.State == "idle" {
+	if agent != nil && (agent.State == "idle" || agent.State == "done") {
 		s.msgSvc.NudgeIfPending(s.resolveToPokegentID(evt.SessionID))
 	}
 
@@ -1045,22 +1140,32 @@ func (s *Server) handleRevivePokegent(w http.ResponseWriter, r *http.Request) {
 		// revive (relaunchChatSession then defaults to role/project config
 		// if these are still empty).
 		rsModel, rsEffort := "", ""
+		rsBackend := ""
 		if ident != nil {
 			rsModel = ident.Model
 			rsEffort = ident.Effort
+			rsBackend = ident.AgentBackend
 		}
+		if rsBackend == "" {
+			rsBackend = inferChatBackendFromTranscript(summary.LatestSession.SessionID)
+		}
+		transcriptPath := store.FindTranscriptPath(summary.LatestSession.SessionID, s.state.claudeProjectDir)
 		rs := store.RunningSession{
-			Profile:     summary.ProfileName,
-			PokegentID:  pgid,
-			SessionID:   summary.LatestSession.SessionID,
-			DisplayName: summary.DisplayName,
-			Sprite:      summary.Sprite,
-			Role:        summary.Role,
-			Project:     summary.Project,
-			TaskGroup:   summary.TaskGroup,
-			Model:       rsModel,
-			Effort:      rsEffort,
-			Interface:   "chat",
+			Profile:                summary.ProfileName,
+			PokegentID:             pgid,
+			SessionID:              summary.LatestSession.SessionID,
+			DisplayName:            summary.DisplayName,
+			Sprite:                 summary.Sprite,
+			Role:                   summary.Role,
+			Project:                summary.Project,
+			TaskGroup:              summary.TaskGroup,
+			Model:                  rsModel,
+			Effort:                 rsEffort,
+			Interface:              "chat",
+			AgentBackend:           rsBackend,
+			TranscriptPath:         transcriptPath,
+			LastGoodSessionID:      summary.LatestSession.SessionID,
+			LastGoodTranscriptPath: transcriptPath,
 		}
 		if _, err := writePlaceholderRunningFile(filepath.Join(s.dataDir, "running"), rs); err != nil {
 			http.Error(w, "pre-write running file: "+err.Error(), http.StatusInternalServerError)
@@ -1136,7 +1241,7 @@ func (s *Server) handleFocusSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+	id := r.PathValue("id")
 
 	var body struct {
 		Name string `json:"name"`
@@ -1146,14 +1251,19 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := s.state.GetAgent(sessionID)
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+
+	agent := s.state.GetAgent(pgid)
 	if agent == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
 
 	// Update the running file
-	s.state.RenameAgent(sessionID, body.Name)
+	s.state.RenameAgent(pgid, body.Name)
 
 	// Update iTerm2 tab title — fire and forget
 	if agent.ITermSessionID != "" || agent.TTY != "" {
@@ -1162,7 +1272,7 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 
 	// Persist name to the JSONL transcript so it shows correctly in the
 	// "Previous sessions" resume page even after the session ends
-	go s.persistCustomTitle(sessionID, body.Name)
+	go s.persistCustomTitle(pgid, body.Name)
 
 	// Broadcast updated state
 	s.eventBus.Publish("state_update", s.state.GetAgents())
@@ -1172,25 +1282,18 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 
 // persistCustomTitle appends a custom-title entry to the session's JSONL
 // transcript and updates the search index.
-func (s *Server) persistCustomTitle(sessionID, name string) {
-	path := s.state.FindTranscriptPath(sessionID)
-	transcriptSID := sessionID
-
-	// For clones, the session ID might be the CCD UUID while the JSONL
-	// uses the Claude conversation ID. Try looking up the agent's CCDSessionID.
-	if path == "" {
-		agent := s.state.GetAgent(sessionID)
-		if agent != nil && agent.CCDSessionID != "" && agent.CCDSessionID != sessionID {
-			path = s.state.FindTranscriptPath(agent.CCDSessionID)
-			if path != "" {
-				transcriptSID = agent.CCDSessionID
-			}
-		}
-	}
-
+func (s *Server) persistCustomTitle(pokegentID, name string) {
+	path := s.state.FindTranscriptPath(pokegentID)
 	if path == "" {
 		return
 	}
+
+	// Derive the Claude session_id for the search index (transcript filename)
+	transcriptSID := pokegentID
+	if agent := s.state.GetAgent(pokegentID); agent != nil && agent.SessionID != "" {
+		transcriptSID = agent.SessionID
+	}
+
 	entry := map[string]string{"type": "custom-title", "customTitle": name}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -1416,14 +1519,14 @@ func (s *Server) handleConsumePending(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, msgs)
 }
 
-// resolveSessionID maps any agent ID (pokegent_id, session_id, ccd_session_id, or prefix)
-// to the Claude session ID used as the primary map key.
+// resolveSessionID maps any agent ID (pokegent_id, session_id, or prefix)
+// to the pokegent_id used as the primary map key.
 func (s *Server) resolveSessionID(id string) string {
-	// Single pass: check all three ID fields per agent
+	// Single pass: check agent IDs per agent
 	for _, a := range s.state.GetAgents() {
-		for _, candidate := range []string{a.SessionID, a.PokegentID, a.CCDSessionID} {
+		for _, candidate := range []string{a.PokegentID, a.SessionID} {
 			if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
-				return a.SessionID
+				return a.PokegentID
 			}
 		}
 	}
@@ -1440,14 +1543,18 @@ func (s *Server) resolveSessionID(id string) string {
 				continue
 			}
 			var rf struct {
-				SessionID    string `json:"session_id"`
-				CCDSessionID string `json:"ccd_session_id"`
-				PokegentID   string `json:"pokegent_id"`
+				SessionID  string `json:"session_id"`
+				PokegentID string `json:"pokegent_id"`
 			}
 			if json.Unmarshal(data, &rf) == nil {
-				for _, candidate := range []string{rf.PokegentID, rf.CCDSessionID, rf.SessionID} {
+				for _, candidate := range []string{rf.PokegentID, rf.SessionID} {
 					if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
-						return rf.SessionID
+						// Return pokegent_id (primary key)
+						pgid := rf.PokegentID
+						if pgid == "" {
+							pgid = rf.SessionID
+						}
+						return pgid
 					}
 				}
 			}
@@ -1471,18 +1578,14 @@ func (s *Server) resolveSessionID(id string) string {
 // backend-agnostic — it survives interface migration and is the only
 // identifier the messaging layer should ever use for routing.
 //
-// Falls back to ccd_session_id then session_id only for legacy running files
-// that pre-date the pokegent_id refactor. Returns the input unchanged if no
-// agent matches (caller decides what to do).
+// Falls back to session_id if no pokegent_id exists. Returns the input
+// unchanged if no agent matches (caller decides what to do).
 func (s *Server) resolveToPokegentID(id string) string {
 	for _, a := range s.state.GetAgents() {
-		for _, candidate := range []string{a.PokegentID, a.CCDSessionID, a.SessionID} {
+		for _, candidate := range []string{a.PokegentID, a.SessionID} {
 			if candidate != "" && (candidate == id || strings.HasPrefix(candidate, id)) {
 				if a.PokegentID != "" {
 					return a.PokegentID
-				}
-				if a.CCDSessionID != "" {
-					return a.CCDSessionID
 				}
 				return a.SessionID
 			}
@@ -1534,26 +1637,13 @@ func (s *Server) handleSendPrompt(w http.ResponseWriter, r *http.Request) {
 	if done {
 		return
 	}
-
-	// Chat agents: route through the state machine's queue so busy
-	// agents enqueue instead of fire-and-forget into a blocked Prompt().
-	if agent.Interface == "chat" {
-		sess := s.chatMgr.Get(agent.PokegentID)
-		if sess != nil {
-			queued, err := sess.SubmitPrompt(body.Prompt, body.Nonce)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, map[string]any{"ok": true, "queued": queued, "nonce": body.Nonce})
-			return
-		}
-	}
-
-	// Non-chat agents: existing behavior.
 	if err := rt.SendPrompt(r.Context(), agent.PokegentID, body.Prompt); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	s.state.BeginPrompt(agent.PokegentID, body.Prompt)
+	if s.eventBus != nil {
+		s.eventBus.Publish("state_update", s.state.GetAgents())
 	}
 	writeJSON(w, map[string]any{"ok": true, "nonce": body.Nonce})
 }
@@ -1580,7 +1670,6 @@ func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	if err := rt.Cancel(r.Context(), agent.PokegentID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1597,48 +1686,101 @@ func (s *Server) handleShutdownSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Clean up running + status files so the agent doesn't reappear on restart.
+	matches, _ := filepath.Glob(filepath.Join(s.dataDir, "running", "*-"+agent.PokegentID+".json"))
+	for _, p := range matches {
+		_ = os.Remove(p)
+	}
+	_ = os.Remove(filepath.Join(s.dataDir, "status", agent.PokegentID+".json"))
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// handleChatEvents returns events from the in-memory ring buffer for a chat
-// session. Supports cursor-based pagination via ?after=<seqNo>. Reconnecting
-// clients fetch only the events they missed instead of replaying the full
-// SSE stream.
-func (s *Server) handleChatEvents(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAcknowledge(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	sess := s.chatMgr.Get(id)
-	if sess == nil {
-		http.Error(w, "chat session not found", http.StatusNotFound)
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+	agent := s.state.GetAgent(pgid)
+	if agent == nil || agent.State != "done" {
+		writeJSON(w, map[string]bool{"ok": true})
 		return
 	}
-	var after uint64
-	if v := r.URL.Query().Get("after"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			after = n
+	s.state.TransitionState(pgid, "idle", "")
+	sess := s.chatMgr.Get(pgid)
+	if sess != nil {
+		sess.smMu.Lock()
+		if sess.smState == "done" {
+			sess.smState = "idle"
 		}
+		sess.smMu.Unlock()
+		sess.stateMu.Lock()
+		sess.writeStatusFileLocked()
+		sess.stateMu.Unlock()
+		sess.publishAgentStatePatchWith("idle", time.Time{})
 	}
-	events, hasGap := sess.EventsSince(after)
-	writeJSON(w, map[string]any{
-		"events":  events,
-		"has_gap": hasGap,
-	})
+	s.eventBus.Publish("state_update", s.state.GetAgents())
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// handleGetQueue returns the pending queued prompts for a chat session.
-func (s *Server) handleGetQueue(w http.ResponseWriter, r *http.Request) {
-	hint := r.PathValue("id")
-	pgid := s.resolveToPokegentID(hint)
-	sess := s.chatMgr.Get(pgid)
-	if sess == nil {
-		// No active chat session — return empty queue.
-		writeJSON(w, []QueuedPrompt{})
-		return
+func (s *Server) handleServerRestart(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]bool{"ok": true})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
-	if sess.queue == nil {
-		writeJSON(w, []QueuedPrompt{})
-		return
+	log.Printf("server restart requested via API")
+	go func() {
+		exe, err := os.Executable()
+		if err != nil {
+			log.Printf("restart: cannot find executable: %v", err)
+			return
+		}
+		if err := rebuildServerBinary(exe); err != nil {
+			log.Printf("restart: rebuild failed: %v", err)
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+		args := os.Args
+		env := os.Environ()
+		log.Printf("restart: execing %s %v", exe, args)
+		if err := syscall.Exec(exe, args, env); err != nil {
+			log.Printf("restart: exec failed: %v", err)
+		}
+	}()
+}
+
+func rebuildServerBinary(exe string) error {
+	root := resolvePokegentsRoot()
+	dashboardDir := filepath.Join(root, "dashboard")
+	if root == "" || !fileExists(filepath.Join(dashboardDir, "go.mod")) {
+		dashboardDir = filepath.Dir(exe)
 	}
-	writeJSON(w, sess.queue.Pending())
+	if !fileExists(filepath.Join(dashboardDir, "go.mod")) {
+		return fmt.Errorf("cannot locate dashboard source directory for rebuild")
+	}
+	tmp := filepath.Join(filepath.Dir(exe), "."+filepath.Base(exe)+".new")
+	_ = os.Remove(tmp)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", tmp, ".")
+	cmd.Dir = dashboardDir
+	cmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("go build timed out")
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("go build failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace binary: %w", err)
+	}
+	log.Printf("restart: rebuilt server binary at %s", exe)
+	return nil
 }
 
 func (s *Server) handleDebugForceIdle(w http.ResponseWriter, r *http.Request) {
@@ -1650,13 +1792,21 @@ func (s *Server) handleDebugForceIdle(w http.ResponseWriter, r *http.Request) {
 	s.state.TransitionState(pgid, "idle", "")
 	sess := s.chatMgr.Get(pgid)
 	if sess != nil {
-		sess.BroadcastDone()
+		sess.ForceIdle()
 	}
 	log.Printf("debug[%s]: forced idle", shortChat(pgid))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleDebugRespawn(w http.ResponseWriter, r *http.Request) {
+	s.restartChatBackend(w, r, "debug-respawn")
+}
+
+func (s *Server) handleRestartBackend(w http.ResponseWriter, r *http.Request) {
+	s.restartChatBackend(w, r, "restart-backend")
+}
+
+func (s *Server) restartChatBackend(w http.ResponseWriter, r *http.Request, logPrefix string) {
 	id := r.PathValue("id")
 	pgid := s.resolveToPokegentID(id)
 	if pgid == "" {
@@ -1665,7 +1815,7 @@ func (s *Server) handleDebugRespawn(w http.ResponseWriter, r *http.Request) {
 	runningGlob := filepath.Join(s.dataDir, "running", "*-"+pgid+".json")
 	matches, _ := filepath.Glob(runningGlob)
 	if len(matches) == 0 {
-		http.Error(w, "no running file", http.StatusNotFound)
+		http.Error(w, "no running file for chat backend", http.StatusNotFound)
 		return
 	}
 	raw, err := os.ReadFile(matches[0])
@@ -1678,13 +1828,22 @@ func (s *Server) handleDebugRespawn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if rs.Interface != "chat" {
+		http.Error(w, "agent is not chat-backed", http.StatusBadRequest)
+		return
+	}
+	s.state.TransitionState(pgid, "reconfiguring", "restarting backend")
+	s.eventBus.Publish("state_update", s.state.GetAgents())
 	go func() {
 		s.chatMgr.Close(pgid)
 		time.Sleep(500 * time.Millisecond)
 		if err := s.relaunchChatSession(rs); err != nil {
-			log.Printf("debug-respawn[%s]: failed: %v", shortChat(pgid), err)
+			log.Printf("%s[%s]: failed: %v", logPrefix, shortChat(pgid), err)
+			s.state.TransitionState(pgid, "error", "backend restart failed: "+err.Error())
+			s.eventBus.Publish("state_update", s.state.GetAgents())
 		} else {
-			log.Printf("debug-respawn[%s]: respawned", shortChat(pgid))
+			log.Printf("%s[%s]: respawned", logPrefix, shortChat(pgid))
+			s.eventBus.Publish("state_update", s.state.GetAgents())
 		}
 	}()
 	writeJSON(w, map[string]bool{"ok": true})
@@ -1758,9 +1917,7 @@ func (s *Server) handleGetTaskGroupSessions(w http.ResponseWriter, r *http.Reque
 	activeIDs := make(map[string]bool, len(activeAgents))
 	for _, a := range activeAgents {
 		activeIDs[a.SessionID] = true
-		if a.CCDSessionID != "" {
-			activeIDs[a.CCDSessionID] = true
-		}
+		activeIDs[a.PokegentID] = true
 	}
 
 	type sessionInfo struct {
@@ -1795,9 +1952,8 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the image cache dir and next number
-	home, _ := os.UserHomeDir()
-	cacheDir := filepath.Join(home, ".claude", "image-cache", sessionID)
+	// Store uploads in Pokegents-owned data, not a provider-specific cache.
+	cacheDir := s.pathService().ImageUploadDir(sessionID)
 	os.MkdirAll(cacheDir, 0755)
 
 	// Find next available number
@@ -1816,18 +1972,12 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return the file path — the agent can read it directly via the Read tool.
-	// Claude Code's [Image #N] syntax only works for images pasted through its
-	// own terminal paste handler, not for externally written files.
 	writeJSON(w, map[string]any{"image_num": num, "path": imgPath, "ref": fmt.Sprintf("[Image: %s]", imgPath)})
 }
 
 func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
-	sessionID := s.resolveSessionID(r.PathValue("id"))
-	path := s.state.FindTranscriptPath(sessionID)
-	if path == "" {
-		writeJSON(w, store.TranscriptPage{})
-		return
-	}
+	id := r.PathValue("id")
+	sessionID := s.resolveSessionID(id)
 
 	tail := 100
 	if v := r.URL.Query().Get("tail"); v != "" {
@@ -1837,9 +1987,72 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 	afterUUID := r.URL.Query().Get("after")
 
+	path := s.state.FindTranscriptPath(sessionID)
 	reader := store.NewTranscriptReader(s.state.claudeProjectDir)
+	if page, ok := s.mergedMigrationTranscriptPage(reader, sessionID, path, tail, afterUUID); ok {
+		writeJSON(w, page)
+		return
+	}
+	if path == "" {
+		writeJSON(w, store.TranscriptPage{})
+		return
+	}
 	page := reader.ParseTranscript(path, tail, afterUUID)
 	writeJSON(w, page)
+}
+
+func (s *Server) mergedMigrationTranscriptPage(reader *store.TranscriptReader, pgid, currentPath string, tail int, afterUUID string) (store.TranscriptPage, bool) {
+	if s.fileStore == nil || s.fileStore.Running == nil || pgid == "" {
+		return store.TranscriptPage{}, false
+	}
+	rs, err := s.fileStore.Running.GetByPokegentID(pgid)
+	if err != nil || rs == nil || rs.SourceTranscriptPath == "" {
+		return store.TranscriptPage{}, false
+	}
+	sourcePath := rs.SourceTranscriptPath
+	if rs.TranscriptPath != "" {
+		currentPath = rs.TranscriptPath
+	} else if currentPath == "" {
+		currentPath = rs.TranscriptPath
+	}
+	if currentPath != "" && filepath.Clean(currentPath) == filepath.Clean(sourcePath) {
+		return store.TranscriptPage{}, false
+	}
+
+	sourcePage := reader.ParseTranscript(sourcePath, tail, "")
+	var entries []store.TranscriptEntry
+	entries = append(entries, sourcePage.Entries...)
+
+	currentHasMore := false
+	if currentPath != "" {
+		currentPage := reader.ParseTranscript(currentPath, tail, "")
+		currentHasMore = currentPage.HasMore
+		entries = append(entries, currentPage.Entries...)
+	}
+	if len(entries) == 0 {
+		return store.TranscriptPage{}, false
+	}
+
+	if afterUUID != "" {
+		found := false
+		for i, e := range entries {
+			if e.UUID == afterUUID {
+				entries = entries[i+1:]
+				found = true
+				break
+			}
+		}
+		if !found {
+			entries = nil
+		}
+	}
+
+	hasMore := sourcePage.HasMore || currentHasMore
+	if tail > 0 && len(entries) > tail {
+		entries = entries[len(entries)-tail:]
+		hasMore = true
+	}
+	return store.TranscriptPage{Entries: entries, HasMore: hasMore}, true
 }
 
 func (s *Server) handleSessionPreview(w http.ResponseWriter, r *http.Request) {
@@ -1857,8 +2070,12 @@ func (s *Server) handleSessionPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	agent := s.state.GetAgent(sessionID)
+	id := r.PathValue("id")
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+	agent := s.state.GetAgent(pgid)
 	if agent == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -1870,37 +2087,74 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Chat agents clone entirely through the dashboard — no iTerm involved.
 	iface := agent.Interface
+	if iface == "" && s.chatMgr.Get(agent.PokegentID) != nil {
+		iface = "chat"
+	}
 	if iface == "" {
 		iface = "iterm2"
 	}
 
 	if iface == "chat" {
-		// Chat clone: copy the source's JSONL transcript to a new session ID,
-		// then launch a new chat agent that loads the copy via session/load.
-		// This mirrors what `--fork-session` does for iterm2 agents.
+		// Resolve backend, model, effort, system prompt from source agent
+		isNonClaude := providerFromBackendKey(agent.AgentBackend) != "claude"
+		role := agent.Role
+		project := agent.Project
+		systemPrompt := s.composeSystemPrompt(LaunchRequest{Role: role, Project: project})
+		backendKey := agent.AgentBackend
+		backendType := backendKey
+		var backendEnv map[string]string
+		if backendKey != "" {
+			if bc, ok := s.backendStore.Get(backendKey); ok {
+				backendEnv = bc.Env
+				backendType = bc.Type
+			}
+		}
+		model, effort := s.resolveModelEffortForBackend(agent.Model, agent.Effort, role, project, backendKey)
+		cwd := agent.CWD
+		if cwd == "" {
+			home, _ := os.UserHomeDir()
+			cwd = home
+		}
+		contextAgent := *agent
+		contextAgent.CWD = cwd
 
-		// 1. Find and copy the JSONL to fork the conversation.
-		srcJSONL, err := findJSONLForSession(agent.SessionID)
-		if err != nil {
-			http.Error(w, "cannot find source transcript: "+err.Error(), http.StatusBadRequest)
-			return
+		// Clone context: for all backends, tell the agent it's a clone.
+		// For non-Claude, also include recent messages since we can't fork the session.
+		cloneCtx := s.buildCloneContext(&contextAgent, isNonClaude)
+		if cloneCtx != "" {
+			systemPrompt += "\n\n" + cloneCtx
 		}
-		cloneSessionID, err := newPokegentID() // reuse UUID generator for the forked session ID
-		if err != nil {
-			http.Error(w, "failed to mint clone session id: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		dstJSONL := filepath.Join(filepath.Dir(srcJSONL), cloneSessionID+".jsonl")
-		if err := copyFile(srcJSONL, dstJSONL); err != nil {
-			http.Error(w, "failed to copy transcript: "+err.Error(), http.StatusInternalServerError)
-			return
+		initialPromptContext := ""
+		if isNonClaude {
+			initialPromptContext = systemPrompt
 		}
 
-		// 2. Mint identity and pre-write running file.
+		// For Claude: copy JSONL to fork the conversation.
+		// For Codex: skip (start fresh — Codex doesn't support session forking).
+		var cloneSessionID string
+		if !isNonClaude {
+			srcJSONL, err := findJSONLForSession(agent.SessionID)
+			if err != nil {
+				http.Error(w, "cannot find source transcript: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			csid, err := newPokegentID()
+			if err != nil {
+				http.Error(w, "failed to mint clone session id: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			cloneSessionID = csid
+			dstJSONL := filepath.Join(filepath.Dir(srcJSONL), cloneSessionID+".jsonl")
+			if err := copyFile(srcJSONL, dstJSONL); err != nil {
+				http.Error(w, "failed to copy transcript: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
 		pgid, err := newPokegentID()
 		if err != nil {
-			_ = os.Remove(dstJSONL)
 			http.Error(w, "failed to mint pokegent_id: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1913,66 +2167,61 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rs := store.RunningSession{
-			Profile:     profileName,
-			PokegentID:  pgid,
-			DisplayName: cloneName,
-			TaskGroup:   agent.TaskGroup,
-			Sprite:      agent.Sprite,
-			Model:       agent.Model,
-			Effort:      agent.Effort,
-			Interface:   "chat",
+			Profile:      profileName,
+			PokegentID:   pgid,
+			DisplayName:  cloneName,
+			TaskGroup:    agent.TaskGroup,
+			Sprite:       agent.Sprite,
+			Model:        model,
+			Effort:       effort,
+			AgentBackend: backendKey,
+			Interface:    "chat",
 		}
 		runningPath, err := writePlaceholderRunningFile(filepath.Join(s.dataDir, "running"), rs)
 		if err != nil {
-			_ = os.Remove(dstJSONL)
 			http.Error(w, "failed to pre-write running file: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-
-		// 3. Launch with session/load pointing at the copied JSONL.
-		cwd := agent.CWD
-		if cwd == "" {
-			if c, err2 := extractCwdFromJSONL(srcJSONL); err2 == nil {
-				cwd = c
-			} else {
-				home, _ := os.UserHomeDir()
-				cwd = home
-			}
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
 		if _, err := s.chatMgr.Launch(ctx, ChatLaunchOptions{
-			PokegentID:      pgid,
-			Profile:         profileName,
-			Cwd:             cwd,
-			ResumeSessionID: cloneSessionID,
+			PokegentID:           pgid,
+			Profile:              profileName,
+			Cwd:                  cwd,
+			SystemPromptAppend:   systemPrompt,
+			InitialPromptContext: initialPromptContext,
+			Model:                model,
+			Effort:               effort,
+			ResumeSessionID:      cloneSessionID,
+			AgentBackend:         backendType,
+			BackendConfigKey:     backendKey,
+			BackendEnv:           backendEnv,
 		}); err != nil {
 			_ = os.Remove(runningPath)
-			_ = os.Remove(dstJSONL)
 			http.Error(w, "chat clone failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// 4. Persist identity for the clone.
 		sprite := agent.Sprite
 		if sprite == "" {
 			sprite = pickDefaultSprite(pgid)
 		}
-		id := store.AgentIdentity{
-			PokegentID:  pgid,
-			DisplayName: cloneName,
-			Sprite:      sprite,
-			Role:        agent.Role,
-			Project:     agent.Project,
-			Profile:     profileName,
-			TaskGroup:   agent.TaskGroup,
-			Model:       agent.Model,
-			Effort:      agent.Effort,
-			Interface:   "chat",
-			CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		ident := store.AgentIdentity{
+			PokegentID:   pgid,
+			DisplayName:  cloneName,
+			Sprite:       sprite,
+			Role:         role,
+			Project:      project,
+			Profile:      profileName,
+			TaskGroup:    agent.TaskGroup,
+			Model:        model,
+			Effort:       effort,
+			Interface:    "chat",
+			AgentBackend: backendKey,
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.fileStore.Agents.Save(id); err != nil {
+		if err := s.fileStore.Agents.Save(ident); err != nil {
 			log.Printf("chat clone: persist identity %s failed: %v", pgid[:8], err)
 		}
 
@@ -1982,11 +2231,123 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// iterm2: Open a new iTerm2 tab and launch a forked clone via pokegents
-	if err := s.terminal.CloneSession(profileName, sessionID[:8]); err != nil {
+	if err := s.terminal.CloneSession(profileName, agent.SessionID[:8]); err != nil {
 		http.Error(w, fmt.Sprintf("failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// buildCloneContext extracts the last few conversation messages from an agent's
+// transcript and formats them as context for a cloned session. Used for backends
+// that don't support session forking (Codex).
+func (s *Server) buildCloneContext(agent *AgentState, includeMessages bool) string {
+	name := agent.DisplayName
+	if name == "" {
+		name = agent.PokegentID
+	}
+	header := fmt.Sprintf(`## Clone Context
+
+You are a newly spawned clone of agent %q.
+You are managed by the same pokegents dashboard as the source agent.
+Your current working directory is %s.
+When asked who you are or whether you are a clone, answer that you are the cloned agent and use this context. Do not say you lack clone context.`, name, agent.CWD)
+	if !includeMessages {
+		return header
+	}
+
+	path := s.state.FindTranscriptPath(agent.PokegentID)
+	if path == "" {
+		return header
+	}
+	snapshot, err := s.buildConversationSnapshotFromTranscript(agent.PokegentID, agent.AgentBackend, agent.SessionID, path, agent.CWD)
+	if err != nil {
+		return header
+	}
+	if len(snapshot.RecentTurns) == 0 && snapshot.Summary == "" {
+		return header
+	}
+	targetProvider := providerFromBackendKey(agent.AgentBackend)
+	ctx := renderSnapshotContext(snapshot, TransitionPurposeClone, targetProvider)
+	if ctx.SystemPromptAppend == "" {
+		return header
+	}
+	return header + "\n\n" + ctx.SystemPromptAppend
+}
+
+// buildMigrationContext carries recent conversation context across ACP backend
+// switches. This is intentionally backend-agnostic: the destination backend
+// receives it as instructions/context because it cannot load another backend's
+// native transcript format directly.
+func (s *Server) buildMigrationContext(agentName, cwd, transcriptPath string) string {
+	if agentName == "" {
+		agentName = "this agent"
+	}
+	header := fmt.Sprintf(`## Migrated Conversation Context
+
+You are the same pokegents agent %q after a backend migration.
+Your current working directory is %s.
+The previous backend transcript is at %s.
+Treat the prior conversation below as your own history. Do not say you lack prior history solely because the backend changed.`, agentName, cwd, transcriptPath)
+	if transcriptPath == "" {
+		return header
+	}
+	reader := store.NewTranscriptReader(s.state.claudeProjectDir)
+	page := reader.ParseTranscript(transcriptPath, 60, "")
+	if len(page.Entries) == 0 {
+		return header
+	}
+
+	lines := []string{header, "Recent prior conversation:"}
+	for _, e := range page.Entries {
+		switch e.Type {
+		case "user":
+			text := strings.TrimSpace(e.Content)
+			if text == "" {
+				continue
+			}
+			if len(text) > 700 {
+				text = text[:700] + "..."
+			}
+			lines = append(lines, "User: "+text)
+		case "assistant":
+			var parts []string
+			for _, b := range e.Blocks {
+				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+					parts = append(parts, strings.TrimSpace(b.Text))
+				}
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			text := strings.Join(parts, "\n")
+			if len(text) > 900 {
+				text = text[:900] + "..."
+			}
+			lines = append(lines, "Assistant: "+text)
+		}
+	}
+
+	result := strings.Join(lines, "\n\n")
+	const maxMigrationContext = 16000
+	if len(result) > maxMigrationContext {
+		result = header + "\n\nRecent prior conversation (truncated to latest context):\n\n" + result[len(result)-maxMigrationContext:]
+	}
+	return result
+}
+
+func transcriptHasMigrationContext(path string) bool {
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if len(data) > 256*1024 {
+		data = data[:256*1024]
+	}
+	return strings.Contains(string(data), "Migrated Conversation Context")
 }
 
 func (s *Server) handleSetSprite(w http.ResponseWriter, r *http.Request) {
@@ -2018,13 +2379,16 @@ func (s *Server) updateITermSprite(sessionID, sprite string) {
 	home, _ := os.UserHomeDir()
 	dynProfileDir := filepath.Join(home, "Library", "Application Support", "iTerm2", "DynamicProfiles")
 
-	// Dynamic Profile is now named by pokegent_id (stable). Try pokegent_id first,
-	// then ccd_session_id, then session_id for backward compat.
+	// Dynamic Profile is named by pokegent_id (stable). Fall back to session_id.
 	agent := s.state.GetAgent(sessionID)
 	dynProfile := ""
 	for _, candidate := range []string{
-		func() string { if agent != nil && agent.PokegentID != "" { return agent.PokegentID }; return "" }(),
-		func() string { if agent != nil && agent.CCDSessionID != "" { return agent.CCDSessionID }; return "" }(),
+		func() string {
+			if agent != nil && agent.PokegentID != "" {
+				return agent.PokegentID
+			}
+			return ""
+		}(),
 		sessionID,
 	} {
 		if candidate == "" {
@@ -2156,9 +2520,6 @@ func (s *Server) relaunchIfIdle(sessionID string) string {
 	// Pass --pokegent-id to preserve identity (sprite, grid position, task group, mailbox)
 	// across role/project changes
 	pokegentID := agent.PokegentID
-	if pokegentID == "" {
-		pokegentID = agent.CCDSessionID
-	}
 	cmd := fmt.Sprintf("pokegent %s -r %s", target, sessionID)
 	if pokegentID != "" {
 		cmd += fmt.Sprintf(" --pokegent-id %s", pokegentID)
@@ -2191,6 +2552,157 @@ func composeTarget(role, project, fallback string) string {
 		return role + "@"
 	}
 	return fallback
+}
+
+// handleListBackends returns all configured ACP backends from backends.json.
+func (s *Server) handleListBackends(w http.ResponseWriter, _ *http.Request) {
+	backends := s.backendStore.List()
+	writeJSON(w, sortedBackendResponses(backends, false))
+}
+
+// handleSwitchBackend kills the current ACP subprocess and relaunches with a
+// different backend, preserving pokegent_id, identity, sprite, etc.
+func (s *Server) handleSwitchBackend(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pgid := s.resolveToPokegentID(id)
+	if pgid == "" {
+		pgid = id
+	}
+
+	var body struct {
+		Backend string `json:"backend"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.Backend == "" {
+		http.Error(w, "missing backend", http.StatusBadRequest)
+		return
+	}
+
+	// Validate that the backend exists.
+	bc, ok := s.backendStore.Get(body.Backend)
+	if !ok {
+		http.Error(w, "unknown backend: "+body.Backend, http.StatusBadRequest)
+		return
+	}
+	_ = bc
+	canonicalBackend := s.backendStore.CanonicalID(body.Backend)
+
+	// Find the running file for this agent.
+	runningGlob := filepath.Join(s.dataDir, "running", "*-"+pgid+".json")
+	matches, _ := filepath.Glob(runningGlob)
+	if len(matches) == 0 {
+		http.Error(w, "no running file for agent", http.StatusNotFound)
+		return
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var rs store.RunningSession
+	if err := json.Unmarshal(raw, &rs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rs.Interface != "chat" {
+		http.Error(w, "switch-backend only supported for chat agents", http.StatusBadRequest)
+		return
+	}
+
+	oldBackend := rs.AgentBackend
+	oldProvider := providerFromBackendType(oldBackend, s.backendTypeForKey(oldBackend))
+	newProvider := providerFromBackendType(body.Backend, s.backendTypeForKey(body.Backend))
+	if oldProvider != "" && newProvider != "" && oldProvider != newProvider {
+		sourcePath := rs.TranscriptPath
+		if sourcePath == "" && rs.LastGoodTranscriptPath != "" {
+			if _, err := os.Stat(rs.LastGoodTranscriptPath); err == nil {
+				sourcePath = rs.LastGoodTranscriptPath
+			}
+		}
+		if sourcePath == "" {
+			sourcePath = s.state.FindTranscriptPath(pgid)
+		}
+		if sourcePath == "" && rs.SessionID != "" {
+			if p, err := findJSONLForSession(rs.SessionID); err == nil {
+				sourcePath = p
+			}
+		}
+		if sourcePath != "" {
+			if snapshot, err := s.buildConversationSnapshotFromTranscript(pgid, oldBackend, rs.SessionID, sourcePath, rs.CWD); err == nil {
+				if err := s.writeConversationSnapshot(snapshot); err != nil {
+					log.Printf("switch-backend[%s]: write snapshot failed: %v", shortChat(pgid), err)
+				}
+			} else {
+				log.Printf("switch-backend[%s]: build snapshot failed: %v", shortChat(pgid), err)
+			}
+			rs.SourceTranscriptPath = sourcePath
+			if rs.CWD == "" {
+				if cwd, err := extractCwdFromJSONL(sourcePath); err == nil {
+					rs.CWD = cwd
+				}
+			}
+			// Provider-native session IDs/transcripts are not loadable across
+			// providers. Start a fresh destination session and inject the
+			// portable snapshot as handoff context instead.
+			rs.SessionID = ""
+			rs.TranscriptPath = ""
+		}
+	}
+
+	// Update the running file with the new backend.
+	rs.AgentBackend = canonicalBackend
+	rs.Model = resolveModelAlias(bc.ResolvedModel())
+	rs.Effort = strings.TrimSpace(bc.ResolvedEffort())
+	out, _ := json.MarshalIndent(rs, "", "  ")
+	_ = os.WriteFile(matches[0], out, 0o644)
+	s.state.TransitionState(pgid, "reconfiguring", "switching backend")
+	_ = s.fileStore.Agents.Update(pgid, func(id *store.AgentIdentity) {
+		id.AgentBackend = canonicalBackend
+	})
+
+	// Close and relaunch in background (same pattern as debug/respawn).
+	go func() {
+		s.chatMgr.Close(pgid)
+		time.Sleep(500 * time.Millisecond)
+		if err := s.relaunchChatSession(rs); err != nil {
+			log.Printf("switch-backend[%s]: relaunch failed: %v", shortChat(pgid), err)
+		} else {
+			log.Printf("switch-backend[%s]: relaunched with backend %q", shortChat(pgid), canonicalBackend)
+		}
+		s.eventBus.Publish("state_update", s.state.GetAgents())
+	}()
+
+	writeJSON(w, map[string]any{"ok": true, "backend": canonicalBackend})
+}
+
+func inferChatBackendFromTranscript(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	path := store.FindTranscriptPath(sessionID, "")
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i, part := range parts {
+		if part == "codex-homes" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	if strings.Contains(filepath.ToSlash(path), "/.codex/sessions/") {
+		return "codex"
+	}
+	return ""
+}
+
+func isNonClaudeTranscriptPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	return !strings.Contains(path, string(filepath.Separator)+".claude"+string(filepath.Separator)+"projects"+string(filepath.Separator))
 }
 
 func writeJSON(w http.ResponseWriter, data any) {

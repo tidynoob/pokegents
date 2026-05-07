@@ -1,12 +1,12 @@
-# pokegents — Claude Code Agent Orchestration Platform
+# pokegents — Local Agent Orchestration Platform
 
-Run multiple Claude Code agents simultaneously with named profiles, session tracking, real-time notifications, and a web dashboard to monitor them all.
+Run multiple Claude Code/Codex agents simultaneously with project + role configs, session tracking, real-time notifications, agent-to-agent messaging, and a local web dashboard to monitor them all.
 
 ![Pokegents Dashboard](docs/screenshot.png)
 
 ## What it does
 
-- **Named profiles** — Each project gets a profile with its own working directory, system prompt, emoji, and terminal color
+- **Projects + roles** — Projects define working directories/context; roles define agent behavior
 - **Session tracking** — See all active agents, their status (idle/busy/done/needs input), and what they're working on
 - **Dashboard** — Web UI showing all agents with live status updates, thinking traces, and session search
 - **Notifications** — macOS alerts when an agent finishes or needs your input
@@ -15,53 +15,81 @@ Run multiple Claude Code agents simultaneously with named profiles, session trac
 
 ## Install
 
+Source checkout install:
+
 ```bash
-git clone https://github.com/tRidha/pokegents.git ~/Projects/pokegents
+git clone https://github.com/<your-org>/pokegents.git ~/Projects/pokegents
 cd ~/Projects/pokegents
 ./install.sh
-source ~/.zshrc
+~/.local/bin/pokegents
 ```
 
-**Requirements:** macOS or Linux, zsh, [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), jq, python3
+Release artifact install is the same flow after extracting the archive:
 
-**Dashboard requirements:** Go 1.21+, Node.js 18+, npm
+```bash
+cd pokegents
+./install.sh
+~/.local/bin/pokegents
+```
 
-**Optional:** iTerm2 (enables tab colors, tab focus from dashboard, agent nudging)
+Development source build:
+
+```bash
+git clone https://github.com/<your-org>/pokegents.git ~/Projects/pokegents
+cd ~/Projects/pokegents
+POKEGENTS_DEV_BUILD=1 ./install.sh
+~/.local/bin/pokegents
+```
+
+The installer does **not** edit `.zshrc` and does **not** require `source ~/.zshrc`. It installs standalone shims:
+
+- `~/.local/bin/pokegents`
+- `~/.local/bin/pokegent` compatibility alias
+
+**Requirements:** macOS or Linux, python3, and at least one authenticated agent CLI/provider (Claude Code CLI for Claude-backed agents, Codex for Codex-backed agents).
+
+**Developer/source build requirements:** Go 1.21+, Node.js 18+, npm. Release artifacts should already include built dashboard assets.
+
+**Optional:** iTerm2. Dashboard/chat mode is the default; iTerm2 enables tab colors, tab focus, and terminal-backed sessions.
+
+**Dashboard:** Pokegents runs as a local web app. Start/open it with `pokegents` or `pokegent dashboard open`. The browser/editor open commands are configurable in Settings → Agent Config.
 
 The installer will:
 1. Create `~/.pokegents/` data directories
-2. Install default config (`~/.pokegents/config.json`)
-3. Install a default personal profile
-4. Configure Claude Code hooks (merges with existing hooks, never overwrites)
-5. Register the MCP messaging server (if Claude CLI available)
-6. Build the dashboard (if Go/Node are available)
-7. Add `source pokegent.sh` to your `.zshrc`
+2. Install default config and backend preferences
+3. Install default roles (`implementer`, `reviewer`, `researcher`, `pm`)
+4. Create a default `current` project from the install cwd
+5. Install CLI shims
+6. Tell you how to open the dashboard
 
-Verify your installation: `pokegent doctor`
+The installer intentionally does not edit shell rc files, Claude settings, or MCP config. First-run onboarding and Settings → Dev/Repair handle Claude hooks and MCP messaging with backups.
+
+Verify your installation: `pokegents doctor`
 
 ## Usage
 
 ### Launching sessions
 
 ```bash
-pokegent                         # Launch default profile
-pokegent my-project              # Launch a project (or legacy profile)
+pokegent                         # Launch default project
+pokegent my-project              # Launch a project
 pokegent dev@my-project          # Launch with a role + project
 pokegent @my-project             # Project only (no role)
 pokegent dev@                    # Role only (uses default project)
 pokegent my-project -r           # Resume a session (interactive picker)
 pokegent my-project -r abc123    # Resume a specific session by ID prefix
 pokegent my-project -w feature   # Launch in a git worktree
-pokegent ls                      # List all projects, roles, and profiles
+pokegent ls                      # List projects and roles
 ```
 
-### Managing profiles
+### Managing projects and roles
 
 ```bash
-pokegent edit my-project     # Create or edit a profile
+pokegent edit project my-project
+pokegent edit role reviewer
 ```
 
-This opens a JSON file in your editor. Profile schema:
+Project schema:
 
 ```json
 {
@@ -71,7 +99,7 @@ This opens a JSON file in your editor. Profile schema:
   "iterm2_profile": "",
   "cwd": "~/Projects/my-project",
   "add_dirs": [],
-  "system_prompt": "You are working on my-project."
+  "context_prompt": "You are working on my-project."
 }
 ```
 
@@ -81,16 +109,28 @@ This opens a JSON file in your editor. Profile schema:
 | `emoji` | Shown in tab title and dashboard |
 | `color` | RGB array `[r, g, b]` for terminal tab color and dashboard tinting |
 | `iterm2_profile` | iTerm2 Dynamic Profile name (optional, overrides color) |
-| `cwd` | Working directory for this profile |
+| `cwd` | Working directory for this project |
 | `add_dirs` | Extra directories to pass to Claude via `--add-dir` |
-| `system_prompt` | Appended to Claude's system prompt for this profile |
+| `context_prompt` | Appended as project-specific context for this project |
 
-See `defaults/profiles/example-project.json` for a template.
+Roles live in `~/.pokegents/roles/*.json` and add role-specific prompts/model settings.
+
+
+### Sprite assets
+
+Pokegents does not commit Pokémon sprite PNGs to this repository. Source builds fetch them from [`msikma/pokesprite`](https://github.com/msikma/pokesprite):
+
+```bash
+./scripts/fetch-pokesprite-assets.sh
+```
+
+`dashboard/web/public/town.png` is kept in-repo; runtime sprite PNGs under `dashboard/web/public/sprites/` are generated/downloaded and ignored by git. Release artifacts may include generated sprites for offline use. PokeSprite's README states that the sprite images are © Nintendo/Creatures Inc./GAME FREAK Inc., while its code/metadata are MIT-licensed. Pokegents is an unofficial, personal-use tool and is not affiliated with, endorsed by, or sponsored by Nintendo, Creatures Inc., GAME FREAK Inc., The Pokémon Company, or the PokeSprite project. Pokémon and related names/marks belong to their respective owners.
 
 ### Dashboard
 
 ```bash
-pokegent dashboard           # Open http://localhost:7834 in browser
+pokegents                     # Open dashboard using the configured browser command
+pokegent dashboard           # Open the browser dashboard
 pokegent dashboard start     # Start the dashboard server (background)
 pokegent dashboard stop      # Stop the dashboard server
 pokegent dashboard build     # Build server + frontend, restart (no session restart)
@@ -107,28 +147,41 @@ The dashboard shows:
 - **Full responses** when agents finish (with markdown formatting, scrollable)
 - **Pixel creature icon** unique to each session (deterministic from session ID)
 - **Context health bar** (green/yellow/red) showing token usage per agent
-- **Click** an agent to switch to its iTerm2 tab
+- **Click** an agent to open/select its chat panel, or focus its iTerm2 tab for terminal-backed agents
 - **Double-click** the name to rename an agent
-- **Collapse** agents to pokeball sprites — click to expand with throw animation
+- **Collapse** agents to pokeballs — click to expand with throw animation
 - **Pokeball animations** — collapse plays a recall beam, expand throws the ball with bounce + flash
 - **Hover pokeballs** to preview collapsed agent status
 - **Paste images** (Cmd+V) into agent input boxes — uploads to Claude's image cache
 - **Spawn new agents** from the "NEW AGENT" button
-- **PC Box** (`/` or PC BOX button) — Fire Red-style grid browser for past sessions with sprite icons, last prompt/message preview
+- **PC Box** (`/` or PC BOX button) — GBA-style grid browser for past sessions with sprite icons, last prompt/message preview
 - **Resume** past sessions directly from the PC Box
 - **Grid layout persistence** — card positions saved to server, survive refresh
-- **Layout profiles** — save/load named grid layouts via API
+- **Layout presets** — save/load named grid layouts via API
 - **Idle dimming** — agents idle for 10+ minutes fade to 60% opacity
 - **Message delivery animations** — sender sprite flies to recipient
 - **Configurable sprite animations** — busy (hop/shake/wiggle), idle (blink/doze), done (sway)
 - **Floating emoji bubbles** — work emojis when busy, celebration emoji on completion
 
+
+### Security model
+
+The dashboard server is local-first. By default it binds to `127.0.0.1:{port}` and rejects non-local browser origins for mutating requests. Override the bind host only for trusted networks:
+
+```bash
+pokegents-dashboard serve --bind 127.0.0.1
+POKEGENTS_BIND_HOST=127.0.0.1 pokegent dashboard start
+```
+
+Do not expose the dashboard port to the public internet; endpoints can launch agents, edit local config, and read local session metadata.
+
+
 ### Multiple concurrent agents
 
-pokegent handles running multiple agents on the same profile. When you launch a second session of the same profile, it prompts you to name both sessions to tell them apart:
+pokegent handles running multiple agents on the same project. When you launch a second session of the same project, it prompts you to name both sessions to tell them apart:
 
 ```
-⚠  Profile 'client' is already running in 1 other session(s):
+⚠  Project 'client' is already running in 1 other session(s):
    • 📦 Client SDK  (tty: /dev/ttys001)
 
 Rename existing session "Client SDK" to (enter to skip): reviewer
@@ -139,20 +192,22 @@ Name for this new session (enter for "Client SDK"): test-writer
 
 ```
 ~/.pokegents/                    # User data (per-machine)
-├── profiles/*.json              # Profile configs
+├── projects/*.json              # Project configs
+├── roles/*.json                 # Role configs
 ├── running/*.json               # Active session registry
 ├── status/*.json                # Live status from hooks
-└── history/*.json               # Last 5 sessions per profile
+└── history/*.json               # Recent sessions per project
 
 ~/Projects/pokegents/                  # Code (shared via git)
-├── pokegent.sh                       # Shell function (sourced in .zshrc)
+├── pokegent.sh                  # CLI implementation
 ├── install.sh                   # Installer
 ├── hooks/
 │   ├── status-update.sh         # Writes status on every Claude event
-│   └── statusline.sh            # Renders profile info in Claude's status bar
+│   └── statusline.sh            # Renders agent info in Claude's status bar
 ├── defaults/
 │   ├── config.json              # Default config template
-│   └── profiles/                # Profile templates
+│   ├── projects/                # Project templates
+│   └── roles/                   # Role templates
 ├── mcp/
 │   └── server.js               # MCP messaging server (agent-to-agent comms)
 └── dashboard/                   # Web dashboard (Go + React)
@@ -200,21 +255,66 @@ Each agent's system prompt includes its session ID and messaging instructions. M
 ```json
 {
   "port": 7834,
-  "default_profile": "personal",
-  "skip_permissions": false,
+  "dashboard_open_mode": "browser",
+  "default_interface": "chat",
+  "default_backend": "claude",
+  "default_project": "current",
+  "default_role": "implementer",
+  "skip_permissions": true,
   "iterm2_restore_profile": "Default",
-  "dashboard_open_browser": true
+  "editor_open_command": "code {path}",
+  "browser_open_command": "open -a \"Google Chrome\" {url}"
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `port` | `7834` | Dashboard server port |
-| `default_profile` | `"personal"` | Profile launched by bare `pokegent` command |
-| `skip_permissions` | `false` | Global default for `--dangerously-skip-permissions` |
+| `dashboard_open_mode` | `"browser"` | Dashboard launch mode |
+| `default_interface` | `"chat"` | New-agent interface: `chat` or `iterm2` |
+| `default_backend` | `"claude"` | Provider backend used by default |
+| `default_project` | `"current"` | Project launched by bare `pokegent` command |
+| `default_role` | `"implementer"` | Optional role for bare `pokegent` command |
+| `skip_permissions` | `true` | Global default for `--dangerously-skip-permissions` where supported |
 | `iterm2_restore_profile` | `"Default"` | iTerm2 profile restored on session exit |
+| `editor_open_command` | `"code {path}"` | Command used to open local files/configs from the UI |
+| `browser_open_command` | `"open -a \"Google Chrome\" {url}"` | Command used to open dashboard/external URLs |
 
-Per-profile `skip_permissions` can be set in the profile JSON to override the global default.
+Open commands support `{path}`, `{file}`, `{url}`, and `{target}` placeholders. If no placeholder is present, the target is appended. Per-role or per-project `skip_permissions`, `model`, and `effort` can override global/default backend choices where supported.
+
+### Backend/model config (`~/.pokegents/backends.json`)
+
+Backends are provider runtimes; concrete models are configured under each provider. For example:
+
+```json
+{
+  "version": 2,
+  "backends": {
+    "claude": {
+      "name": "Claude",
+      "type": "claude-acp",
+      "default": true,
+      "default_model": "sonnet",
+      "models": {
+        "sonnet": { "name": "Sonnet", "model": "sonnet" },
+        "opus": { "name": "Opus", "model": "opus" },
+        "haiku": { "name": "Haiku", "model": "haiku" }
+      }
+    },
+    "codex": {
+      "name": "Codex",
+      "type": "codex-acp",
+      "default_model": "default",
+      "models": {
+        "default": { "name": "Provider default", "model": "" }
+      },
+      "env": {}
+    }
+  }
+}
+```
+
+Use Settings → Agent Config to open/edit config files. Keep secrets in local config only; do not commit `~/.pokegents/backends.json`.
 
 ### Environment variables
 
@@ -225,7 +325,7 @@ Per-profile `skip_permissions` can be set in the profile JSON to override the gl
 
 ### Adding to an existing Claude Code setup
 
-If you already have hooks in `~/.claude/settings.json`, the installer merges pokegents' hooks alongside yours — it never overwrites existing hooks.
+If you already have hooks in `~/.claude/settings.json`, use dashboard onboarding or Settings → Dev/Repair to install/repair pokegents hooks. The repair flow creates backups and merges pokegents hooks alongside existing hooks; the installer itself does not modify Claude settings.
 
 ## Platform support
 
@@ -240,7 +340,7 @@ If you already have hooks in `~/.claude/settings.json`, the installer merges pok
 | Auto-nudge (typing into terminal) | Yes | No | No |
 | Session cloning | Yes | No | No |
 
-Core functionality (profiles, session tracking, dashboard, messaging) works everywhere. Terminal integration features (tab colors, focus, nudging) require iTerm2 on macOS.
+Core functionality (projects, roles, session tracking, dashboard, messaging) works everywhere. Terminal integration features (tab colors, focus, nudging) require iTerm2 on macOS.
 
 ## Updating
 
@@ -249,10 +349,10 @@ Pull the latest changes and re-run the installer:
 ```bash
 cd ~/Projects/pokegents    # or wherever you cloned it
 git pull
-./install.sh         # re-registers hooks, rebuilds dashboard
+./install.sh         # refreshes shims/config defaults; set POKEGENTS_DEV_BUILD=1 to rebuild from source
 ```
 
-The installer is idempotent — it won't overwrite your profiles, config, or existing hooks. It only adds/updates pokegents' own hooks and rebuilds binaries.
+The installer is idempotent — it won't overwrite your projects, roles, config, shell rc files, Claude settings, or MCP config. It refreshes CLI shims and can rebuild binaries/assets when `POKEGENTS_DEV_BUILD=1` is set.
 
 If you're running agents when you update, use `pokegent reload` to restart everything cleanly:
 
@@ -264,18 +364,25 @@ pokegent reload           # saves all running sessions, rebuilds, relaunches
 
 ```bash
 # Sessions
-pokegent                         # Launch default profile
-pokegent <profile>               # Launch a named profile
-pokegent <profile> -r            # Resume (Claude's session picker)
-pokegent <profile> -r <id>       # Resume specific session by ID prefix
-pokegent <profile> -c            # Resume from pokegent's recent session history
+pokegent                         # Launch default project/role
+pokegent <project>               # Launch a project
+pokegent <role>@<project>        # Launch a role in a project
+pokegent @<project>              # Launch a project with no role
+pokegent <role>@                 # Launch a role in the default project
+pokegent <project> -r            # Resume (Claude's session picker)
+pokegent <project> -r <id>       # Resume specific session by ID prefix
+pokegent <project> -w <name>     # Launch in a git worktree
 
-# Profile management
-pokegent ls                      # List all profiles
-pokegent edit <profile>          # Create or edit a profile in $EDITOR
+# Project/role management
+pokegent ls                      # List projects and roles
+pokegent projects                # List projects
+pokegent roles                   # List roles
+pokegent edit project <name>     # Create or edit a project in $EDITOR
+pokegent edit role <name>        # Create or edit a role in $EDITOR
 
 # Dashboard
-pokegent dashboard               # Open dashboard in browser
+pokegents                        # Open dashboard using configured browser command
+pokegent dashboard               # Open the browser dashboard
 pokegent dashboard start         # Start dashboard server (background)
 pokegent dashboard stop          # Stop dashboard server
 pokegent dashboard build         # Build server + frontend, restart dashboard
@@ -283,7 +390,7 @@ pokegent dashboard restart       # Restart server (no rebuild)
 
 # Operations
 pokegent reload                  # Stop all sessions, rebuild, relaunch everything
-pokegent doctor                  # Verify installation (deps, hooks, config, MCP)
+pokegent doctor                  # Verify installation (deps, config, optional hooks/MCP)
 ```
 
 ## Activity log
@@ -299,17 +406,11 @@ This prevents agents from silently overwriting each other's work. The dashboard 
 
 Paste screenshots or images (Cmd+V) directly into any agent's input box in the dashboard. The image is saved to `~/.claude/image-cache/{session_id}/` and the file path is inserted into the prompt. When you send it, the agent reads the image via its Read tool. Include a prompt like "describe this image" or "look at this screenshot" alongside the path.
 
-## Built-in profiles
+## Built-in defaults
 
-pokegents ships with three default profile templates in `defaults/profiles/`:
+pokegents ships with default roles in `defaults/roles/` and a starter project in `defaults/projects/`.
 
-| Profile | Purpose |
-|---------|---------|
-| `personal` | General-purpose, working directory `~` |
-| `example-project` | Template for project-specific profiles |
-| `reviewer` | Code reviewer agent with multi-agent review workflow |
-
-The reviewer profile includes a system prompt for coordinating with other agents via messaging — it asks agents what they changed, reviews the code, and sends feedback.
+Default roles include `implementer`, `reviewer`, `researcher`, and `pm`.
 
 ## Troubleshooting
 
@@ -323,7 +424,7 @@ The reviewer profile includes a system prompt for coordinating with other agents
 
 **Messages not delivered**: Agents receive message notifications on their next prompt. If an agent is idle, the auto-nudge types "check messages" after 2 seconds (iTerm2 only). Check `pokegent doctor` to verify MCP registration.
 
-**`pokegent` command not found after install**: Run `source ~/.zshrc` or open a new terminal tab. pokegent requires zsh.
+**`pokegents` command not found after install**: Run `~/.local/bin/pokegents` directly or add `~/.local/bin` to your PATH. The installer no longer edits `.zshrc`.
 
 **Dashboard build fails**: Ensure Go 1.21+ and Node.js 18+ are installed. Run `pokegent doctor` to check. Build manually: `cd dashboard && make build`.
 

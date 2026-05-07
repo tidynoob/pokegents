@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -119,8 +120,8 @@ func TestExtractCwdFromJSONL(t *testing.T) {
 	lines := []string{
 		`{"type":"custom-title","cwd":null}`,
 		`{"type":"agent-name","cwd":null}`,
-		`{"type":"system","cwd":"/Users/x/Projects"}`,
-		`{"type":"user","cwd":"/Users/x/Projects"}`,
+		`{"type":"system","cwd":"/home/user/projects"}`,
+		`{"type":"user","cwd":"/home/user/projects"}`,
 	}
 	body := ""
 	for _, l := range lines {
@@ -133,8 +134,8 @@ func TestExtractCwdFromJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "/Users/x/Projects" {
-		t.Errorf("got %q, want /Users/x/Projects", got)
+	if got != "/home/user/projects" {
+		t.Errorf("got %q, want /home/user/projects", got)
 	}
 }
 
@@ -190,6 +191,7 @@ func TestChatToolArgs(t *testing.T) {
 		want string
 	}{
 		{"command wins", `{"command":"ls -la"}`, loc, "ls -la"},
+		{"codex cmd", `{"cmd":"git status --short"}`, loc, "git status --short"},
 		{"file_path next", `{"file_path":"/etc/hosts"}`, loc, "/etc/hosts"},
 		{"falls back to location", `{}`, loc, "/tmp/foo"},
 		{"empty everywhere", `{}`, nil, ""},
@@ -204,14 +206,172 @@ func TestChatToolArgs(t *testing.T) {
 	}
 }
 
+func TestCompactSessionUpdateFrame_OmitsCodexExecOutput(t *testing.T) {
+	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","title":"exec_command","status":"completed","rawInput":{"cmd":"git status --short","workdir":"/tmp/project"},"content":[{"type":"terminal","terminalOutput":"very large output that should not reach the browser"}],"rawOutput":"very large raw output"}}}`)
+
+	got := compactSessionUpdateFrame(line)
+	if got == nil {
+		t.Fatal("compactSessionUpdateFrame returned nil")
+	}
+
+	var frame struct {
+		Params struct {
+			Update map[string]any `json:"update"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(got, &frame); err != nil {
+		t.Fatal(err)
+	}
+	update := frame.Params.Update
+	if update["title"] != "Git" {
+		t.Fatalf("title = %v, want Git", update["title"])
+	}
+	if update["rawOutput"] != "[exec output omitted by dashboard]" {
+		t.Fatalf("rawOutput was not omitted: %v", update["rawOutput"])
+	}
+	content, _ := update["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(content))
+	}
+	first, _ := content[0].(map[string]any)
+	if first["terminalOutput"] != "[exec output omitted by dashboard]" {
+		t.Fatalf("terminalOutput was not omitted: %v", first["terminalOutput"])
+	}
+}
+
+func TestPatchRunningFileChatPreservesVerifiedTranscriptAsLastGood(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, ".pokegents")
+	runningDir := filepath.Join(dataDir, "running")
+	if err := os.MkdirAll(runningDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(dir, "rollout-2026-05-06T17-01-59-019dffbd-c486-7910-a997-1248f16b1f59.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runningPath := filepath.Join(runningDir, "engineer@general-pg-1.json")
+	initial := map[string]any{
+		"profile":         "engineer@general",
+		"pokegent_id":     "pg-1",
+		"session_id":      "019dffbd-c486-7910-a997-1248f16b1f59",
+		"transcript_path": transcript,
+		"interface":       "chat",
+		"agent_backend":   "gpt-55",
+	}
+	b, _ := json.Marshal(initial)
+	if err := os.WriteFile(runningPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	patchRunningFileChat(dataDir, "pg-1", "engineer@general", 1234, "019e0092-fba6-72f3-969a-29b3b7117292", "/tmp/project", "", "gpt-55")
+
+	var got map[string]any
+	raw, err := os.ReadFile(runningPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["session_id"] != "019e0092-fba6-72f3-969a-29b3b7117292" {
+		t.Fatalf("session_id = %v", got["session_id"])
+	}
+	if got["transcript_path"] != transcript {
+		t.Fatalf("transcript_path = %v, want preserved %s", got["transcript_path"], transcript)
+	}
+	if got["last_good_session_id"] != "019dffbd-c486-7910-a997-1248f16b1f59" {
+		t.Fatalf("last_good_session_id = %v", got["last_good_session_id"])
+	}
+	if got["last_good_transcript_path"] != transcript {
+		t.Fatalf("last_good_transcript_path = %v", got["last_good_transcript_path"])
+	}
+}
+
+func TestSessionIDFromTranscriptPath(t *testing.T) {
+	path := "/home/user/.pokegents/codex-homes/gpt-55/sessions/2026/05/06/rollout-2026-05-06T17-01-59-019dffbd-c486-7910-a997-1248f16b1f59.jsonl"
+	want := "019dffbd-c486-7910-a997-1248f16b1f59"
+	if got := sessionIDFromTranscriptPath(path); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestCompleteBrowserPrompt_IgnoresUntrackedResponses(t *testing.T) {
+	sess := &ChatSession{
+		smState:          "busy",
+		browserPromptIDs: make(map[int64]struct{}),
+		wsClients:        make(map[*wsClient]struct{}),
+	}
+
+	if sess.completeBrowserPrompt(99, nil) {
+		t.Fatal("untracked response should not complete a turn")
+	}
+	if sess.smState != "busy" {
+		t.Fatalf("smState = %q, want busy", sess.smState)
+	}
+
+	sess.trackBrowserPrompt(42)
+	if !sess.completeBrowserPrompt(42, nil) {
+		t.Fatal("tracked prompt response should complete a turn")
+	}
+	if sess.smState != "done" {
+		t.Fatalf("smState = %q, want done", sess.smState)
+	}
+}
+
+func TestCompleteBrowserPrompt_ErrorMarksError(t *testing.T) {
+	dir := t.TempDir()
+	sess := &ChatSession{
+		PokegentID:         "agent-1",
+		ACPID:              "session-1",
+		dataDir:            dir,
+		smState:            "busy",
+		browserPromptIDs:   make(map[int64]struct{}),
+		wsClients:          make(map[*wsClient]struct{}),
+		currentDetail:      "thinking…",
+		lastSummaryStaging: "partial text",
+	}
+	sess.stderrTail = []string{`ERROR codex_acp::thread: stream disconnected before completion: response.failed event received`}
+	sess.trackBrowserPrompt(7)
+	if !sess.completeBrowserPrompt(7, &chatJSONRPCError{Code: -32603, Message: "Internal error"}) {
+		t.Fatal("tracked prompt response should complete a turn")
+	}
+	if sess.smState != "error" {
+		t.Fatalf("smState = %q, want error", sess.smState)
+	}
+	if !strings.Contains(sess.currentDetail, "model stream failed") {
+		t.Fatalf("currentDetail = %q, want model stream failure hint", sess.currentDetail)
+	}
+	if sess.lastSummary != "partial text" {
+		t.Fatalf("lastSummary = %q, want partial text preserved", sess.lastSummary)
+	}
+}
+
+func TestFormatBrowserPromptError_ContentFilter(t *testing.T) {
+	got := formatBrowserPromptError(
+		&chatJSONRPCError{Code: -32603, Message: "Internal error"},
+		`ERROR codex_acp::thread: stream disconnected before completion: Incomplete response returned, reason: content_filter`,
+	)
+	if !strings.Contains(got, "blocked by model content filter") {
+		t.Fatalf("got %q, want content filter hint", got)
+	}
+}
+
+func TestFormatACPStderrSystemMessage_ParseArgs(t *testing.T) {
+	got := formatACPStderrSystemMessage(`ERROR codex_core::tools::router: error=failed to parse function arguments: EOF while parsing a string at line 1 column 1690`)
+	if !strings.Contains(got, "malformed tool-call JSON") {
+		t.Fatalf("got %q, want malformed JSON hint", got)
+	}
+}
+
 // TestEffortToThinkingConfig pins the pokegents-effort → SDK-thinking-config
 // mapping. Frontend writes "low/medium/high/max" into role/project configs,
 // and the chat backend translates here. A regression here silently breaks
 // model effort for chat agents (the wrapper just runs on SDK defaults).
 func TestEffortToThinkingConfig(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantType string
+		in         string
+		wantType   string
 		wantBudget int // 0 if not applicable
 	}{
 		{"low", "enabled", 4000},

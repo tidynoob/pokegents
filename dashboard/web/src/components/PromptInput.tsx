@@ -1,20 +1,18 @@
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { uploadImage } from '../api'
 
-// Slash commands available in chat mode. NOTE: these are NOT the Claude CLI
-// slash commands (`/model`, `/cost`, `/compact`, etc.) — those are parsed by
-// the CLI locally before sending to Claude, and chat mode goes through the
-// ACP wrapper which forwards text straight to the model. The dashboard
-// intercepts these client-side; everything else gets routed via the
-// dashboard's API surface (e.g. /clear-context as a server-side handler).
+// Slash commands available in chat mode. Most are dashboard-level commands.
+// Codex ACP also parses `/compact` natively, so the dashboard forwards that
+// slash command only for Codex-backed chat sessions.
 //
 // To use full Claude CLI commands, switch the agent to the iTerm2 runtime
 // (right-click card → "Switch to iTerm2") — the CLI parses them there.
 const SLASH_COMMANDS: { cmd: string; desc: string }[] = [
   { cmd: '/cancel', desc: 'Stop the current turn (ACP session/cancel)' },
   { cmd: '/clear', desc: 'Clear the visible transcript (does not erase JSONL)' },
+  { cmd: '/compact', desc: 'Compact Codex conversation history' },
   { cmd: '/exit', desc: 'Shut down this chat session' },
-  { cmd: '/model', desc: 'Switch model (e.g. /model claude-opus-4-7)' },
+  { cmd: '/model', desc: 'Switch model: opus, sonnet, haiku (or full ID)' },
   { cmd: '/effort', desc: 'Set thinking effort: low / medium / high / max' },
   { cmd: '/help', desc: 'Show available chat-mode commands' },
 ]
@@ -49,7 +47,11 @@ export interface PromptInputProps {
    *  matches the GBA-card look in the agent grid. Chat panel passes its own. */
   variant?: 'card' | 'chat'
   maxHeight?: number
+  /** Maximum visible lines before the textarea scrolls. */
+  maxLines?: number
   isBusy?: boolean
+  /** Enables chat-mode slash command autocomplete. Defaults to chat variant only. */
+  enableSlashCommands?: boolean
 }
 
 export function PromptInput({
@@ -61,7 +63,9 @@ export function PromptInput({
   showSendButton,
   variant = 'card',
   maxHeight = 120,
+  maxLines = 8,
   isBusy,
+  enableSlashCommands,
 }: PromptInputProps) {
   const draftKey = `pokegents-draft-${sessionId}`
   const [value, setValue] = useState(() => sessionStorage.getItem(draftKey) || '')
@@ -72,12 +76,13 @@ export function PromptInput({
 
   // Slash-command autocomplete: active when input starts with `/` and has
   // no spaces yet (i.e. user is still typing the command name).
-  const slashPrefix = value.startsWith('/') && !value.includes(' ') ? value.toLowerCase() : null
+  const slashCommandsEnabled = enableSlashCommands ?? variant === 'chat'
+  const slashPrefix = slashCommandsEnabled && value.startsWith('/') && !value.includes(' ') ? value.toLowerCase() : null
   const completions = useMemo(() => {
     if (!slashPrefix) return []
     return SLASH_COMMANDS.filter(c => c.cmd.startsWith(slashPrefix))
   }, [slashPrefix])
-  const showCompletions = completions.length > 0 && variant === 'chat'
+  const showCompletions = completions.length > 0
 
   // Reset selection when completions list changes.
   useEffect(() => { setSelectedIdx(0) }, [completions.length])
@@ -99,6 +104,27 @@ export function PromptInput({
     if (autoFocus && !disabled) ref.current?.focus()
   }, [autoFocus, disabled])
 
+  function resizeTextarea() {
+    const t = ref.current
+    if (!t) return
+    t.style.height = 'auto'
+
+    const styles = window.getComputedStyle(t)
+    const lineHeight = Number.parseFloat(styles.lineHeight) || 14
+    const padding = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom)
+    const border = Number.parseFloat(styles.borderTopWidth) + Number.parseFloat(styles.borderBottomWidth)
+    const lineCap = Math.ceil(lineHeight * maxLines + padding + border)
+    const cap = Math.max(1, Math.min(maxHeight, lineCap))
+    const nextHeight = Math.min(t.scrollHeight, cap)
+
+    t.style.height = `${nextHeight}px`
+    t.style.overflowY = t.scrollHeight > cap ? 'auto' : 'hidden'
+  }
+
+  useLayoutEffect(() => {
+    resizeTextarea()
+  }, [value, maxHeight, maxLines])
+
   async function submit() {
     if (!value.trim() || sending || disabled) return
     setSending(true)
@@ -108,7 +134,6 @@ export function PromptInput({
       setValue('')
       sessionStorage.removeItem(draftKey)
       setSending(false)
-      if (ref.current) ref.current.style.height = 'auto'
     }
   }
 
@@ -161,11 +186,41 @@ export function PromptInput({
     }
   }
 
-  function handleInput(e: React.FormEvent<HTMLTextAreaElement>) {
-    const t = e.currentTarget
-    t.style.height = 'auto'
-    t.style.height = Math.min(t.scrollHeight, maxHeight) + 'px'
+  function handleInput() {
+    resizeTextarea()
   }
+
+  const completionMenu = showCompletions && (
+    <div
+      className="absolute bottom-full left-0 right-0 mb-1 rounded-md overflow-hidden z-30"
+      style={{
+        background: 'var(--theme-panel-bg)',
+        border: '1px solid var(--theme-panel-divider)',
+        boxShadow: 'var(--theme-shadow-strong)',
+        maxHeight: 220,
+        overflowY: 'auto',
+      }}
+    >
+      {completions.map((c, i) => (
+        <button
+          key={c.cmd}
+          type="button"
+          onMouseDown={(e) => {
+            e.preventDefault()
+            setValue(c.cmd + ' ')
+            setSelectedIdx(0)
+            ref.current?.focus()
+          }}
+          onMouseEnter={() => setSelectedIdx(i)}
+          className="w-full text-left px-3 py-1.5 flex items-baseline gap-2 transition-colors"
+          style={{ background: i === selectedIdx ? 'var(--theme-panel-hover-bg)' : 'transparent' }}
+        >
+          <span className="text-m theme-font-mono text-accent-blue font-semibold shrink-0">{c.cmd}</span>
+          <span className="text-m theme-font-body theme-text-muted truncate">{c.desc}</span>
+        </button>
+      ))}
+    </div>
+  )
 
   // Card variant: compact GBA-dialog styling, no send button (Enter only).
   if (variant === 'card') {
@@ -174,8 +229,9 @@ export function PromptInput({
         onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); submit() }}
         onClick={(e) => e.stopPropagation()}
         data-no-drag
-        className="mt-1 shrink-0"
+        className="relative mt-1 shrink-0"
       >
+        {completionMenu}
         <textarea
           ref={ref}
           value={value}
@@ -186,7 +242,7 @@ export function PromptInput({
           rows={1}
           placeholder={placeholder ?? 'What will you do?'}
           disabled={disabled}
-          className="w-full gba-dialog-dark text-[10px] leading-[14px] font-mono rounded-md px-2 py-0.5 placeholder:text-white/25 outline-none focus:border-[#68a8d8] transition-colors resize-none box-border disabled:opacity-50"
+          className="w-full gba-dialog-dark text-m leading-snug theme-font-mono rounded-md px-2.5 py-1 theme-placeholder-input outline-none focus:border-accent-blue transition-colors resize-none box-border disabled:opacity-70"
           style={{ minHeight: 22, maxHeight }}
         />
       </form>
@@ -198,42 +254,9 @@ export function PromptInput({
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); submit() }}
-      className="relative flex items-end gap-1.5 p-2 border-t border-black/30 shrink-0"
+      className="relative flex items-end gap-1.5 p-2 border-t theme-border-subtle shrink-0"
     >
-      {/* Slash-command autocomplete dropdown — renders above the textarea. */}
-      {showCompletions && (
-        <div
-          className="absolute bottom-full left-2 right-2 mb-1 rounded-md overflow-hidden"
-          style={{
-            background: 'rgba(15, 25, 40, 0.95)',
-            border: '1px solid rgba(255,255,255,0.15)',
-            boxShadow: '0 -4px 16px rgba(0,0,0,0.4)',
-            maxHeight: 220,
-            overflowY: 'auto',
-          }}
-        >
-          {completions.map((c, i) => (
-            <button
-              key={c.cmd}
-              type="button"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                setValue(c.cmd + ' ')
-                setSelectedIdx(0)
-                ref.current?.focus()
-              }}
-              onMouseEnter={() => setSelectedIdx(i)}
-              className="w-full text-left px-3 py-1.5 flex items-baseline gap-2 transition-colors"
-              style={{
-                background: i === selectedIdx ? 'rgba(80, 140, 255, 0.2)' : 'transparent',
-              }}
-            >
-              <span className="text-[12px] font-mono text-accent-blue font-semibold shrink-0">{c.cmd}</span>
-              <span className="text-[11px] font-sans text-white/50 truncate">{c.desc}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {completionMenu}
       <textarea
         ref={ref}
         rows={1}
@@ -244,14 +267,14 @@ export function PromptInput({
         onInput={handleInput}
         placeholder={isBusy ? 'Agent is busy. Messages will be added to queue.' : (placeholder ?? 'What will you do?')}
         disabled={disabled}
-        className={`flex-1 min-w-0 gba-dialog-dark text-[10px] leading-[14px] font-mono rounded-md px-2.5 py-1 placeholder:text-white/25 outline-none transition-colors resize-none box-border disabled:opacity-50 ${isBusy ? 'border-accent-red/50 focus:border-accent-red/70' : 'focus:border-[#68a8d8]'}`}
+        className={`flex-1 min-w-0 gba-dialog-dark text-m leading-snug theme-font-mono rounded-md px-2.5 py-1 theme-placeholder-input outline-none transition-colors resize-none box-border disabled:opacity-70 ${isBusy ? 'border-accent-red/50 focus:border-accent-red/70' : 'focus:border-accent-blue'}`}
         style={{ minHeight: 28, maxHeight }}
       />
       {showSendButton && (
         <button
           type="submit"
           disabled={disabled || !value.trim()}
-          className={`text-[7px] font-pixel px-3 py-1.5 transition-colors disabled:opacity-50 ${isBusy ? 'gba-button-red' : 'gba-button'}`}
+          className={`text-s theme-font-display px-3 py-1.5 transition-colors disabled:opacity-50 ${isBusy ? 'gba-button-red opacity-100' : 'gba-button'}`}
         >{isBusy ? 'QUEUE' : 'SEND'}</button>
       )}
     </form>

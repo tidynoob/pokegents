@@ -25,9 +25,9 @@ func TestStateMachine(t *testing.T) {
 		// PreToolUse/PostToolUse — only if currently busy
 		{"busy stays busy on PreToolUse", "busy", "PreToolUse", "", "busy", false},
 		{"busy stays busy on PostToolUse", "busy", "PostToolUse", "", "busy", false},
-		{"idle blocks PreToolUse", "idle", "PreToolUse", "", "", true},       // dropped
-		{"idle blocks PostToolUse", "idle", "PostToolUse", "", "", true},     // dropped
-		{"error blocks PreToolUse", "error", "PreToolUse", "", "", true},     // dropped
+		{"idle blocks PreToolUse", "idle", "PreToolUse", "", "", true},   // dropped
+		{"idle blocks PostToolUse", "idle", "PostToolUse", "", "", true}, // dropped
+		{"error blocks PreToolUse", "error", "PreToolUse", "", "", true}, // dropped
 
 		// Stop → idle
 		{"busy to idle on Stop", "busy", "Stop", "", "idle", false},
@@ -58,7 +58,7 @@ func TestStateMachine(t *testing.T) {
 			sm.contexts = make(map[string]ContextUsage)
 			sm.activityFeeds = make(map[string][]ActivityItem)
 			sm.nameOverrides = make(map[string]string)
-			sm.sessionIDMap = make(map[string]string)
+			sm.sessionToPokegent = make(map[string]string)
 
 			sid := "test-session-id"
 
@@ -114,7 +114,7 @@ func TestPostToolUseRaceGuard(t *testing.T) {
 	sm.contexts = make(map[string]ContextUsage)
 	sm.activityFeeds = make(map[string][]ActivityItem)
 	sm.nameOverrides = make(map[string]string)
-	sm.sessionIDMap = make(map[string]string)
+	sm.sessionToPokegent = make(map[string]string)
 
 	sid := "race-test"
 

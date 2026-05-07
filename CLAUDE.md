@@ -8,7 +8,7 @@ pokegents is a multi-session Claude Code launcher and session manager. It wraps 
 
 ## Architecture
 
-**Entry point:** `pokegent.sh` defines the `pokegent()` shell function, sourced in `.zshrc`. It resolves `POKEGENTS_ROOT` (this repo) and `POKEGENTS_DATA` (`~/.pokegents/`) at source time.
+**Entry point:** installed `pokegents`/`pokegent` shims set `POKEGENTS_ROOT`, source `pokegent.sh`, and dispatch to the `pokegent()` function. Users should not need to edit or source shell rc files.
 
 **Code lives in the repo, user data lives in `~/.pokegents/`:**
 - `~/.pokegents/profiles/*.json` — per-profile config (cwd, system_prompt, emoji, color, iterm2_profile, add_dirs)
@@ -29,13 +29,11 @@ pokegents is a multi-session Claude Code launcher and session manager. It wraps 
 ## Build / Install / Test
 
 ```bash
-# Install (creates data dirs, updates claude settings.json hook paths, adds source line to .zshrc)
+# Install (creates data dirs and CLI shims; no shell rc mutation)
 ./install.sh
 
-# Manual: source in .zshrc
-source "/path/to/pokegents/pokegent.sh"
-
-# No build step, no tests yet — pure shell
+# Developer/source build
+POKEGENTS_DEV_BUILD=1 ./install.sh
 ```
 
 ## Roadmap and Goals
@@ -82,7 +80,7 @@ The owner wants pokegents to evolve into a full agent orchestration platform. Pr
 
 **Activity log:** On Stop, appends a 1-liner to `~/.pokegents/activity/{project_hash}.log` with changed files (from `recent_actions`) and summary. On UserPromptSubmit, injects new entries from OTHER agents via `systemMessage`, with file overlap warnings.
 
-**Quick reconciliation (lines 37-68):** Runs on every event except SessionStart/SessionEnd. If no running file exists for the current `$SESSION_ID`, searches by `ccd_session_id` field ONLY (never `session_id` — that would steal the original's file during clone). Patches and renames the running file to match.
+**Quick reconciliation (lines 37-68):** Runs on every event except SessionStart/SessionEnd. If no running file exists for the current `$SESSION_ID`, searches by `pokegent_id` field ONLY (never `session_id` — that would steal the original's file during clone). Patches and renames the running file to match.
 
 **Pending message delivery:** On UserPromptSubmit only (not Stop — that caused 4x spam per turn). Checks dashboard API, injects via `systemMessage`. Combined with activity log in a single notification.
 
@@ -90,17 +88,17 @@ The owner wants pokegents to evolve into a full agent orchestration platform. Pr
 
 **Flow:** `pokegent <profile> --resume <id> --fork-session`
 
-1. pokegent.sh generates fresh UUID for `session_id` and `ccd_session_id`
+1. pokegent.sh generates fresh UUID for `session_id` and `pokegent_id`
 2. Creates running file: `{profile}-{fresh_uuid}.json`
 3. Launches: `claude --resume <original_id> --fork-session --name <display_name>`
 4. Claude creates a NEW conversation session ID (different from both the fresh UUID and the original)
 5. SessionStart fires with the NEW conversation session ID
-6. Hook's Pass 1 matches by `ccd_session_id` → patches running file's `session_id` and renames file
+6. Hook's Pass 1 matches by `pokegent_id` → patches running file's `session_id` and renames file
 
 **Three-pass matching in SessionStart:**
-- **Pass 1:** Match `ccd_session_id` field only (safe for clones)
+- **Pass 1:** Match `pokegent_id` field only (safe for clones)
 - **Pass 2:** Match `session_id` field — ONLY if `POKEGENTS_SESSION_ID` env is empty (legacy sessions)
-- **Pass 3:** TTY fallback — ONLY if no CCD context (prevents TTY collisions)
+- **Pass 3:** TTY fallback — ONLY if no pokegents context (prevents TTY collisions)
 
 **Collision guard:** Before renaming a running file, check `[ ! -f "$_NEW_RF" ]`. If the target exists, another agent owns that session ID — leave the file untouched.
 
@@ -159,11 +157,9 @@ All iTerm2 code is guarded by `POKEGENTS_HAS_ITERM` checks in `pokegent.sh` and 
 
 **Tools:** `list_agents`, `send_message(to, content)`, `check_messages(my_session_id)`
 
-**Routing key: `pokegent_id`.** All mailbox storage is at `~/.pokegents/messages/{pokegent_id}/{msg_id}.json`. `pokegent_id` is the abstraction-layer identifier — backend-agnostic, stable across resume and interface migration. `ccd_session_id` is iterm2-adapter-internal and never appears at the messaging layer (legacy fallback paths exist for old running files but are deprecated).
+**Routing key: `pokegent_id`.** All mailbox storage is at `~/.pokegents/messages/{pokegent_id}/{msg_id}.json`. `pokegent_id` is the abstraction-layer identifier: backend-agnostic, unique per running agent, and used consistently by the dashboard, hooks, and MCP messaging.
 
-**ID resolution.** Both client (`resolveAgent` in `mcp/server.js`) and server (`resolveToPokegentID` in `dashboard/server/server.go`) accept any agent ID hint (8-char prefix or full UUID, matching pokegent_id / ccd_session_id / session_id) and resolve to the agent's pokegent_id for routing. The hook's `MSG_LOOKUP_ID` and `BUDGET_LOOKUP` prefer `$POKEGENT_ID` env var over legacy `$POKEGENTS_SESSION_ID` for the same reason.
-
-**Migration.** On dashboard startup, `migrateMailboxesToPokegentID` (in `mailbox_migration.go`) moves any leftover `messages/{ccd_session_id}/` directories to `messages/{pokegent_id}/` for running files that have both IDs. Idempotent. Will be removed in a future release once no ccd_session_id-keyed mailboxes remain in the wild.
+**ID resolution.** Both client (`resolveAgent` in `mcp/server.js`) and server (`resolveToPokegentID` in `dashboard/server/server.go`) accept any agent ID hint (8-char prefix or full UUID, matching `pokegent_id` or `session_id`) and resolve to the agent's `pokegent_id` for routing. The hook's `MSG_LOOKUP_ID` and `BUDGET_LOOKUP` prefer `$POKEGENT_ID` and keep `$POKEGENTS_SESSION_ID` as a compatibility alias with the same value.
 
 **Message lifecycle:**
 1. `send_message` → stored in `~/.pokegents/messages/{pokegent_id}/{msg_id}.json` with `delivered: false`
@@ -180,12 +176,12 @@ Single source of truth for: `port` (default 7834), `default_profile`, `skip_perm
 ### Known Pitfalls
 
 - **Never use `set -e` in hooks.** A single jq failure crashes the hook, which blocks ALL Claude operations on every subsequent event. We had a 7-hour error loop from one `--argjson` with empty input.
-- **Clone session IDs are tricky.** There are THREE IDs: the CCD session ID (UUID from pokegent.sh), the original's Claude session ID (passed to --resume), and the clone's NEW Claude session ID (assigned by Claude). The running file starts with the CCD ID and gets patched to the Claude ID by the hook.
+- **Clone session IDs are tricky.** There are THREE IDs: the pokegent ID (UUID from pokegent.sh), the original's Claude session ID (passed to --resume), and the clone's NEW Claude session ID (assigned by Claude). The running file starts with the pokegent ID and gets patched to the Claude ID by the hook.
 - **SessionStart fires for resumed sessions too.** The session ID in the event is the conversation ID, which may differ from the running file's session_id. The hook reconciles this.
 - **SessionStart can overwrite busy agents.** When a clone does `--resume <id>`, SessionStart fires for the original's session ID. If the original is busy, the hook must NOT overwrite with "idle". Fix: `STATE="SKIP"` when previous state is "busy".
 - **PostToolUse race after Stop.** Slow PostToolUse hooks (python3 trace extraction) can finish AFTER Stop, overwriting "done" with "busy". Guard: busy cannot overwrite done/error/idle except via UserPromptSubmit.
 - **`custom-title` in JSONL gets overwritten by Claude on resume.** Dashboard renames persist to both JSONL and search index, and `enrichDisplayNames` overrides with running file names for active sessions.
-- **iTerm2 sprite profiles must inherit correctly.** Per-session Dynamic Profiles for sprite icons must inherit from the CCD profile (e.g. "CCD: Client SDK"), NOT "General". Otherwise tab colors reset to default when the sprite profile activates.
+- **iTerm2 sprite profiles must inherit correctly.** Per-session Dynamic Profiles for sprite icons must inherit from the Pokegents profile (e.g. "Pokegents: Client SDK"), NOT "General". Otherwise tab colors reset to default when the sprite profile activates.
 - **Sprite list mismatch between shell and frontend.** pokegent.sh must use the same sprite list as the dashboard frontend. Both use 32-bit signed integer overflow hashing to pick sprites deterministically from session IDs.
 - **`pokegent reload` must use profile-specific iTerm tabs.** Must use `create tab with profile "$iterm_prof"` not `create tab with default profile`, otherwise relaunched sessions lose their colors.
 - **File watcher must handle Rename events.** fsnotify.Rename fires when SessionStart renames a running file. The old filename triggers Rename (not Remove), and the new filename doesn't trigger Create — only Rename. Both must be handled.

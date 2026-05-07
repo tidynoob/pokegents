@@ -1,6 +1,7 @@
 #!/usr/bin/env zsh
 # pokegents — Claude Code Agent Orchestration Platform
-# Source this file in your .zshrc:  source /path/to/pokegents/pokegent.sh
+# Internal CLI implementation. Users should normally run the installed
+# `pokegents` shim rather than sourcing this file from a shell profile.
 
 # Resolve install directory at source time
 POKEGENTS_ROOT="${${(%):-%x}:A:h}"
@@ -11,6 +12,43 @@ POKEGENTS_HAS_ITERM=false
 [[ "$TERM_PROGRAM" == "iTerm.app" ]] && POKEGENTS_HAS_ITERM=true
 POKEGENTS_IS_MACOS=false
 [[ "$OSTYPE" == darwin* ]] && POKEGENTS_IS_MACOS=true
+
+_pokegent_config_string() {
+  local config_path="$1"
+  local key="$2"
+  local default_value="${3:-}"
+  python3 - "$config_path" "$key" "$default_value" <<'PY'
+import json, sys
+path, key, default = sys.argv[1:4]
+try:
+    with open(path) as f:
+        value = json.load(f).get(key, default)
+    print(value if isinstance(value, str) and value else default)
+except Exception:
+    print(default)
+PY
+}
+
+_pokegent_shell_quote() {
+  python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+}
+
+_pokegent_run_open_command() {
+  local command="$1"
+  local target="$2"
+  [[ -z "$command" ]] && return 1
+  local quoted_target
+  quoted_target="$(_pokegent_shell_quote "$target")"
+  if [[ "$command" == *"{target}"* || "$command" == *"{url}"* || "$command" == *"{path}"* || "$command" == *"{file}"* ]]; then
+    command="${command//\{target\}/$quoted_target}"
+    command="${command//\{url\}/$quoted_target}"
+    command="${command//\{path\}/$quoted_target}"
+    command="${command//\{file\}/$quoted_target}"
+  else
+    command="$command $quoted_target"
+  fi
+  eval "$command"
+}
 
 # Source helper modules
 for _lib in "$POKEGENTS_ROOT"/lib/*.sh; do
@@ -173,7 +211,7 @@ for d in sys.argv[2:]:
       done
     fi
 
-    # Check 3: Shell PID (legacy fallback)
+    # Check 3: Shell PID fallback
     if [[ "$is_stale" == "true" && -n "$rf_pid" ]] && kill -0 "$rf_pid" 2>/dev/null; then
       is_stale=false
     fi
@@ -182,54 +220,42 @@ for d in sys.argv[2:]:
   done
 
   # -h / --help
-  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" ]]; then
     cat <<'HELP'
-Usage: pokegent [command|role@project|profile] [options]
+Usage: pokegent [target] [options]
+       pokegents [target] [options]
+
+Targets:
+  role@project        Launch a role in a project          (implementer@app)
+  @project            Launch a project with no role       (@app)
+  role@               Launch a role in the default project
+  project             Launch a project by name or alias
+  role                Launch a role in the default project
 
 Commands:
-  (none)              Launch default project
-  ls                  List all projects, roles, and legacy profiles
-  projects            List available projects
-  roles               List available roles
-  edit project <name> Edit a project config
-  edit role <name>    Edit a role config
-  edit <profile>      Edit a legacy profile config
-  dashboard           Open the dashboard (default)
-  dashboard build     Build server + frontend, restart dashboard (no session restart)
-  dashboard start     Start the dashboard server
-  dashboard stop      Stop the dashboard server
-  dashboard restart   Restart the dashboard server (no rebuild)
-  reload              Stop all sessions, rebuild dashboard, relaunch everything
-  doctor              Verify installation health (deps, hooks, MCP, dashboard)
-  -h, --help          Show this help message
+  ls                  List projects and roles
+  projects            List projects
+  roles               List roles
+  edit project NAME   Edit/create a project config
+  edit role NAME      Edit/create a role config
+  dashboard           Open the dashboard
+  dashboard restart   Restart dashboard server
+  dashboard build     Rebuild dashboard, then restart server
+  doctor              Check install health
 
-Launching:
-  pokegent dev@client            Compose a role with a project
-  pokegent @client               Project only (no role)
-  pokegent dev@                  Role only (uses default project)
-  pokegent client                Project, legacy profile, or role (in that order)
-  pokegent --legacy client       Force legacy profile resolution
-  pokegent <target> -r           Resume a session (opens Claude's resume picker)
-  pokegent <target> -r <id>     Resume a specific session by ID (prefix match)
-  pokegent <target> -c           Same as -r
-  pokegent <target> -w <name>   Launch in an isolated git worktree
-
-Options (passed through to claude):
-  Any extra arguments after the target are forwarded to claude.
+Options:
+  -r, --resume [ID]   Resume session; ID can be a prefix
+  -c                  Alias for --resume
+  -w NAME             Launch in a git worktree
+  --                  Pass remaining args through to Claude
 
 Examples:
-  pokegent                       Launch default project
-  pokegent dev@client            Developer role on client project
-  pokegent pm@platform           PM role on platform project
-  pokegent @client               Client project, no role
-  pokegent client                Client project (or legacy profile)
-  pokegent platform -c           Resume a recent platform session
-  pokegent edit project client   Edit the client project config
-  pokegent edit role pm          Edit the PM role config
-  pokegent ls                    List everything
-
+  pokegent
+  pokegent implementer@app
+  pokegent @app -r
+  pokegent reviewer@ -w review-auth
+  pokegent dashboard build
 HELP
-    _pokegent_list_all
     return 0
   fi
 
@@ -301,12 +327,20 @@ HELP
         echo "=== Build complete ==="
         ;;
       open|"")
-        # Open as standalone app window (separate Dock/Cmd+Tab entry)
-        local chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        if [[ -x "$chrome" ]]; then
-          "$chrome" --app=http://localhost:$POKEGENTS_PORT --user-data-dir="$HOME/.pokegents-dashboard-chrome" &>/dev/null &
+        local url="http://localhost:$POKEGENTS_PORT"
+        local browser_open_command
+        browser_open_command="$(_pokegent_config_string "$POKEGENTS_CONFIG" browser_open_command "")"
+        if [[ -n "$browser_open_command" ]]; then
+          _pokegent_run_open_command "$browser_open_command" "$url" || echo "$url"
+        elif [[ "$OSTYPE" == darwin* ]]; then
+          local chrome_profile="$HOME/.pokegents-dashboard-chrome"
+          if [[ -d "/Applications/Google Chrome.app" || -d "$HOME/Applications/Google Chrome.app" ]]; then
+            open -na "Google Chrome" --args --app="$url" --user-data-dir="$chrome_profile"
+          else
+            open "$url"
+          fi
         else
-          open "http://localhost:$POKEGENTS_PORT"
+          python3 -m webbrowser "$url" >/dev/null 2>&1 || echo "$url"
         fi
         ;;
     esac
@@ -335,7 +369,7 @@ HELP
     return $?
   fi
 
-  # No args → default project (or default_role@default_project, or legacy default_profile)
+  # No args → default project (or default_role@default_project)
   if [[ -z "$1" ]]; then
     local _default_project=$(jq -r '.default_project // empty' "$POKEGENTS_CONFIG" 2>/dev/null)
     local _default_role=$(jq -r '.default_role // empty' "$POKEGENTS_CONFIG" 2>/dev/null)
@@ -356,28 +390,20 @@ HELP
       ${EDITOR:-nano} "$PROJECTS_DIR/${3}.json"
     elif [[ "$2" == "role" && -n "$3" ]]; then
       ${EDITOR:-nano} "$ROLES_DIR/${3}.json"
-    elif [[ -n "$2" ]]; then
-      ${EDITOR:-nano} "$PROFILES_DIR/${2}.json"
     else
       echo "Usage: pokegent edit [project|role] <name>"
+      return 1
     fi
     return $?
   fi
 
-  # ── Resolution: role@project, project, legacy profile, or role ──────────
+  # ── Resolution: role@project, project, profile fallback, or role ────────
   local _arg="$1"
-  local _force_legacy=false
-  if [[ "$_arg" == "--legacy" ]]; then
-    _force_legacy=true
-    _arg="$2"
-    shift 2
-  else
-    shift
-  fi
+  shift
 
   local _role_name="" _project_name="" _profile_name=""
   local _role_file="" _project_file="" _profile_file=""
-  local _resolved_mode=""  # "composed", "project", "legacy", "role"
+  local _resolved_mode=""  # "composed", "project", "profile", "role"
 
   if [[ "$_arg" == *"@"* ]]; then
     # Explicit role@project syntax
@@ -416,25 +442,12 @@ HELP
       fi
     fi
     _resolved_mode="composed"
-  elif [[ "$_force_legacy" == "true" ]]; then
-    # --legacy forces legacy profile
-    _profile_name="$_arg"
-    _profile_file="$PROFILES_DIR/${_profile_name}.json"
-    if [[ ! -f "$_profile_file" ]]; then
-      echo "Unknown legacy profile: $_profile_name"
-      return 1
-    fi
-    _resolved_mode="legacy"
   else
-    # Resolution order: project > project alias > legacy profile > role
+    # Resolution order: project > project alias > profile fallback > role
     if [[ -f "$PROJECTS_DIR/${_arg}.json" ]]; then
       _project_name="$_arg"
       _project_file="$PROJECTS_DIR/${_project_name}.json"
       _resolved_mode="project"
-      # Warn if a legacy profile with the same name exists
-      if [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
-        echo "Note: Using project '$_arg'. To use legacy profile: pokegent --legacy $_arg"
-      fi
     elif _canonical=$(_pokegent_resolve_project_alias "$_arg") && [[ -n "$_canonical" ]]; then
       _project_name="$_canonical"
       _project_file="$PROJECTS_DIR/${_project_name}.json"
@@ -442,7 +455,7 @@ HELP
     elif [[ -f "$PROFILES_DIR/${_arg}.json" ]]; then
       _profile_name="$_arg"
       _profile_file="$PROFILES_DIR/${_profile_name}.json"
-      _resolved_mode="legacy"
+      _resolved_mode="profile"
     elif [[ -f "$ROLES_DIR/${_arg}.json" ]]; then
       _role_name="$_arg"
       _role_file="$ROLES_DIR/${_role_name}.json"
@@ -456,7 +469,7 @@ HELP
       fi
       _resolved_mode="composed"
     else
-      echo "Unknown project, profile, or role: $_arg"
+      echo "Unknown project or role: $_arg"
       echo "Run 'pokegent ls' to see available options."
       return 1
     fi
@@ -513,8 +526,8 @@ ${_role_prompt}"
         system_prompt="$_context_prompt"
       fi
       ;;
-    legacy)
-      # Read legacy profile (unchanged from original behavior)
+    profile)
+      # Read compatibility profile
       title=$(jq -r '.title' "$_profile_file")
       emoji=$(jq -r '.emoji' "$_profile_file")
       r=$(jq -r '.color[0]' "$_profile_file")
@@ -540,6 +553,7 @@ ${_role_prompt}"
   local fork_session=false
   local task_group=""
   local inherited_pokegent_id=""
+  local handoff_context_file=""
   local filtered_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -571,6 +585,15 @@ ${_role_prompt}"
           shift 2
         else
           echo "Error: --pokegent-id requires an ID argument"
+          return 1
+        fi
+        ;;
+      --handoff-context-file)
+        if [[ -n "$2" ]]; then
+          handoff_context_file="$2"
+          shift 2
+        else
+          echo "Error: --handoff-context-file requires a path argument"
           return 1
         fi
         ;;
@@ -702,7 +725,7 @@ if last_title: print(last_title)
       for rf in "$RUNNING_DIR"/*.json(N); do
         [[ -f "$rf" ]] || continue
         local _rf_sid=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
-        local _rf_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
+        local _rf_pgid=$(jq -r '.pokegent_id // empty' "$rf" 2>/dev/null)
         if [[ "$_rf_sid" == "$resume_session_id"* || "$_rf_pgid" == "$resume_session_id"* ]]; then
           # Get sprite from identity file if available
           local _id_file="$POKEGENTS_DATA/agents/${_rf_pgid}.json"
@@ -742,19 +765,19 @@ if last_title: print(last_title)
       local abs_sprite_path="${sprite_dir:A}/${sprite}.png"
       local dyn_profile_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
       local dyn_profile="$dyn_profile_dir/pokegents-session-${pokegent_id}.json"
-      local profile_guid="CCD-SESSION-${pokegent_id}"
-      # Inherit from the project/profile's iTerm2 profile if it exists in ccd-profiles.json.
+      local profile_guid="POKEGENTS-SESSION-${pokegent_id}"
+      # Inherit from the project/profile's iTerm2 profile if it exists in pokegents-profiles.json.
       # If not found (or not set), omit "Dynamic Profile Parent Name" entirely — iTerm2
       # will use the default profile, which works on any setup without hardcoded names.
       local parent_profile=""
       if [[ -n "$_iterm2_profile" ]]; then
-        local _ccd_profiles_json="$dyn_profile_dir/ccd-profiles.json"
-        if [[ -f "$_ccd_profiles_json" ]] && jq -e --arg p "$_iterm2_profile" '.Profiles[] | select(.Name == $p)' "$_ccd_profiles_json" > /dev/null 2>&1; then
+        local _pokegents_profiles_json="$dyn_profile_dir/pokegents-profiles.json"
+        if [[ -f "$_pokegents_profiles_json" ]] && jq -e --arg p "$_iterm2_profile" '.Profiles[] | select(.Name == $p)' "$_pokegents_profiles_json" > /dev/null 2>&1; then
           parent_profile="$_iterm2_profile"
         fi
       fi
       jq -n \
-        --arg name "CCD Session: $display_name" \
+        --arg name "Pokegents Session: $display_name" \
         --arg guid "$profile_guid" \
         --arg parent "$parent_profile" \
         --arg icon_path "$abs_sprite_path" \
@@ -762,7 +785,7 @@ if last_title: print(last_title)
         > "$dyn_profile"
       # Small delay for iTerm2 to detect the new profile, then switch to it
       sleep 0.3
-      printf "\033]1337;SetProfile=%s\a" "CCD Session: $display_name"
+      printf "\033]1337;SetProfile=%s\a" "Pokegents Session: $display_name"
     fi
   fi
 
@@ -780,10 +803,15 @@ if last_title: print(last_title)
 
   # Register as running (keyed by pokegent_id for stability — never renamed by hooks)
   local running_file="$RUNNING_DIR/${profile_name}-${pokegent_id}.json"
-  # Guard: abort if another agent already has this pokegent_id (UUID collision)
+  # Guard: abort if another ACTIVE agent already has this pokegent_id.
+  # Skip if the file exists but has pid=0 — that's a placeholder pre-written
+  # by the dashboard's launch endpoint (launch.go) before invoking us.
   if [[ -f "$running_file" ]]; then
-    echo "ERROR: Running file already exists for pokegent_id $pokegent_id — aborting to prevent collision."
-    return 1
+    local existing_pid=$(jq -r '.pid // 0' "$running_file" 2>/dev/null)
+    if [[ "$existing_pid" != "0" && "$existing_pid" != "" ]]; then
+      echo "ERROR: Running file already exists for pokegent_id $pokegent_id with active pid=$existing_pid — aborting to prevent collision."
+      return 1
+    fi
   fi
   local iterm_sid="${ITERM_SESSION_ID##*:}"
   local created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -829,18 +857,17 @@ if last_title: print(last_title)
     --arg pokegent_id "$pokegent_id" \
     --arg profile "$profile_name" \
     --arg sid "$session_id" \
-    --arg ccd_sid "$session_id" \
     --arg pid "$$" \
     --arg tty "$(tty)" \
     --arg iterm_sid "$iterm_sid" \
-    '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, ccd_session_id: $ccd_sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
+    '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
     > "$running_file"
 
-  # Build claude args — skip_permissions: role override > legacy profile > global config
+  # Build claude args — skip_permissions: role override > profile fallback > global config
   local skip_perms="$POKEGENTS_SKIP_PERMISSIONS"
-  if [[ "$_resolved_mode" == "legacy" ]]; then
-    local _legacy_skip=$(jq -r '.skip_permissions // empty' "$_profile_file" 2>/dev/null)
-    [[ -n "$_legacy_skip" ]] && skip_perms="$_legacy_skip"
+  if [[ "$_resolved_mode" == "profile" ]]; then
+    local _profile_skip=$(jq -r '.skip_permissions // empty' "$_profile_file" 2>/dev/null)
+    [[ -n "$_profile_skip" ]] && skip_perms="$_profile_skip"
   elif [[ -n "$_skip_perms_override" && "$_skip_perms_override" != "unset" ]]; then
     skip_perms="$_skip_perms_override"
   fi
@@ -912,10 +939,8 @@ if last_title: print(last_title)
         session_id="${matches[1]}"
       fi
 
-      # ALWAYS generate a fresh ccd_session_id for mailbox routing.
-      # Even for normal resume — if the original session is still running,
-      # sharing ccd_session_id means shared mailbox → messages consumed by wrong agent.
-      local ccd_session_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      # Always generate a fresh pokegent_id for forked agents unless one is inherited.
+      local fresh_pokegent_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
       # Inherit task_group and sprite from the target session's identity.
       # Applies to BOTH plain resume and fork — the only thing that differs between
@@ -942,7 +967,7 @@ if last_title: print(last_title)
         done
       fi
       if [[ -n "$orig_rf" && -f "$orig_rf" ]]; then
-        orig_pgid=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$orig_rf" 2>/dev/null)
+        orig_pgid=$(jq -r '.pokegent_id // empty' "$orig_rf" 2>/dev/null)
       fi
       # Fall back to search DB if no running file matched (dead agent case)
       if [[ -z "$orig_pgid" ]]; then
@@ -965,8 +990,8 @@ if last_title: print(last_title)
         [[ -z "$sprite" ]] && sprite=$(jq -r '.sprite // empty' "$orig_rf" 2>/dev/null)
       fi
 
-      # For resume/fork, pokegent_id is always fresh (like ccd_session_id) unless inherited.
-      pokegent_id="${inherited_pokegent_id:-$ccd_session_id}"
+      # For resume/fork, pokegent_id is fresh unless inherited from the original agent.
+      pokegent_id="${inherited_pokegent_id:-$fresh_pokegent_id}"
 
       # Write persistent identity file
       local identity_file="$POKEGENTS_DATA/agents/${pokegent_id}.json"
@@ -1003,11 +1028,10 @@ if last_title: print(last_title)
         --arg pokegent_id "$pokegent_id" \
         --arg profile "$profile_name" \
         --arg sid "$session_id" \
-        --arg ccd_sid "$ccd_session_id" \
         --arg pid "$$" \
         --arg tty "$(tty)" \
         --arg iterm_sid "$iterm_sid" \
-        '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, ccd_session_id: $ccd_sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
+        '{pokegent_id: $pokegent_id, profile: $profile, session_id: $sid, pid: ($pid|tonumber), tty: $tty, iterm_session_id: $iterm_sid}' \
         > "$running_file"
       # Read the session's original cwd so we launch from the right directory
       local session_cwd=$(python3 -c "
@@ -1035,7 +1059,7 @@ with open(sys.argv[1]) as f:
 
 You are one of several concurrent Claude Code agents managed by pokegents. You can communicate with other agents using MCP tools.
 
-**Your session ID:** ${pokegent_id:-${ccd_session_id:-$session_id}}
+**Your session ID:** ${pokegent_id:-$session_id}
 
 **Available MCP tools (pokegents-messaging):**
 - \`list_agents\` — see all active agents and their status
@@ -1063,6 +1087,15 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
 }${system_prompt:+$system_prompt
 
 }${messaging_prompt}"
+  if [[ -n "$handoff_context_file" && -f "$handoff_context_file" ]]; then
+    local handoff_context
+    handoff_context=$(<"$handoff_context_file")
+    if [[ -n "$handoff_context" ]]; then
+      full_prompt="${full_prompt}
+
+${handoff_context}"
+    fi
+  fi
   claude_args+=(--append-system-prompt "$full_prompt")
 
   # Add extra directories from project/profile
@@ -1099,10 +1132,8 @@ Keep messages concise and actionable. Include file paths, specific line numbers,
   fi
   trap "rm -f '$dyn_profile_cleanup'" EXIT INT TERM HUP
 
-  # Use ccd_session_id for POKEGENTS_SESSION_ID (unique per agent, even for resume/clone).
-  # Falls back to session_id for fresh launches where ccd_session_id isn't set separately.
   POKEGENTS_ROOT="$POKEGENTS_ROOT" POKEGENTS_DATA="$POKEGENTS_DATA" POKEGENTS_PROFILE_NAME="$profile_name" \
-    POKEGENTS_SESSION_ID="${ccd_session_id:-$session_id}" \
+    POKEGENTS_SESSION_ID="${pokegent_id:-$session_id}" \
     POKEGENT_ID="$pokegent_id" \
     CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude "${claude_args[@]}"
 

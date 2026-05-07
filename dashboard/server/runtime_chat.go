@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 )
 
 // chatRuntime implements the Runtime interface for agents running through
@@ -47,21 +46,7 @@ func (r *chatRuntime) SendPrompt(_ context.Context, pgid, text string) error {
 	if err != nil {
 		return err
 	}
-	// Fire-and-forget: the HTTP request that triggered this returns
-	// immediately, but the actual ACP `session/prompt` round-trip can
-	// take many minutes. Detach with a long-lived background context so
-	// canceling the HTTP request doesn't kill the prompt.
-	// `[Image: <path>]` tokens in `text` are lifted out and translated
-	// into ACP image content blocks by ChatSession.Prompt's call to
-	// buildACPPromptBlocks (chat_acp.go).
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), chatPromptTimeout)
-		defer cancel()
-		if err := sess.Prompt(ctx, text); err != nil {
-			log.Printf("chat prompt error (%s): %v", shortChat(pgid), err)
-		}
-	}()
-	return nil
+	return sess.SendPrompt(text)
 }
 
 func (r *chatRuntime) Cancel(_ context.Context, pgid string) error {

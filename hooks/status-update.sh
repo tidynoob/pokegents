@@ -42,7 +42,7 @@ _RT_LOOKUP="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
 if [ -d "$POKEGENTS_DATA/running" ] && [ -n "$_RT_LOOKUP" ]; then
   for _rt_rf in "$POKEGENTS_DATA/running"/*.json; do
     [ -f "$_rt_rf" ] || continue
-    _RT_PGID=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$_rt_rf" 2>/dev/null)
+    _RT_PGID=$(jq -r '.pokegent_id // empty' "$_rt_rf" 2>/dev/null)
     if [ "$_RT_PGID" = "$_RT_LOOKUP" ]; then
       _RT_IFACE=$(jq -r '.interface // empty' "$_rt_rf" 2>/dev/null)
       if [ "$_RT_IFACE" = "chat" ]; then
@@ -70,8 +70,6 @@ if [ -d "$RUNNING_DIR_CHECK" ] && [ "$EVENT" != "SessionStart" ] && [ "$EVENT" !
   for _rf in "$RUNNING_DIR_CHECK"/*.json; do
     [ -f "$_rf" ] || continue
     _RF_PGID=$(jq -r '.pokegent_id // empty' "$_rf" 2>/dev/null)
-    # Fall back to ccd_session_id for old running files without pokegent_id
-    [ -z "$_RF_PGID" ] && _RF_PGID=$(jq -r '.ccd_session_id // empty' "$_rf" 2>/dev/null)
     if [ "$_RF_PGID" = "$POKEGENT_ID_CHECK" ]; then
       # Update session_id field to match Claude's actual SESSION_ID (no file rename)
       _RF_SID=$(jq -r '.session_id // empty' "$_rf" 2>/dev/null)
@@ -252,8 +250,6 @@ case "$EVENT" in
         for rf in "$RUNNING_DIR"/*.json; do
           [ -f "$rf" ] || continue
           RF_PGID=$(jq -r '.pokegent_id // empty' "$rf" 2>/dev/null)
-          # Fall back to ccd_session_id for old running files without pokegent_id
-          [ -z "$RF_PGID" ] && RF_PGID=$(jq -r '.ccd_session_id // empty' "$rf" 2>/dev/null)
           if [ "$RF_PGID" = "$PGID" ]; then
             MATCHED_RF="$rf"
             break
@@ -308,7 +304,7 @@ case "$EVENT" in
     if [ -n "$_PGID_END" ]; then
       for rf in "$RUNNING_DIR"/*.json; do
         [ -f "$rf" ] || continue
-        _RF_PG=$(jq -r '.pokegent_id // .ccd_session_id // empty' "$rf" 2>/dev/null)
+        _RF_PG=$(jq -r '.pokegent_id // empty' "$rf" 2>/dev/null)
         if [ "$_RF_PG" = "$_PGID_END" ]; then
           _RF_IFACE=$(jq -r '.interface // empty' "$rf" 2>/dev/null)
           if [ "$_RF_IFACE" = "chat" ]; then
@@ -476,55 +472,9 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
     echo "$TOTAL_LINES" > "$LASTREAD_FILE" 2>/dev/null
   fi
 
-  # Part 2: Pending messages — deliver via dashboard API (fast path) or file fallback.
-  # Mailboxes are keyed by pokegent_id (stable across resume/interface migration).
-  # Fall back to legacy IDs only for old running files that pre-date the refactor.
-  DASHBOARD_URL="${POKEGENTS_DASHBOARD_URL:-http://localhost:7834}"
-  MSG_LOOKUP_ID="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
-  MSG_CONTENT=""
-
-  # Fast path: try dashboard API (marks delivered + returns content)
-  DELIVERED=$(curl -s -m 2 -X POST "$DASHBOARD_URL/api/messages/deliver/$MSG_LOOKUP_ID" 2>/dev/null || echo "FAIL")
-  if [ "$DELIVERED" != "FAIL" ]; then
-    MSG_COUNT=$(echo "$DELIVERED" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
-    if [ "$MSG_COUNT" -gt 0 ]; then
-      # Format with jq (no python3 dependency)
-      MSG_CONTENT=$(echo "$DELIVERED" | jq -r '.[] | "[Message from \(.from_name)]: \(.content)"' 2>/dev/null | paste -sd '\n---\n' - || echo "")
-    fi
-  else
-    # File fallback: read messages directly from mailbox (dashboard may be down)
-    MAILBOX="$POKEGENTS_DATA/messages/$MSG_LOOKUP_ID"
-    if [ -d "$MAILBOX" ]; then
-      for msgfile in "$MAILBOX"/*.json; do
-        [ -f "$msgfile" ] || continue
-        [ "$(basename "$msgfile")" = "_msg_budget" ] && continue
-        IS_DELIVERED=$(jq -r '.delivered // false' "$msgfile" 2>/dev/null || echo "false")
-        [ "$IS_DELIVERED" = "true" ] && continue
-        FROM_NAME=$(jq -r '.from_name // "unknown"' "$msgfile" 2>/dev/null || echo "unknown")
-        CONTENT=$(jq -r '.content // ""' "$msgfile" 2>/dev/null || echo "")
-        if [ -n "$CONTENT" ]; then
-          [ -n "$MSG_CONTENT" ] && MSG_CONTENT="${MSG_CONTENT}\n---\n"
-          MSG_CONTENT="${MSG_CONTENT}[Message from ${FROM_NAME}]: ${CONTENT}"
-          # Mark delivered
-          jq '.delivered = true' "$msgfile" > "${msgfile}.tmp" && mv "${msgfile}.tmp" "$msgfile" 2>/dev/null
-        fi
-      done
-    fi
-  fi
-
-  if [ -n "$MSG_CONTENT" ]; then
-    NOTIFY="${NOTIFY}${NOTIFY:+\n\n}$MSG_CONTENT"
-  fi
-
-  # Output combined systemMessage (truncate to ~6KB to avoid Claude Code persisting
-  # to file — messages over the inline limit become unreadable to the agent)
+  # Output activity overlap warning if any
   if [ -n "$NOTIFY" ]; then
     FORMATTED=$(printf '%b' "$NOTIFY")
-    if [ ${#FORMATTED} -gt 6000 ]; then
-      FORMATTED="${FORMATTED:0:5900}
-
-... [message truncated — full content available via check_messages MCP tool]"
-    fi
     jq -n --arg msg "$FORMATTED" '{systemMessage: $msg}'
     exit 0
   fi

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentMessage } from '../types'
+import { PixelSprite } from './PixelSprite'
 
 // ─── Sprite delivery animation ──────────────────────────────────────────
 // The sender's sprite leaves its card, carries a letter to the recipient,
@@ -28,25 +29,17 @@ export function useMessageAnimations(
   const seenIdsRef = useRef<Set<string>>(new Set())
   const seenDeliveredRef = useRef<Set<string>>(new Set())
   const readyRef = useRef(false)
-  const initialLoadDone = useRef(false)
-
   const getSpriteForSession = useCallback((sessionId: string) => {
     return getSpriteForId(sessionId)
   }, [getSpriteForId])
 
-  // Seed on first non-empty messages load — mark all existing as seen
+  // Activate after mount. We no longer backfill message history for the removed
+  // bottom mail log, so live SSE messages should animate immediately after the
+  // initial dashboard settle period.
   useEffect(() => {
-    if (initialLoadDone.current) return
-    if (messages.length > 0) {
-      for (const m of messages) {
-        seenIdsRef.current.add(m.id)
-        if (m.delivered) seenDeliveredRef.current.add(m.id)
-      }
-      initialLoadDone.current = true
-      // Small delay before activating — let the poll settle
-      setTimeout(() => { readyRef.current = true }, 3000)
-    }
-  }, [messages])
+    const timeout = setTimeout(() => { readyRef.current = true }, 1000)
+    return () => clearTimeout(timeout)
+  }, [])
 
   useEffect(() => {
     if (!readyRef.current) return
@@ -216,17 +209,11 @@ export function DeliveryOverlay({ deliveries }: { deliveries: DeliveryAnim[] }) 
         const showLetter = goingOut
 
         return (
-          <div key={d.id + (goingOut ? '-out' : '-back')} style={{ position: 'fixed', left: x - 16, top: y - 16, opacity }}>
-            <img
-              src={`/sprites/${d.sprite}.png`}
-              alt=""
-              style={{
-                width: 32,
-                height: 32,
-                imageRendering: 'pixelated',
-                transform: `scaleX(${scaleX})`,
-              }}
-            />
+          <div
+            key={d.id + (goingOut ? '-out' : '-back')}
+            style={{ position: 'fixed', left: x, top: y, width: 32, height: 32, opacity, transform: 'translate(-50%, -50%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <PixelSprite sprite={d.sprite} alt="" flipX={movingRight} />
             {showLetter && (
               <img
                 src="/sprites/_air-mail.png"
@@ -278,9 +265,15 @@ function BubbleShell({ children, phase, top = -16 }: {
       }`}
       style={{ top, left: 0, right: 0, transition: 'opacity 0.3s ease-out' }}
     >
-      <div className="relative bg-gba-dialog rounded-full px-1.5 py-0.5" style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}>
-        <span className="flex items-center justify-center h-[12px] text-[11px] leading-none">{children}</span>
-        <div className="absolute -bottom-[4px] left-1/2 -translate-x-1/2 w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px] border-t-gba-dialog" />
+      <div
+        className="relative rounded-full px-1.5 py-0.5"
+        style={{ background: 'var(--theme-dialog-bg)', color: 'var(--theme-dialog-text)', boxShadow: 'var(--theme-text-shadow-pixel)' }}
+      >
+        <span className="flex items-center justify-center h-[12px] text-l leading-none">{children}</span>
+        <div
+          className="absolute -bottom-[4px] left-1/2 -translate-x-1/2 w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px]"
+          style={{ borderTopColor: 'var(--theme-dialog-bg)' }}
+        />
       </div>
     </div>
   )

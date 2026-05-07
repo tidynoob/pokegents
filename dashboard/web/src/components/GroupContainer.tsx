@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { AgentState, stableId } from '../types'
 import { AgentCard, GROUP_COLORS } from './AgentCard'
 import { hashString } from './CreatureIcon'
+import { PixelSprite } from './PixelSprite'
 import { focusAgent, releaseTaskGroup, assignTaskGroup, ProjectInfo, RoleInfo } from '../api'
 import type { CardMode } from '../hooks/useGridEngine'
 
@@ -26,14 +27,15 @@ interface GroupContainerProps {
   projects: ProjectInfo[]
   roles: RoleInfo[]
   existingGroups?: string[]
+  isConnecting?: boolean
 }
 
 function statusColor(state: string): string {
-  if (state === 'busy') return '#e87848'
-  if (state === 'needs_input') return '#d84848'
-  if (state === 'error') return '#a858a8'
+  if (state === 'busy') return 'var(--theme-status-busy)'
+  if (state === 'needs_input') return 'var(--theme-status-needs-input)'
+  if (state === 'error') return 'var(--theme-status-error)'
   // Phase 2: done collapsed into idle — no separate done color
-  return '#788890'
+  return 'var(--theme-status-idle)'
 }
 
 function statusLabel(state: string): string {
@@ -75,22 +77,20 @@ function MemberRow({ agent, sprite, isActive, onClick }: {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 w-full px-1.5 py-0.5 rounded transition-colors ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}
+      className={`flex items-center gap-1.5 w-full px-1.5 py-0.5 rounded transition-colors ${isActive ? 'theme-bg-panel-subtle' : 'theme-bg-panel-hover'}`}
       style={{ minHeight: 20 }}
     >
-      <img
-        src={`/sprites/${sprite}.png`}
-        alt=""
-        style={{ width: 16, height: 16, imageRendering: 'pixelated', flexShrink: 0 }}
-      />
-      <span className="text-[7px] font-pixel text-white/70 truncate flex-1 text-left">
+      <div className="shrink-0 flex items-center justify-center" style={{ width: 16, height: 16 }}>
+        <PixelSprite sprite={sprite} scale={0.5} alt="" />
+      </div>
+      <span className="text-s theme-font-display theme-text-secondary truncate flex-1 text-left">
         {agent.display_name || agent.profile_name}
       </span>
       <span
-        className={`text-[5px] font-pixel text-white px-1 py-px rounded-full leading-none shrink-0${agent.state === 'busy' ? ' animate-pulse-soft' : ''}`}
-        style={{ backgroundColor: statusColor(agent.state), textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+        className={`text-xs theme-font-display theme-text-primary px-1 py-px rounded-full leading-none shrink-0${agent.state === 'busy' ? ' animate-pulse-soft' : ''}`}
+        style={{ backgroundColor: statusColor(agent.state), textShadow: 'var(--theme-text-shadow-pixel)' }}
       >{statusLabel(agent.state)}</span>
-      {time && <span className="text-[6px] font-mono text-white/25 shrink-0">{time}</span>}
+      {time && <span className="text-xs theme-font-mono theme-text-faint shrink-0">{time}</span>}
     </button>
   )
 }
@@ -98,7 +98,7 @@ function MemberRow({ agent, sprite, isActive, onClick }: {
 export function GroupContainer({
   name, members: rawMembers, viewMode, pageIndex, onSetViewMode, onSetPageIndex, onMinimize,
   cols, cardMode, pixelW, pixelH, singleCardPixelW, singleCardPixelH,
-  readingAgents, projects, roles, existingGroups,
+  readingAgents, projects, roles, existingGroups, isConnecting,
 }: GroupContainerProps) {
   const [confirmRelease, setConfirmRelease] = useState(false)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
@@ -141,6 +141,7 @@ export function GroupContainer({
       projects={projects}
       roles={roles}
       existingGroups={existingGroups}
+      isConnecting={isConnecting}
     />
   )
 
@@ -160,27 +161,27 @@ export function GroupContainer({
       {/* Header bar */}
       <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H, background: `rgba(${r}, ${g}, ${b}, 0.15)` }}>
         <button
-          className="text-[9px] text-white/50 hover:text-white/80 transition-colors px-0.5"
+          className="text-m theme-text-muted theme-hover-text-primary transition-colors px-0.5"
           onClick={(e) => { e.stopPropagation(); onSetViewMode(viewMode === 'single' ? 'expanded' : 'single') }}
           title={viewMode === 'single' ? 'Expand all' : 'Single view'}
         >{viewMode === 'single' ? '▶' : '▼'}</button>
 
         <span
-          className="text-[7px] font-pixel pixel-shadow uppercase truncate text-white"
+          className="text-s theme-font-display pixel-shadow uppercase truncate theme-text-primary"
         >{name}</span>
-        <span className="text-[7px] font-pixel text-white/40 shrink-0">{members.length}</span>
+        <span className="text-s theme-font-display theme-text-faint shrink-0">{members.length}</span>
 
         <div className="flex items-center gap-1 ml-auto" onClick={e => e.stopPropagation()}>
           {/* Single mode: pagination arrows */}
           {viewMode === 'single' && (
             <>
               <button
-                className="text-[9px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-0.5"
+                className="text-m theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
                 onClick={() => onSetPageIndex(Math.max(0, safePageIndex - 1))}
                 disabled={safePageIndex === 0}
               >◀</button>
               <button
-                className="text-[9px] text-white/40 hover:text-white/80 transition-colors disabled:text-white/15 px-0.5"
+                className="text-m theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
                 onClick={() => onSetPageIndex(Math.min(members.length - 1, safePageIndex + 1))}
                 disabled={safePageIndex >= members.length - 1}
               >▶</button>
@@ -189,19 +190,19 @@ export function GroupContainer({
 
           {/* Release group (shutdown all agents) */}
           <button
-            className={`h-3.5 rounded-full transition-colors flex items-center justify-center text-[8px] font-bold text-white leading-none ml-1 px-1 ${
+            className={`h-3.5 rounded-full transition-colors flex items-center justify-center text-s theme-font-display uppercase pixel-shadow theme-text-primary leading-none ml-1 px-1 ${
               confirmRelease
-                ? 'bg-red-500 hover:bg-red-400 min-w-[52px]'
-                : 'w-3.5 bg-white/10 hover:bg-red-500/60'
+                ? 'bg-accent-red hover:bg-accent-red/80 min-w-[52px]'
+                : 'w-3.5 theme-bg-panel-subtle hover:bg-accent-red/60'
             }`}
-            style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+            style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
             onClick={(e) => { e.stopPropagation(); handleRelease() }}
             title={confirmRelease ? 'Click again to release all agents' : 'Release group'}
-          >{confirmRelease ? 'Release?' : '×'}</button>
+          >{confirmRelease ? 'RELEASE?' : '×'}</button>
 
           <button
-            className="w-3 h-3 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-[7px] font-bold text-white leading-none ml-1"
-            style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+            className="w-3 h-3 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-s theme-font-display theme-text-primary leading-none ml-1"
+            style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
             onClick={onMinimize}
             title="Minimize"
           >−</button>
@@ -273,14 +274,14 @@ export function GroupContainer({
                   Promise.all(members.map(m => assignTaskGroup(stableId(m), '')))
                   setCtxMenu(null)
                 }}
-                className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+                className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
               >
                 <span className="w-4 text-center">💨</span>
                 Disperse group
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleRelease(); setCtxMenu(null) }}
-                className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-accent-red hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+                className="w-full text-left px-3 py-1.5 text-s theme-font-display text-accent-red theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
               >
                 <span className="w-4 text-center">⏻</span>
                 Release all

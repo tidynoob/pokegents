@@ -1,4 +1,4 @@
-import { AgentState, PokegentSummary, AgentMessage, AgentConnection } from './types'
+import { AgentState, PokegentSummary, AgentMessage } from './types'
 
 const BASE = '/api'
 
@@ -46,11 +46,12 @@ export async function focusAgent(sessionId: string): Promise<void> {
 }
 
 export async function renameAgent(sessionId: string, name: string): Promise<void> {
-  await fetch(`${BASE}/sessions/${sessionId}/rename`, {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/rename`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   })
+  if (!res.ok) throw new Error(await res.text())
 }
 
 export async function assignRole(sessionId: string, role: string): Promise<{ status: string }> {
@@ -103,6 +104,11 @@ export async function cancelTurn(sessionId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${sessionId}/cancel`, { method: 'POST' })
 }
 
+export async function restartBackend(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/restart-backend`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
 export interface RuntimeCapabilities {
   can_focus: boolean
   can_clone: boolean
@@ -141,7 +147,7 @@ export async function releaseTaskGroup(groupName: string): Promise<{ ok: boolean
 
 /** Unified launch — Phase 2 of pokegents-unified-launch.md.
  *  Single endpoint that mints a pokegent_id server-side, pre-writes the running
- *  file, and dispatches by `interface` (iterm2 today; chat re-introduced in Phase 3).
+ *  file, and dispatches by `interface` / launch surface.
  */
 export interface LaunchPokegentRequest {
   profile?: string
@@ -153,7 +159,8 @@ export interface LaunchPokegentRequest {
   effort?: string
   task_group?: string
   parent_pokegent_id?: string
-  interface?: 'iterm2' | 'chat'
+  interface?: 'terminal' | 'iterm2' | 'chat'
+  agent_backend?: string
 }
 
 export interface LaunchPokegentResponse {
@@ -188,6 +195,32 @@ export async function migrateInterface(
 }
 
 
+// ── Backend configs ────────────────────────────────────────
+export interface BackendInfo {
+  id: string
+  name: string
+  type: string
+  default_model?: string
+  models?: Record<string, { name?: string; model: string; effort?: string }>
+  default?: boolean
+}
+
+export async function fetchBackends(): Promise<BackendInfo[]> {
+  const res = await fetch(`${BASE}/backends`)
+  if (!res.ok) return []
+  return (await res.json()) ?? []
+}
+
+export async function switchBackend(sessionId: string, backend: string): Promise<{ ok: boolean; backend: string }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/switch-backend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ backend }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function sendMessage(from: string, to: string, content: string): Promise<AgentMessage | null> {
   const res = await fetch(`${BASE}/messages`, {
     method: 'POST',
@@ -195,26 +228,6 @@ export async function sendMessage(from: string, to: string, content: string): Pr
     body: JSON.stringify({ from, to, content }),
   })
   if (!res.ok) return null
-  return res.json()
-}
-
-export async function fetchConnections(): Promise<AgentConnection[]> {
-  const res = await fetch(`${BASE}/messages/connections`)
-  if (!res.ok) return []
-  return res.json()
-}
-
-export interface ActivityEntry {
-  timestamp: string
-  session_id: string
-  agent_name: string
-  files: string
-  summary: string
-}
-
-export async function fetchActivity(limit = 50): Promise<ActivityEntry[]> {
-  const res = await fetch(`${BASE}/activity?limit=${limit}`)
-  if (!res.ok) return []
   return res.json()
 }
 
@@ -264,12 +277,6 @@ export async function uploadImage(sessionId: string, imageBlob: Blob): Promise<{
   const res = await fetch(`${BASE}/sessions/${sessionId}/image`, { method: 'POST', body: form })
   if (!res.ok) return null
   return res.json()
-}
-
-export async function fetchMessageHistory(): Promise<AgentMessage[]> {
-  const res = await fetch(`${BASE}/messages`)
-  if (!res.ok) return []
-  return (await res.json()) ?? []
 }
 
 export interface ProfileInfo {
@@ -324,4 +331,122 @@ export async function launchProfile(name: string): Promise<void> {
     // Fallback: legacy endpoint for old servers
     await fetch(`${BASE}/profiles/${encodeURIComponent(name)}/launch`, { method: 'POST' })
   }
+}
+
+// ── Setup / onboarding ─────────────────────────────────────
+export interface SetupCheck {
+  state: string
+  message?: string
+  path?: string
+}
+
+export interface SetupPreferences {
+  dashboard_open_mode?: string
+  default_interface?: 'chat' | 'terminal' | 'iterm2'
+  default_backend?: string
+  default_project?: string
+  default_role?: string
+  editor_open_command?: string
+  browser_open_command?: string
+  onboarding_complete?: boolean
+}
+
+export interface SetupStatus {
+  complete?: boolean
+  data_dir?: SetupCheck
+  config?: SetupCheck
+  hooks?: SetupCheck
+  claude_auth?: SetupCheck
+  status_line?: SetupCheck
+  preferences?: SetupPreferences
+  onboarding_complete?: boolean
+  required_actions?: string[]
+  data_dir_exists?: boolean
+  config_exists?: boolean
+  dashboard_version?: string
+  claude_cli?: boolean | string | SetupCheck
+  claude_hooks?: boolean | 'current' | 'stale' | 'missing' | string
+  mcp_messaging?: boolean | 'current' | 'stale' | 'missing' | SetupCheck
+  node_runtime?: boolean | string | SetupCheck
+  codex_backend?: boolean | string | SetupCheck
+  default_project?: boolean | string | SetupCheck
+  default_role?: boolean | string | SetupCheck
+  launch_agent?: boolean | 'installed' | 'running' | 'missing' | 'stale' | SetupCheck
+  launch_agent_installed?: boolean
+  launch_agent_running?: boolean
+  server_lifecycle_mode?: string
+  [key: string]: unknown
+}
+
+export async function fetchSetupStatus(): Promise<SetupStatus | null> {
+  const res = await fetch(`${BASE}/setup/status`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+async function postSetupAction(path: string, body?: unknown): Promise<SetupStatus | null> {
+  const res = await fetch(`${BASE}/setup/${path}`, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const text = await res.text()
+  return text ? JSON.parse(text) : null
+}
+
+export interface ApplySetupRequest {
+  repair_hooks?: boolean
+  repair_mcp?: boolean
+  install_launch_agent?: boolean
+}
+
+export function applySetup(req: ApplySetupRequest = {}): Promise<SetupStatus | null> {
+  return postSetupAction('apply', req)
+}
+
+export function repairClaudeHooks(): Promise<SetupStatus | null> {
+  return postSetupAction('repair-hooks')
+}
+
+export function repairMcpMessaging(): Promise<SetupStatus | null> {
+  return postSetupAction('repair-mcp')
+}
+
+export function installLaunchAgent(): Promise<SetupStatus | null> {
+  return postSetupAction('install-launch-agent')
+}
+
+export function setOpenAtLogin(enabled: boolean): Promise<SetupStatus | null> {
+  return postSetupAction('open-at-login', { enabled })
+}
+
+export function setSetupPreferences(req: SetupPreferences): Promise<SetupStatus | null> {
+  return postSetupAction('preferences', req)
+}
+
+export function completeOnboarding(): Promise<SetupStatus | null> {
+  return postSetupAction('onboarding/complete')
+}
+
+export function installDefaultRoles(): Promise<SetupStatus | null> {
+  return postSetupAction('defaults/roles')
+}
+
+export function createDefaultProject(req: { name?: string; title?: string; cwd?: string } = {}): Promise<SetupStatus | null> {
+  return postSetupAction('defaults/project', req)
+}
+
+export function openSetupConfig(target: 'pokegents' | 'claude' | 'codex' | 'backends' | 'config' = 'pokegents', command?: string): Promise<unknown> {
+  return postSetupAction('open-config', { target, command })
+}
+
+export function openSetupAuth(backend?: string): Promise<unknown> {
+  return postSetupAction('open-auth', { backend })
+}
+
+export async function setDefaultBackend(id: string): Promise<{ ok: boolean; default_id: string }> {
+  const res = await fetch(`${BASE}/backends/${encodeURIComponent(id)}/default`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }

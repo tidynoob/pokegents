@@ -2,7 +2,7 @@ _pokegent_reload() {
   local RUNNING_DIR="$POKEGENTS_DATA/running"
   local my_tty=$(tty 2>/dev/null)
 
-  echo "=== CCD Reload ==="
+  echo "=== Pokegents Reload ==="
   echo ""
 
   # ── 1. Snapshot all running sessions ──────────────────────────────────

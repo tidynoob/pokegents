@@ -102,8 +102,12 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
           gridTemplateColumns: `repeat(${settings.cardsPerRow}, minmax(0, 1fr))`,
           gridAutoRows: cellH,
           gap,
-          paddingTop: 16,
-          paddingBottom: 0,
+          // Match outer bleed to the inter-card gap so first/last-column glow
+          // has the same breathing room as glow between neighboring cards.
+          paddingLeft: gap,
+          paddingRight: gap,
+          paddingTop: Math.min(gap, 8),
+          paddingBottom: Math.min(gap, 8),
           position: 'relative',
         }}
       >
@@ -115,7 +119,7 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
             position: 'absolute', inset: 0, zIndex: 1,
           }}>
             {Array.from({ length: settings.cardsPerRow - 1 }, (_, i) => {
-              const x = (i + 1) * (engine.cellW + gap) - gap / 2
+              const x = gap + (i + 1) * (engine.cellW + gap) - gap / 2
               return (
                 <div
                   key={`vline-${i}`}
@@ -125,7 +129,7 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
                     top: 0,
                     bottom: 0,
                     width: 2,
-                    backgroundImage: 'repeating-linear-gradient(180deg, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 4px, transparent 4px, transparent 8px)',
+                    backgroundImage: 'repeating-linear-gradient(180deg, var(--theme-panel-divider) 0px, var(--theme-panel-divider) 4px, transparent 4px, transparent 8px)',
                   }}
                 />
               )
@@ -293,7 +297,7 @@ function GridCell({
         visibility: isDragging ? 'hidden' : 'visible',
         transition: 'box-shadow 150ms',
         cursor: isDragging ? 'grabbing' : 'grab',
-        boxShadow: isDropTarget ? 'inset 0 0 0 2px rgba(80,200,120,0.7), 0 0 12px rgba(80,200,120,0.3)' : undefined,
+        boxShadow: isDropTarget ? 'inset 0 0 0 2px rgb(var(--theme-accent-green-rgb) / 0.7), 0 0 12px rgb(var(--theme-accent-green-rgb) / 0.3)' : undefined,
         borderRadius: isDropTarget ? 8 : undefined,
         userSelect: 'none',
       }}

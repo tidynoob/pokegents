@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -19,21 +18,23 @@ import (
 
 // StateManager holds the in-memory merged view of all agent state.
 type StateManager struct {
-	mu       sync.RWMutex
-	store    *storelib.Store          // Layer 0 file-backed store
-	profiles map[string]Profile       // keyed by profile name
-	running  map[string]RunningSession // keyed by session_id
-	statuses map[string]StatusFile     // keyed by session_id
-	agents    map[string]*AgentState    // keyed by session_id
-	ephemeral map[string]*EphemeralAgent // keyed by agent_id
-	contexts      map[string]ContextUsage   // keyed by session_id, survives rebuilds
-	activityFeeds  map[string][]ActivityItem // keyed by session_id, survives rebuilds
-	feedClearedAt  map[string]time.Time     // when UserPromptSubmit last cleared the feed
-	nameOverrides map[string]string         // keyed by session_id, persisted to disk
-	sessionIDMap  map[string]string         // CCD session ID → Claude session ID, persisted
-	agentOrder         []string                  // user-defined display order (session IDs), persisted
-	identities         map[string]*AgentIdentity  // keyed by pokegent_id, persistent identity store
-	pendingRelaunches  map[string]string         // session_id → pokegent command to run when idle
+	mu                sync.RWMutex
+	store             *storelib.Store            // Layer 0 file-backed store
+	profiles          map[string]Profile         // keyed by profile name
+	running           map[string]RunningSession  // keyed by pokegent_id
+	statuses          map[string]StatusFile      // keyed by pokegent_id
+	agents            map[string]*AgentState     // keyed by pokegent_id
+	ephemeral         map[string]*EphemeralAgent // keyed by agent_id
+	contexts          map[string]ContextUsage    // keyed by pokegent_id, survives rebuilds
+	activityFeeds     map[string][]ActivityItem  // keyed by pokegent_id, survives rebuilds
+	feedClearedAt     map[string]time.Time       // when UserPromptSubmit last cleared the feed
+	nameOverrides     map[string]string          // keyed by pokegent_id, persisted to disk
+	sessionToPokegent map[string]string          // Claude session_id → pokegent_id (reverse lookup for hooks)
+	agentOrder        []string                   // user-defined display order (pokegent_ids), persisted
+	identities        map[string]*AgentIdentity  // keyed by pokegent_id, persistent identity store
+	pendingRelaunches map[string]string          // pokegent_id → pokegent command to run when idle
+	transcriptPaths   map[string]string          // pokegent_id → transcript JSONL path (cache)
+	backendStore      *storelib.BackendStore     // backend config for model name resolution
 
 	dataDir          string // ~/.ccsession — kept for paths not yet migrated to store
 	claudeProjectDir string // ~/.claude/projects
@@ -46,21 +47,29 @@ func NewStateManager(dataDir, claudeProjectDir string) *StateManager {
 
 func NewStateManagerWithStore(s *storelib.Store, dataDir, claudeProjectDir string) *StateManager {
 	return &StateManager{
-		store:            s,
-		profiles:         make(map[string]Profile),
-		running:          make(map[string]RunningSession),
-		statuses:         make(map[string]StatusFile),
-		agents:           make(map[string]*AgentState),
-		ephemeral:        make(map[string]*EphemeralAgent),
+		store:             s,
+		profiles:          make(map[string]Profile),
+		running:           make(map[string]RunningSession),
+		statuses:          make(map[string]StatusFile),
+		agents:            make(map[string]*AgentState),
+		ephemeral:         make(map[string]*EphemeralAgent),
 		contexts:          make(map[string]ContextUsage),
 		activityFeeds:     make(map[string][]ActivityItem),
 		feedClearedAt:     make(map[string]time.Time),
-		identities:       make(map[string]*AgentIdentity),
-		nameOverrides:    make(map[string]string),
-		sessionIDMap:     make(map[string]string),
-		dataDir:          dataDir,
-		claudeProjectDir: claudeProjectDir,
+		identities:        make(map[string]*AgentIdentity),
+		nameOverrides:     make(map[string]string),
+		sessionToPokegent: make(map[string]string),
+		transcriptPaths:   make(map[string]string),
+		dataDir:           dataDir,
+		claudeProjectDir:  claudeProjectDir,
 	}
+}
+
+// SetBackendStore sets the backend config store for model name resolution.
+func (sm *StateManager) SetBackendStore(bs *storelib.BackendStore) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.backendStore = bs
 }
 
 // LoadAll reads all profiles, running sessions, and status files from disk.
@@ -91,41 +100,38 @@ func (sm *StateManager) LoadAll() error {
 		}
 	}
 	sm.loadNameOverrides()
-	sm.loadSessionIDMap()
 	sm.loadAgentOrder()
 	sm.rebuildAgents()
-	sm.reconcileNameOverrides()
 
-	// Load initial context usage, last messages, and activity feeds for all agents
-	for sid := range sm.agents {
-		path := sm.findTranscriptPathLocked(sid)
+	// Load initial context/messages/activity from transcripts (single pass per agent).
+	for pgid := range sm.agents {
+		path := sm.findTranscriptPathLocked(pgid)
 		if path != "" {
-			ctx := extractContextUsage(path)
-			if ctx.Tokens > 0 {
-				sm.contexts[sid] = ctx
-				if a, ok := sm.agents[sid]; ok {
-					a.ContextTokens = ctx.Tokens
-					a.ContextWindow = ctx.Window
+			sm.transcriptPaths[pgid] = path
+			batch := storelib.BatchExtract(path)
+			if batch.ContextUsage.Tokens > 0 {
+				sm.contexts[pgid] = ContextUsage{Tokens: batch.ContextUsage.Tokens, Window: batch.ContextUsage.Window}
+				if a, ok := sm.agents[pgid]; ok {
+					a.ContextTokens = batch.ContextUsage.Tokens
+					a.ContextWindow = batch.ContextUsage.Window
 				}
 			}
-			// Backfill last user prompt and assistant summary from transcript
-			// so cards show useful content immediately after server restart.
-			if a, ok := sm.agents[sid]; ok {
-				if a.LastSummary == "" || a.UserPrompt == "" {
-					userPrompt, lastSummary := extractLastMessages(path)
-					if a.UserPrompt == "" && userPrompt != "" {
-						a.UserPrompt = userPrompt
-					}
-					if a.LastSummary == "" && lastSummary != "" {
-						a.LastSummary = lastSummary
-					}
+			if a, ok := sm.agents[pgid]; ok {
+				if a.UserPrompt == "" && batch.LastUserPrompt != "" {
+					a.UserPrompt = batch.LastUserPrompt
+				}
+				if a.State != "busy" && a.LastSummary == "" && batch.LastSummary != "" {
+					a.LastSummary = batch.LastSummary
 				}
 			}
-			// Backfill activity feed from transcript if no live feed exists yet
-			if _, hasFeed := sm.activityFeeds[sid]; !hasFeed {
-				if feed := extractActivityFeed(path); len(feed) > 0 {
-					sm.activityFeeds[sid] = feed
-					if a, ok := sm.agents[sid]; ok {
+			if _, hasFeed := sm.activityFeeds[pgid]; !hasFeed {
+				if len(batch.ActivityFeed) > 0 {
+					feed := make([]ActivityItem, len(batch.ActivityFeed))
+					for i, item := range batch.ActivityFeed {
+						feed[i] = ActivityItem{Time: item.Time, Type: item.Type, Text: item.Text}
+					}
+					sm.activityFeeds[pgid] = feed
+					if a, ok := sm.agents[pgid]; ok {
 						a.ActivityFeed = feed
 					}
 				}
@@ -143,12 +149,14 @@ func (sm *StateManager) GetAgents() []AgentState {
 	defer sm.mu.RUnlock()
 
 	result := make([]AgentState, 0, len(sm.agents)+len(sm.ephemeral))
-	for _, a := range sm.agents {
+	for pgid, a := range sm.agents {
 		// Only show agents with a running session file
-		if _, hasRunning := sm.running[a.SessionID]; !hasRunning {
+		if _, hasRunning := sm.running[pgid]; !hasRunning {
 			continue
 		}
-		result = append(result, *a)
+		cp := *a
+		cp.CardPreview = buildCardPreview(cp)
+		result = append(result, cp)
 	}
 
 	// Append ephemeral agents (subagents from Agent tool)
@@ -174,10 +182,11 @@ func (sm *StateManager) GetAgents() []AgentState {
 		if ea.DurationSec > 0 {
 			a.DurationSec = ea.DurationSec
 		}
+		a.CardPreview = buildCardPreview(a)
 		// Inherit parent's task group, or auto-create one if parent has none
 		if ea.ParentSessionID != "" {
-			for sid, parent := range sm.agents {
-				if parent.CCDSessionID == ea.ParentSessionID || parent.SessionID == ea.ParentSessionID {
+			for pgid, parent := range sm.agents {
+				if parent.SessionID == ea.ParentSessionID || parent.PokegentID == ea.ParentSessionID {
 					a.Project = parent.Project
 					a.ProjectColor = parent.ProjectColor
 					if parent.TaskGroup != "" {
@@ -188,7 +197,7 @@ func (sm *StateManager) GetAgents() []AgentState {
 						a.TaskGroup = groupName
 						// Also tag the parent in the result slice so it ends up in the same group
 						for i := range result {
-							if result[i].SessionID == sid {
+							if result[i].PokegentID == pgid {
 								result[i].TaskGroup = groupName
 								break
 							}
@@ -204,11 +213,11 @@ func (sm *StateManager) GetAgents() []AgentState {
 	// Sort by user-defined order. Agents in agentOrder come first (in that order),
 	// unordered agents go at the end sorted by creation time.
 	orderIndex := make(map[string]int, len(sm.agentOrder))
-	for i, sid := range sm.agentOrder {
-		orderIndex[sid] = i + 1 // 1-based so 0 means "not in list"
+	for i, pgid := range sm.agentOrder {
+		orderIndex[pgid] = i + 1 // 1-based so 0 means "not in list"
 	}
 	sort.SliceStable(result, func(i, j int) bool {
-		oi, oj := orderIndex[result[i].SessionID], orderIndex[result[j].SessionID]
+		oi, oj := orderIndex[result[i].PokegentID], orderIndex[result[j].PokegentID]
 		if oi != 0 && oj != 0 {
 			return oi < oj
 		}
@@ -235,22 +244,150 @@ func (sm *StateManager) GetAgents() []AgentState {
 	return result
 }
 
-// GetAgent returns a single agent by session ID, CCD session ID, or pokegent ID.
-func (sm *StateManager) GetAgent(sessionID string) *AgentState {
+var hiddenCardPreviewDetails = map[string]bool{
+	"":                  true,
+	"finished":          true,
+	"session started":   true,
+	"processing prompt": true,
+}
+
+func buildCardPreview(a AgentState) CardPreview {
+	state := a.State
+	if state == "" {
+		state = "idle"
+	}
+	preview := CardPreview{
+		State:     state,
+		Prompt:    a.UserPrompt,
+		UpdatedAt: a.LastUpdated,
+	}
+
+	trimmedDetail := strings.TrimSpace(a.Detail)
+	safeDetail := ""
+	if !hiddenCardPreviewDetails[trimmedDetail] {
+		safeDetail = trimmedDetail
+	}
+
+	switch state {
+	case "busy", "reconfiguring":
+		if trimmedDetail == "compacting" {
+			preview.Phase = "thinking"
+			preview.Text = "Compacting conversation history..."
+			return preview
+		}
+		feed := a.ActivityFeed
+		if len(feed) == 0 && len(a.RecentActions) > 0 {
+			feed = feedFromRecentActions(a.RecentActions, a.LastUpdated)
+		}
+		if len(feed) > 0 {
+			preview.Feed = feed
+			last := feed[len(feed)-1]
+			if last.Type == "tool" {
+				preview.Phase = "tool"
+			} else {
+				preview.Phase = "streaming"
+			}
+			return preview
+		}
+		if strings.TrimSpace(a.LastTrace) != "" {
+			preview.Phase = "streaming"
+			preview.Text = a.LastTrace
+			return preview
+		}
+		if safeDetail != "" {
+			preview.Phase = "thinking"
+			preview.Text = safeDetail
+			return preview
+		}
+		// Chat backends keep live assistant deltas in last_summary while busy.
+		// This intentionally comes after active detail/trace so a new turn with
+		// stale committed summary does not show the previous prompt's response.
+		if a.Interface == "chat" && strings.TrimSpace(a.LastSummary) != "" {
+			preview.Phase = "streaming"
+			preview.Text = a.LastSummary
+			return preview
+		}
+		if strings.TrimSpace(a.LastSummary) != "" {
+			preview.Phase = "streaming"
+			preview.Text = a.LastSummary
+			return preview
+		}
+		preview.Phase = "thinking"
+		preview.Text = "Working..."
+		return preview
+	case "needs_input", "waiting":
+		preview.Phase = "waiting"
+		preview.Text = firstNonEmpty(safeDetail, a.LastSummary, a.LastTrace, "Needs input")
+		return preview
+	case "error":
+		preview.Phase = "error"
+		preview.Text = firstNonEmpty(safeDetail, a.LastSummary, a.LastTrace, "API error - reprompt to retry")
+		return preview
+	}
+
+	if strings.TrimSpace(a.LastSummary) != "" {
+		preview.Phase = "complete"
+		preview.Text = a.LastSummary
+		return preview
+	}
+	if strings.TrimSpace(a.LastTrace) != "" {
+		preview.Phase = "complete"
+		preview.Text = a.LastTrace
+		return preview
+	}
+	if safeDetail != "" {
+		preview.Phase = "complete"
+		preview.Text = safeDetail
+		return preview
+	}
+	preview.Phase = "empty"
+	preview.Text = "No output yet"
+	return preview
+}
+
+func feedFromRecentActions(actions []string, updatedAt string) []ActivityItem {
+	if len(actions) == 0 {
+		return nil
+	}
+	timeLabel := ""
+	if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+		timeLabel = t.Local().Format("15:04:05")
+	}
+	feed := make([]ActivityItem, 0, len(actions))
+	for _, action := range actions {
+		text := strings.TrimSpace(action)
+		if text == "" {
+			continue
+		}
+		feed = append(feed, ActivityItem{Time: timeLabel, Type: "tool", Text: text})
+	}
+	return feed
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// GetAgent returns a single agent by pokegent_id or session ID.
+func (sm *StateManager) GetAgent(id string) *AgentState {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	if a, ok := sm.agents[sessionID]; ok {
+	// Direct lookup by pokegent_id (primary key)
+	if a, ok := sm.agents[id]; ok {
 		cp := *a
+		cp.CardPreview = buildCardPreview(cp)
 		return &cp
 	}
-	// Also check by CCD session ID or pokegent_id
+	// Fallback: scan for matching SessionID
 	for _, a := range sm.agents {
-		if a.CCDSessionID != "" && a.CCDSessionID == sessionID {
+		if a.SessionID != "" && a.SessionID == id {
 			cp := *a
-			return &cp
-		}
-		if a.PokegentID != "" && a.PokegentID == sessionID {
-			cp := *a
+			cp.CardPreview = buildCardPreview(cp)
 			return &cp
 		}
 	}
@@ -258,20 +395,21 @@ func (sm *StateManager) GetAgent(sessionID string) *AgentState {
 }
 
 // RenameAgent updates the display name in the running file, name overrides, and in-memory state.
-func (sm *StateManager) RenameAgent(sessionID, newName string) {
+// pokegentID is the primary map key.
+func (sm *StateManager) RenameAgent(pokegentID, newName string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// Update in-memory
-	if a, ok := sm.agents[sessionID]; ok {
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.DisplayName = newName
 	}
 
 	// Update running file on disk via store
-	if rs, ok := sm.running[sessionID]; ok {
+	if rs, ok := sm.running[pokegentID]; ok {
 		rs.DisplayName = newName
-		sm.running[sessionID] = rs
-		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+		sm.running[pokegentID] = rs
+		sm.store.Running.Update(pokegentID, func(r *RunningSession) {
 			r.DisplayName = newName
 		})
 	}
@@ -279,17 +417,9 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 	// JSONL custom-title is written by server.go persistCustomTitle() which
 	// also updates the search index. Don't duplicate the write here.
 
-	// Store name override under pokegent_id (stable, survives fork/resume)
-	// Also store under session_id for backward compat lookups
-	if rs, ok := sm.running[sessionID]; ok {
-		pgID := rs.PokegentID
-		if pgID == "" {
-			pgID = rs.CCDSessionID
-		}
-		if pgID != "" {
-			sm.nameOverrides[pgID] = newName
-		}
-		// Also persist to identity store
+	// Store name override and persist to identity store
+	sm.nameOverrides[pokegentID] = newName
+	if rs, ok := sm.running[pokegentID]; ok {
 		if pgid := rs.GetPokegentID(); pgid != "" && sm.store.Agents != nil {
 			sm.store.Agents.Update(pgid, func(id *AgentIdentity) {
 				id.DisplayName = newName
@@ -299,20 +429,19 @@ func (sm *StateManager) RenameAgent(sessionID, newName string) {
 			}
 		}
 	}
-	sm.nameOverrides[sessionID] = newName
 	sm.saveNameOverrides()
 }
 
 // SetAgentRole updates the role field on a running agent and recalculates the profile composite key.
-func (sm *StateManager) SetAgentRole(sessionID, role string) {
+func (sm *StateManager) SetAgentRole(pokegentID, role string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if rs, ok := sm.running[sessionID]; ok {
+	if rs, ok := sm.running[pokegentID]; ok {
 		rs.Role = role
 		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
-		sm.running[sessionID] = rs
-		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+		sm.running[pokegentID] = rs
+		sm.store.Running.Update(pokegentID, func(r *RunningSession) {
 			r.Role = role
 			r.Profile = rs.Profile
 		})
@@ -330,15 +459,15 @@ func (sm *StateManager) SetAgentRole(sessionID, role string) {
 }
 
 // SetAgentProject updates the project field on a running agent and recalculates the profile composite key.
-func (sm *StateManager) SetAgentProject(sessionID, project string) {
+func (sm *StateManager) SetAgentProject(pokegentID, project string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if rs, ok := sm.running[sessionID]; ok {
+	if rs, ok := sm.running[pokegentID]; ok {
 		rs.Project = project
 		rs.Profile = sm.composeProfileKey(rs.Role, rs.Project, rs.Profile)
-		sm.running[sessionID] = rs
-		sm.store.Running.Update(sessionID, func(r *RunningSession) {
+		sm.running[pokegentID] = rs
+		sm.store.Running.Update(pokegentID, func(r *RunningSession) {
 			r.Project = project
 			r.Profile = rs.Profile
 		})
@@ -357,17 +486,17 @@ func (sm *StateManager) SetAgentProject(sessionID, project string) {
 
 // SetAgentTaskGroup updates the task_group field on a running agent.
 // Task group is organizational metadata — no relaunch needed.
-func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
+func (sm *StateManager) SetAgentTaskGroup(pokegentID, taskGroup string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	rs, ok := sm.running[sessionID]
+	rs, ok := sm.running[pokegentID]
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return fmt.Errorf("agent not found: %s", pokegentID)
 	}
 	rs.TaskGroup = taskGroup
-	sm.running[sessionID] = rs
-	sm.store.Running.Update(sessionID, func(r *RunningSession) {
+	sm.running[pokegentID] = rs
+	sm.store.Running.Update(pokegentID, func(r *RunningSession) {
 		r.TaskGroup = taskGroup
 	})
 	// Also persist to identity store
@@ -384,17 +513,17 @@ func (sm *StateManager) SetAgentTaskGroup(sessionID, taskGroup string) error {
 }
 
 // SetAgentSprite updates the sprite field on a running agent (single source of truth).
-func (sm *StateManager) SetAgentSprite(sessionID, sprite string) error {
+func (sm *StateManager) SetAgentSprite(pokegentID, sprite string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	rs, ok := sm.running[sessionID]
+	rs, ok := sm.running[pokegentID]
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return fmt.Errorf("agent not found: %s", pokegentID)
 	}
 	rs.Sprite = sprite
-	sm.running[sessionID] = rs
-	sm.store.Running.Update(sessionID, func(r *RunningSession) {
+	sm.running[pokegentID] = rs
+	sm.store.Running.Update(pokegentID, func(r *RunningSession) {
 		r.Sprite = sprite
 	})
 	// Also persist to identity store
@@ -410,9 +539,9 @@ func (sm *StateManager) SetAgentSprite(sessionID, sprite string) error {
 	return nil
 }
 
-// getPokegentID returns the pokegent_id for a session, or empty string if not found.
-func (sm *StateManager) getPokegentID(sessionID string) string {
-	if rs, ok := sm.running[sessionID]; ok {
+// getPokegentID returns the pokegent_id for a running session keyed by pokegentID.
+func (sm *StateManager) getPokegentID(pokegentID string) string {
+	if rs, ok := sm.running[pokegentID]; ok {
 		return rs.GetPokegentID()
 	}
 	return ""
@@ -486,21 +615,21 @@ func (sm *StateManager) ComposeProfileKey(role, project, fallback string) string
 }
 
 // SetPendingRelaunch stores a command to execute when the agent becomes idle.
-func (sm *StateManager) SetPendingRelaunch(sessionID, cmd string) {
+func (sm *StateManager) SetPendingRelaunch(pokegentID, cmd string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.pendingRelaunches == nil {
 		sm.pendingRelaunches = make(map[string]string)
 	}
-	sm.pendingRelaunches[sessionID] = cmd
+	sm.pendingRelaunches[pokegentID] = cmd
 }
 
-// GetPendingRelaunch returns and clears the pending relaunch command for a session.
-func (sm *StateManager) GetPendingRelaunch(sessionID string) string {
+// GetPendingRelaunch returns and clears the pending relaunch command for an agent.
+func (sm *StateManager) GetPendingRelaunch(pokegentID string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	cmd := sm.pendingRelaunches[sessionID]
-	delete(sm.pendingRelaunches, sessionID)
+	cmd := sm.pendingRelaunches[pokegentID]
+	delete(sm.pendingRelaunches, pokegentID)
 	return cmd
 }
 
@@ -511,22 +640,25 @@ func (sm *StateManager) TransitionDoneToIdle() bool {
 	return false
 }
 
-// TransitionState forces a state/detail change for a session (used by poller for interrupt detection).
-func (sm *StateManager) TransitionState(sessionID, state, detail string) {
+// TransitionState forces a state/detail change for an agent (used by poller for interrupt detection).
+func (sm *StateManager) TransitionState(pokegentID, state, detail string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	if a, ok := sm.agents[sessionID]; ok {
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.State = state
 		a.Detail = detail
 		a.LastUpdated = now
 	}
-	if sf, ok := sm.statuses[sessionID]; ok {
+	if sf, ok := sm.statuses[pokegentID]; ok {
 		sf.State = state
 		sf.Detail = detail
 		sf.Timestamp = now
-		sm.statuses[sessionID] = sf
+		if sf.FileKey == "" {
+			sf.FileKey = pokegentID
+		}
+		sm.statuses[pokegentID] = sf
 		sm.store.Status.Upsert(sf)
 	}
 }
@@ -538,11 +670,11 @@ func (sm *StateManager) CleanStale() bool {
 
 	changed := false
 	runningDir := filepath.Join(sm.dataDir, "running")
-	for sid, rs := range sm.running {
+	for pgid, rs := range sm.running {
 		alive := false
 
 		// Check 0: Grace period — don't kill files less than 30s old (hook hasn't patched yet)
-		pattern := filepath.Join(runningDir, "*-"+sid+".json")
+		pattern := filepath.Join(runningDir, "*-"+pgid+".json")
 		matches, _ := filepath.Glob(pattern)
 		if len(matches) > 0 {
 			if info, err := os.Stat(matches[0]); err == nil {
@@ -564,18 +696,38 @@ func (sm *StateManager) CleanStale() bool {
 
 		// Check 3: Claude session registry (authoritative fallback)
 		if !alive {
-			alive = sm.isClaudeSessionAlive(sid)
+			alive = sm.isClaudeSessionAlive(pgid)
 		}
 
 		if !alive {
-			pattern := filepath.Join(runningDir, "*-"+sid+".json")
+			if rs.Interface == "chat" {
+				// Chat-backed agents can be recovered by respawning their ACP backend.
+				// Keep the running file so the card remains visible and the UI can offer
+				// a first-class "Restart backend" action instead of disappearing.
+				now := time.Now().UTC().Format(time.RFC3339)
+				sf := sm.statuses[pgid]
+				if sf.State != "error" || !strings.Contains(sf.Detail, "backend process exited") {
+					sf.FileKey = pgid
+					sf.SessionID = rs.SessionID
+					sf.State = "error"
+					sf.Detail = "backend process exited — restart backend to recover"
+					sf.CWD = rs.CWD
+					sf.Timestamp = now
+					sf.BusySince = ""
+					sm.statuses[pgid] = sf
+					_ = sm.store.Status.Upsert(sf)
+					changed = true
+				}
+				continue
+			}
+			pattern := filepath.Join(runningDir, "*-"+pgid+".json")
 			matches, _ := filepath.Glob(pattern)
 			for _, f := range matches {
 				os.Remove(f)
 			}
 			// Cascade: remove completed ephemeral children
-			sm.cleanupEphemeralsByParentLocked(sid)
-			delete(sm.running, sid)
+			sm.cleanupEphemeralsByParentLocked(pgid)
+			delete(sm.running, pgid)
 			changed = true
 		}
 	}
@@ -587,8 +739,8 @@ func (sm *StateManager) CleanStale() bool {
 
 // isClaudeSessionAlive checks if there's a live Claude process on the TTY
 // associated with this running session.
-func (sm *StateManager) isClaudeSessionAlive(sessionID string) bool {
-	rs, ok := sm.running[sessionID]
+func (sm *StateManager) isClaudeSessionAlive(pokegentID string) bool {
+	rs, ok := sm.running[pokegentID]
 	if !ok || rs.TTY == "" {
 		return false
 	}
@@ -661,12 +813,12 @@ func (sm *StateManager) ReconcileRunningFiles() bool {
 		}
 	}
 
-	for sid, rs := range sm.running {
+	for pgid, rs := range sm.running {
 		if rs.ClaudePID > 0 {
 			continue
 		}
 		if pid, ok := ttyToPID[rs.TTY]; ok {
-			if err := sm.store.Running.Update(sid, func(r *RunningSession) {
+			if err := sm.store.Running.Update(pgid, func(r *RunningSession) {
 				r.ClaudePID = pid
 			}); err == nil {
 				changed = true
@@ -681,52 +833,93 @@ func (sm *StateManager) ReconcileRunningFiles() bool {
 	return changed
 }
 
-// UpdateUserPrompt sets the user prompt for a session.
-func (sm *StateManager) UpdateUserPrompt(sessionID, prompt string) {
+// UpdateUserPrompt sets the user prompt for an agent.
+func (sm *StateManager) UpdateUserPrompt(pokegentID, prompt string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sf, ok := sm.statuses[sessionID]; ok {
+	if sf, ok := sm.statuses[pokegentID]; ok {
 		sf.UserPrompt = prompt
-		sm.statuses[sessionID] = sf
+		sm.statuses[pokegentID] = sf
 	}
-	if a, ok := sm.agents[sessionID]; ok {
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.UserPrompt = prompt
 	}
 }
 
-// UpdateContext updates token usage for a session.
-func (sm *StateManager) UpdateContext(sessionID string, tokens, window int) {
+// BeginPrompt resets current-turn display state as soon as the dashboard
+// accepts a prompt. Hook/ACP events will fill in the live output shortly after,
+// but clearing here prevents stale prior-turn commands from lingering in card
+// previews during that handoff window.
+func (sm *StateManager) BeginPrompt(pokegentID, prompt string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.contexts[sessionID] = ContextUsage{Tokens: tokens, Window: window}
-	if a, ok := sm.agents[sessionID]; ok {
+
+	now := time.Now()
+	busySince := now.UTC().Format(time.RFC3339)
+	truncatedPrompt := truncate(prompt, 200)
+
+	sf, ok := sm.statuses[pokegentID]
+	if ok {
+		sf.State = "busy"
+		sf.Detail = "processing prompt"
+		sf.BusySince = busySince
+		sf.Timestamp = busySince
+		sf.LastSummary = ""
+		sf.LastTrace = ""
+		sf.RecentActions = nil
+		sf.UserPrompt = truncatedPrompt
+		sm.statuses[pokegentID] = sf
+	}
+
+	sm.activityFeeds[pokegentID] = nil
+	sm.feedClearedAt[pokegentID] = now
+
+	if a, ok := sm.agents[pokegentID]; ok {
+		a.State = "busy"
+		a.Detail = "processing prompt"
+		a.BusySince = busySince
+		a.LastUpdated = busySince
+		a.LastSummary = ""
+		a.LastTrace = ""
+		a.RecentActions = nil
+		a.ActivityFeed = nil
+		a.UserPrompt = truncatedPrompt
+	}
+}
+
+// UpdateContext updates token usage for an agent.
+func (sm *StateManager) UpdateContext(pokegentID string, tokens, window int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.contexts[pokegentID] = ContextUsage{Tokens: tokens, Window: window}
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.ContextTokens = tokens
 		a.ContextWindow = window
 	}
 }
 
-// UpdateSummary updates the last summary for a session.
-func (sm *StateManager) UpdateSummary(sessionID, summary string) {
+// UpdateSummary updates the last summary for an agent.
+func (sm *StateManager) UpdateSummary(pokegentID, summary string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sf, ok := sm.statuses[sessionID]; ok {
+	if sf, ok := sm.statuses[pokegentID]; ok {
 		sf.LastSummary = summary
-		sm.statuses[sessionID] = sf
+		sm.statuses[pokegentID] = sf
 	}
-	if a, ok := sm.agents[sessionID]; ok {
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.LastSummary = summary
 	}
 }
 
-// UpdateTrace updates just the trace for a session.
-func (sm *StateManager) UpdateTrace(sessionID, trace string) {
+// UpdateTrace updates just the trace for an agent.
+func (sm *StateManager) UpdateTrace(pokegentID, trace string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sf, ok := sm.statuses[sessionID]; ok {
+	if sf, ok := sm.statuses[pokegentID]; ok {
 		sf.LastTrace = trace
-		sm.statuses[sessionID] = sf
+		sm.statuses[pokegentID] = sf
 	}
-	if a, ok := sm.agents[sessionID]; ok {
+	if a, ok := sm.agents[pokegentID]; ok {
 		a.LastTrace = trace
 	}
 }
@@ -734,13 +927,13 @@ func (sm *StateManager) UpdateTrace(sessionID, trace string) {
 // UpdateActivityFeed merges transcript-extracted text/thinking items into the
 // hook-built activity feed. Hooks provide real-time tool calls; the poller
 // provides text/thinking blocks that appear between tools in the transcript.
-func (sm *StateManager) UpdateActivityFeed(sessionID string, transcriptFeed []ActivityItem) {
+func (sm *StateManager) UpdateActivityFeed(pokegentID string, transcriptFeed []ActivityItem) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// Filter out transcript entries that predate the last feed clear (UserPromptSubmit).
 	// This prevents stale entries from the previous turn from re-appearing.
-	if clearedAt, ok := sm.feedClearedAt[sessionID]; ok {
+	if clearedAt, ok := sm.feedClearedAt[pokegentID]; ok {
 		filtered := make([]ActivityItem, 0, len(transcriptFeed))
 		for _, item := range transcriptFeed {
 			if item.Time == "" {
@@ -760,15 +953,15 @@ func (sm *StateManager) UpdateActivityFeed(sessionID string, transcriptFeed []Ac
 		transcriptFeed = filtered
 	}
 
-	existing := sm.activityFeeds[sessionID]
+	existing := sm.activityFeeds[pokegentID]
 
 	// If no existing feed, use the transcript feed directly
 	if len(existing) == 0 {
 		if len(transcriptFeed) == 0 {
 			return
 		}
-		sm.activityFeeds[sessionID] = transcriptFeed
-		if a, ok := sm.agents[sessionID]; ok {
+		sm.activityFeeds[pokegentID] = transcriptFeed
+		if a, ok := sm.agents[pokegentID]; ok {
 			a.ActivityFeed = transcriptFeed
 		}
 		return
@@ -800,33 +993,157 @@ func (sm *StateManager) UpdateActivityFeed(sessionID string, transcriptFeed []Ac
 		if len(existing) > 20 {
 			existing = existing[len(existing)-20:]
 		}
-		sm.activityFeeds[sessionID] = existing
-		if a, ok := sm.agents[sessionID]; ok {
+		sm.activityFeeds[pokegentID] = existing
+		if a, ok := sm.agents[pokegentID]; ok {
 			a.ActivityFeed = existing
 		}
 	}
 }
 
-// FindTranscriptPath locates the transcript JSONL for a session. Thread-safe.
-func (sm *StateManager) FindTranscriptPath(sessionID string) string {
-	return sm.findTranscriptPathLocked(sessionID)
+// FindTranscriptPath locates the transcript JSONL for an agent. Thread-safe.
+// Searches across all backends (Claude, Codex, etc.). Results are cached by pokegent_id.
+// Internally uses the Claude session_id for file discovery.
+func (sm *StateManager) FindTranscriptPath(pokegentID string) string {
+	sm.mu.RLock()
+	explicit := sm.explicitRunningTranscriptPathLocked(pokegentID)
+	cached, ok := sm.transcriptPaths[pokegentID]
+	primaryID, rs, hasRunning := sm.runningSessionForIDLocked(pokegentID)
+	sm.mu.RUnlock()
+	if explicit != "" {
+		if cached != explicit {
+			sm.mu.Lock()
+			sm.transcriptPaths[primaryID] = explicit
+			sm.mu.Unlock()
+		}
+		return explicit
+	}
+	if ok && cached != "" {
+		staleMigrationSource := hasRunning && rs.TranscriptPath == "" && rs.SourceTranscriptPath != "" && samePath(cached, rs.SourceTranscriptPath)
+		if !staleMigrationSource {
+			if _, err := os.Stat(cached); err == nil {
+				return cached
+			}
+		}
+		// Cached path is stale — evict and re-discover. This is especially
+		// important after Claude→Codex migration: the cache can still point at the
+		// immutable source_transcript_path, while the fresh Codex transcript appears
+		// later (often after the first prompt).
+		sm.mu.Lock()
+		delete(sm.transcriptPaths, pokegentID)
+		if primaryID != pokegentID {
+			delete(sm.transcriptPaths, primaryID)
+		}
+		sm.mu.Unlock()
+	}
+	path := sm.findTranscriptPathLocked(pokegentID)
+	if path != "" {
+		shouldPersist := false
+		sm.mu.Lock()
+		sm.transcriptPaths[primaryID] = path
+		if hasRunning && rs.TranscriptPath == "" && !samePath(path, rs.SourceTranscriptPath) {
+			rs.TranscriptPath = path
+			sm.running[primaryID] = rs
+			shouldPersist = true
+		}
+		sm.mu.Unlock()
+		if shouldPersist && sm.store != nil && sm.store.Running != nil {
+			_ = sm.store.Running.Update(primaryID, func(r *RunningSession) {
+				r.TranscriptPath = path
+			})
+		}
+	}
+	return path
 }
 
-func (sm *StateManager) findTranscriptPathLocked(sessionID string) string {
-	entries, err := os.ReadDir(sm.claudeProjectDir)
-	if err != nil {
-		return ""
+func (sm *StateManager) runningSessionForIDLocked(id string) (string, RunningSession, bool) {
+	if rs, ok := sm.running[id]; ok {
+		return id, rs, true
 	}
-	for _, d := range entries {
-		if !d.IsDir() {
-			continue
+	for pgid, rs := range sm.running {
+		if rs.PokegentID == id || rs.SessionID == id {
+			return pgid, rs, true
 		}
-		path := filepath.Join(sm.claudeProjectDir, d.Name(), sessionID+".jsonl")
-		if _, err := os.Stat(path); err == nil {
-			return path
+	}
+	return id, RunningSession{}, false
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func (sm *StateManager) explicitRunningTranscriptPathLocked(id string) string {
+	if rs, ok := sm.running[id]; ok && rs.TranscriptPath != "" {
+		if _, err := os.Stat(rs.TranscriptPath); err == nil {
+			return rs.TranscriptPath
+		}
+	}
+	if rs, ok := sm.running[id]; ok && rs.LastGoodTranscriptPath != "" {
+		if _, err := os.Stat(rs.LastGoodTranscriptPath); err == nil {
+			return rs.LastGoodTranscriptPath
+		}
+	}
+	for _, rs := range sm.running {
+		if rs.PokegentID == id || rs.SessionID == id {
+			if rs.TranscriptPath != "" {
+				if _, err := os.Stat(rs.TranscriptPath); err == nil {
+					return rs.TranscriptPath
+				}
+			}
+			if rs.LastGoodTranscriptPath != "" {
+				if _, err := os.Stat(rs.LastGoodTranscriptPath); err == nil {
+					return rs.LastGoodTranscriptPath
+				}
+			}
+			return ""
 		}
 	}
 	return ""
+}
+
+func (sm *StateManager) findTranscriptPathLocked(pokegentID string) string {
+	// Check if the running session has an explicit transcript path (non-Claude
+	// backends). The caller may pass either the stable pokegent_id or the
+	// backend's current session_id, so resolve both forms before falling back to
+	// filesystem discovery.
+	if rs, ok := sm.running[pokegentID]; ok && rs.TranscriptPath != "" {
+		if _, err := os.Stat(rs.TranscriptPath); err == nil {
+			return rs.TranscriptPath
+		}
+	}
+	for pgid, rs := range sm.running {
+		if pgid == pokegentID || rs.PokegentID == pokegentID || rs.SessionID == pokegentID {
+			if rs.TranscriptPath != "" {
+				if _, err := os.Stat(rs.TranscriptPath); err == nil {
+					return rs.TranscriptPath
+				}
+			}
+			if rs.LastGoodTranscriptPath != "" {
+				if _, err := os.Stat(rs.LastGoodTranscriptPath); err == nil {
+					return rs.LastGoodTranscriptPath
+				}
+			}
+			if pgid != pokegentID {
+				pokegentID = pgid
+			}
+			break
+		}
+	}
+	// Use the Claude session_id for file lookup (transcripts are named by session_id)
+	sessionID := pokegentID
+	if rs, ok := sm.running[pokegentID]; ok && rs.SessionID != "" {
+		sessionID = rs.SessionID
+	}
+	return storelib.FindTranscriptPathWithDataDir(sessionID, sm.claudeProjectDir, sm.dataDir)
+}
+
+// InvalidateTranscriptPath evicts a cached transcript path.
+func (sm *StateManager) InvalidateTranscriptPath(pokegentID string) {
+	sm.mu.Lock()
+	delete(sm.transcriptPaths, pokegentID)
+	sm.mu.Unlock()
 }
 
 // GetProfiles returns all loaded profiles.
@@ -841,12 +1158,12 @@ func (sm *StateManager) GetNameOverrides() map[string]string {
 	return m
 }
 
-// GetSessionIDMap returns a copy of the CCD→Claude session ID map.
-func (sm *StateManager) GetSessionIDMap() map[string]string {
+// GetSessionToPokegent returns a copy of the Claude session_id → pokegent_id reverse lookup map.
+func (sm *StateManager) GetSessionToPokegent() map[string]string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	m := make(map[string]string, len(sm.sessionIDMap))
-	for k, v := range sm.sessionIDMap {
+	m := make(map[string]string, len(sm.sessionToPokegent))
+	for k, v := range sm.sessionToPokegent {
 		m[k] = v
 	}
 	return m
@@ -889,20 +1206,18 @@ func (sm *StateManager) ReloadStatus(path string) {
 	sf, err := sm.store.Status.Get(base)
 	if err != nil || sf == nil {
 		// File was deleted or unreadable — remove from statuses.
-		// base may be a pokegent_id (new) or session_id (legacy), so try both.
+		// base is the pokegent_id (filename). Direct lookup.
 		if _, ok := sm.statuses[base]; ok {
 			delete(sm.statuses, base)
 		} else {
-			// base is a pokegent_id but map is keyed by session_id — scan to find it
-			for sid, existingSF := range sm.statuses {
-				if existingSF.SessionID == base {
-					delete(sm.statuses, sid)
-					break
-				}
+			// Fallback: base might be a session_id used by legacy hooks — scan reverse map
+			if pgid, ok := sm.sessionToPokegent[base]; ok {
+				delete(sm.statuses, pgid)
 			}
 		}
 	} else {
-		sm.statuses[sf.SessionID] = *sf
+		// Key by pokegent_id (filename base), not sf.SessionID (which is the ACP/Claude session_id)
+		sm.statuses[base] = *sf
 	}
 	sm.rebuildAgents()
 }
@@ -916,8 +1231,23 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Resolve hook's session_id to pokegent_id using reverse lookup
+	pgid := sm.sessionToPokegent[evt.SessionID]
+	if pgid == "" {
+		// Scan running sessions for matching Claude session_id
+		for pg, rs := range sm.running {
+			if rs.SessionID == evt.SessionID {
+				pgid = pg
+				break
+			}
+		}
+	}
+	if pgid == "" {
+		pgid = evt.SessionID // temporary key for truly unknown sessions
+	}
+
 	// Update status from event (mirrors status-update.sh logic)
-	sf, exists := sm.statuses[evt.SessionID]
+	sf, exists := sm.statuses[pgid]
 	if !exists {
 		sf = StatusFile{SessionID: evt.SessionID}
 	}
@@ -1010,22 +1340,22 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 		sf.Detail = "session started"
 	case "SessionEnd":
 		// Remove from statuses — agent disappears from dashboard
-		delete(sm.statuses, evt.SessionID)
+		delete(sm.statuses, pgid)
 		// Cascade: remove completed ephemeral children so they don't linger
-		sm.cleanupEphemeralsByParentLocked(evt.SessionID)
+		sm.cleanupEphemeralsByParentLocked(pgid)
 		sm.rebuildAgents()
 		return nil
 	default:
 		return nil
 	}
 
-	sm.statuses[evt.SessionID] = sf
+	sm.statuses[pgid] = sf
 
 	// Update context from transcript if available
 	if evt.TranscriptPath != "" {
 		ctx := extractContextUsage(evt.TranscriptPath)
 		if ctx.Tokens > 0 {
-			sm.contexts[evt.SessionID] = ctx
+			sm.contexts[pgid] = ctx
 		}
 	}
 
@@ -1034,11 +1364,11 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 	// Append tool calls to activity feed for immediate display
 	{
 		ts := time.Now().Local().Format("15:04:05")
-		feed := sm.activityFeeds[evt.SessionID]
+		feed := sm.activityFeeds[pgid]
 		switch evt.HookEventName {
 		case "UserPromptSubmit":
 			feed = nil
-			sm.feedClearedAt[evt.SessionID] = time.Now()
+			sm.feedClearedAt[pgid] = time.Now()
 		case "PreToolUse":
 			toolInput := ""
 			if m, ok := evt.ToolInput.(map[string]any); ok {
@@ -1059,13 +1389,13 @@ func (sm *StateManager) UpdateFromEvent(evt HookEvent) *AgentState {
 				feed = feed[len(feed)-20:]
 			}
 		}
-		sm.activityFeeds[evt.SessionID] = feed
-		if a, ok := sm.agents[evt.SessionID]; ok {
+		sm.activityFeeds[pgid] = feed
+		if a, ok := sm.agents[pgid]; ok {
 			a.ActivityFeed = feed
 		}
 	}
 
-	if a, ok := sm.agents[evt.SessionID]; ok {
+	if a, ok := sm.agents[pgid]; ok {
 		cp := *a
 		return &cp
 	}
@@ -1093,8 +1423,12 @@ func (sm *StateManager) loadRunning() error {
 	}
 	sm.running = make(map[string]RunningSession, len(sessions))
 	for _, rs := range sessions {
-		if rs.SessionID != "" {
-			sm.running[rs.SessionID] = rs
+		pgid := rs.PokegentID
+		if pgid == "" {
+			pgid = rs.SessionID // last resort fallback
+		}
+		if pgid != "" {
+			sm.running[pgid] = rs
 		}
 	}
 	return nil
@@ -1107,9 +1441,15 @@ func (sm *StateManager) loadStatuses() error {
 	}
 	sm.statuses = make(map[string]StatusFile, len(statuses))
 	for _, sf := range statuses {
-		if sf.SessionID != "" {
-			sm.statuses[sf.SessionID] = sf
+		if sf.SessionID == "" {
+			continue
 		}
+		// Status files are named {pokegent_id}.json — use the filename as key.
+		pgid := sf.FileKey
+		if pgid == "" {
+			pgid = sf.SessionID
+		}
+		sm.statuses[pgid] = sf
 	}
 	return nil
 }
@@ -1148,14 +1488,6 @@ func (sm *StateManager) loadNameOverrides() {
 
 func (sm *StateManager) saveNameOverrides() {
 	sm.store.Metadata.SaveJSON("name-overrides.json", sm.nameOverrides)
-}
-
-func (sm *StateManager) loadSessionIDMap() {
-	sm.store.Metadata.LoadJSON("session-id-map.json", &sm.sessionIDMap)
-}
-
-func (sm *StateManager) saveSessionIDMap() {
-	sm.store.Metadata.SaveJSON("session-id-map.json", sm.sessionIDMap)
 }
 
 func (sm *StateManager) loadAgentOrder() {
@@ -1259,30 +1591,6 @@ func (sm *StateManager) cleanupEphemeralsByParentLocked(parentSessionID string) 
 	return removed
 }
 
-// reconcileNameOverrides uses the session ID map to fix name-override entries
-// keyed by CCD session IDs (which have no JSONL transcript). Maps them to
-// the Claude conversation session ID so the search index can find them.
-func (sm *StateManager) reconcileNameOverrides() {
-	changed := false
-	for ccdSID, name := range sm.nameOverrides {
-		if sm.findTranscriptPathLocked(ccdSID) != "" {
-			continue // has transcript, all good
-		}
-		// Check if session ID map has a mapping for this CCD UUID
-		if claudeSID, ok := sm.sessionIDMap[ccdSID]; ok {
-			if sm.findTranscriptPathLocked(claudeSID) != "" {
-				sm.nameOverrides[claudeSID] = name
-				delete(sm.nameOverrides, ccdSID)
-				changed = true
-				log.Printf("state: reconciled name override %s → %s (%s)", ccdSID[:8], claudeSID[:8], name)
-			}
-		}
-	}
-	if changed {
-		sm.saveNameOverrides()
-	}
-}
-
 func (sm *StateManager) rebuildAgents() {
 	now := time.Now()
 	agents := make(map[string]*AgentState)
@@ -1296,44 +1604,26 @@ func (sm *StateManager) rebuildAgents() {
 		}
 	}
 
-	// Build session ID map from running files (CCD UUID / pokegent_id → Claude session ID)
-	mapChanged := false
-	for sid, rs := range sm.running {
-		if rs.CCDSessionID != "" && rs.CCDSessionID != sid {
-			if sm.sessionIDMap[rs.CCDSessionID] != sid {
-				sm.sessionIDMap[rs.CCDSessionID] = sid
-				mapChanged = true
-			}
-		}
-		// Also map pokegent_id → Claude session ID (pokegent_id may differ from ccd_session_id
-		// when inherited via --pokegent-id flag for role/project changes)
-		pgID := rs.PokegentID
-		if pgID == "" {
-			pgID = rs.CCDSessionID
-		}
-		if pgID != "" && pgID != sid && pgID != rs.CCDSessionID {
-			if sm.sessionIDMap[pgID] != sid {
-				sm.sessionIDMap[pgID] = sid
-				mapChanged = true
-			}
+	// Build reverse lookup: Claude session_id → pokegent_id
+	sm.sessionToPokegent = make(map[string]string, len(sm.running))
+	for pgid, rs := range sm.running {
+		if rs.SessionID != "" {
+			sm.sessionToPokegent[rs.SessionID] = pgid
 		}
 	}
-	if mapChanged {
-		sm.saveSessionIDMap()
+
+	// Migrate agentOrder entries from session_id to pokegent_id if needed
+	for i, entry := range sm.agentOrder {
+		if pgid, ok := sm.sessionToPokegent[entry]; ok {
+			sm.agentOrder[i] = pgid
+		}
 	}
 
-	// Start with running sessions as the base
-	for sid, rs := range sm.running {
-		// Resolve pokegent_id with fallback to ccd_session_id for old running files
-		pokegentID := rs.PokegentID
-		if pokegentID == "" {
-			pokegentID = rs.CCDSessionID
-		}
-
+	// Start with running sessions as the base (keyed by pokegent_id)
+	for pgid, rs := range sm.running {
 		a := &AgentState{
-			SessionID:      sid,
-			CCDSessionID:   rs.CCDSessionID,
-			PokegentID:     pokegentID,
+			SessionID:      rs.SessionID,
+			PokegentID:     pgid,
 			ProfileName:    rs.Profile,
 			Role:           rs.Role,
 			Project:        rs.Project,
@@ -1397,15 +1687,12 @@ func (sm *StateManager) rebuildAgents() {
 			}
 		}
 
-		// Apply persistent name override — check pokegent_id first (stable), then session_id
-		if override, ok := sm.nameOverrides[pokegentID]; ok {
-			a.DisplayName = override
-		} else if override, ok := sm.nameOverrides[sid]; ok {
+		// Apply persistent name override (keyed by pokegent_id)
+		if override, ok := sm.nameOverrides[pgid]; ok {
 			a.DisplayName = override
 		}
 
 		// Merge persistent identity (source of truth for display/config fields)
-		pgid := rs.GetPokegentID()
 		if ident, ok := sm.identities[pgid]; ok {
 			if ident.DisplayName != "" {
 				a.DisplayName = ident.DisplayName
@@ -1440,6 +1727,27 @@ func (sm *StateManager) rebuildAgents() {
 		if rs.Interface != "" {
 			a.Interface = rs.Interface
 		}
+		if rs.AgentBackend != "" {
+			a.AgentBackend = rs.AgentBackend
+			backendType := rs.AgentBackend
+			backendModelLabel := ""
+			if sm.backendStore != nil {
+				if bc, ok := sm.backendStore.Get(rs.AgentBackend); ok {
+					backendType = bc.Type
+					backendModelLabel = bc.ResolvedModelLabel()
+				}
+			}
+			nonClaude := !isClaudeBackend(rs.AgentBackend) && !isClaudeBackend(backendType)
+			if nonClaude {
+				modelLabel := a.Model
+				if modelLabel == "" || isClaudeModel(modelLabel) {
+					modelLabel = backendModelLabel
+				}
+				a.Model = displayModelForBackend(modelLabel, rs.AgentBackend, backendType)
+			} else if a.Model == "" {
+				a.Model = displayModelForBackend(backendModelLabel, rs.AgentBackend, backendType)
+			}
+		}
 
 		// Check PID liveness
 		a.IsAlive = isProcessAlive(rs.PID)
@@ -1449,7 +1757,7 @@ func (sm *StateManager) rebuildAgents() {
 			a.CreatedAt = rs.CreatedAt
 		} else {
 			runningDir := filepath.Join(sm.dataDir, "running")
-			pattern := filepath.Join(runningDir, "*-"+sid+".json")
+			pattern := filepath.Join(runningDir, "*-"+pgid+".json")
 			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
 				if info, err := os.Stat(matches[0]); err == nil {
 					a.CreatedAt = info.ModTime().UTC().Format(time.RFC3339)
@@ -1457,19 +1765,20 @@ func (sm *StateManager) rebuildAgents() {
 			}
 		}
 
-		agents[sid] = a
+		agents[pgid] = a
 	}
 
-	// Merge status data
-	for sid, sf := range sm.statuses {
-		a, exists := agents[sid]
+	// Merge status data (keyed by pokegent_id)
+	for pgid, sf := range sm.statuses {
+		a, exists := agents[pgid]
 		if !exists {
 			a = &AgentState{
-				SessionID: sid,
+				SessionID:  sf.SessionID,
+				PokegentID: pgid,
 			}
 			// Try to match profile by CWD
 			a.ProfileName, a.Emoji, a.Color = sm.matchProfileLocked(sf.CWD)
-			agents[sid] = a
+			agents[pgid] = a
 		}
 		a.State = sf.State
 		a.Detail = sf.Detail
@@ -1480,6 +1789,12 @@ func (sm *StateManager) rebuildAgents() {
 		a.UserPrompt = sf.UserPrompt
 		a.LastUpdated = sf.Timestamp
 		a.BusySince = sf.BusySince
+		if sf.ContextTokens > 0 {
+			a.ContextTokens = sf.ContextTokens
+		}
+		if sf.ContextWindow > 0 {
+			a.ContextWindow = sf.ContextWindow
+		}
 
 		// Compute duration
 		if t, err := time.Parse(time.RFC3339, sf.Timestamp); err == nil {
@@ -1487,17 +1802,22 @@ func (sm *StateManager) rebuildAgents() {
 		}
 	}
 
-	// Re-apply persisted context usage
-	for sid, ctx := range sm.contexts {
-		if a, ok := agents[sid]; ok {
-			a.ContextTokens = ctx.Tokens
-			a.ContextWindow = ctx.Window
+	// Re-apply persisted context usage (only if non-zero — don't overwrite
+	// correct values from the status file with stale zeros from transcript extraction).
+	for pgid, ctx := range sm.contexts {
+		if a, ok := agents[pgid]; ok {
+			if ctx.Tokens > 0 {
+				a.ContextTokens = ctx.Tokens
+			}
+			if ctx.Window > 0 {
+				a.ContextWindow = ctx.Window
+			}
 		}
 	}
 
 	// Re-apply persisted activity feeds
-	for sid, feed := range sm.activityFeeds {
-		if a, ok := agents[sid]; ok {
+	for pgid, feed := range sm.activityFeeds {
+		if a, ok := agents[pgid]; ok {
 			a.ActivityFeed = feed
 		}
 	}
@@ -1569,618 +1889,97 @@ type ContextUsage struct {
 }
 
 // extractContextUsage reads the last assistant message's usage from the transcript.
-// It only considers entries after the most recent compact_boundary marker, so that
-// post-compaction usage reflects the compacted context size rather than pre-compact size.
+// Auto-detects the JSONL format (Claude, Codex, etc.) and delegates to the
+// appropriate parser implementation.
 func extractContextUsage(path string) ContextUsage {
 	if path == "" {
 		return ContextUsage{}
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ContextUsage{}
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return ContextUsage{}
-	}
-	offset := info.Size() - 256*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return ContextUsage{}
-	}
-
-	// Trim to data after the last compact_boundary marker.
-	// This ensures we only measure context usage from the current compacted session,
-	// not accumulated tokens from before the most recent /compact.
-	if idx := strings.LastIndex(string(data), `"compact_boundary"`); idx >= 0 {
-		data = data[idx:]
-	}
-
-	var lastTokens int
-	var model string
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		if entry["type"] != "assistant" {
-			continue
-		}
-		msg, ok := entry["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if m, ok := msg["model"].(string); ok && m != "" {
-			model = m
-		}
-		usage, ok := msg["usage"].(map[string]any)
-		if !ok {
-			continue
-		}
-		total := 0
-		if v, ok := usage["input_tokens"].(float64); ok {
-			total += int(v)
-		}
-		if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
-			total += int(v)
-		}
-		if v, ok := usage["cache_read_input_tokens"].(float64); ok {
-			total += int(v)
-		}
-		if total > 100 { // Filter out dummy/placeholder usage (forked sessions have input_tokens=1)
-			lastTokens = total
-		}
-	}
-
-	window := 200000 // default
-	if strings.Contains(model, "opus") {
-		window = 1000000
-	} else if strings.Contains(model, "sonnet") {
-		window = 200000
-	} else if strings.Contains(model, "haiku") {
-		window = 200000
-	}
-
-	return ContextUsage{Tokens: lastTokens, Window: window}
+	parser := storelib.DetectParser(path)
+	cu := parser.ExtractContextUsage(path)
+	return ContextUsage{Tokens: cu.Tokens, Window: cu.Window}
 }
 
 // extractTraceFromTranscript reads the tail of a transcript JSONL and returns
 // the last assistant text block (the live thinking/output trace).
+// Auto-detects format (Claude, Codex, etc.).
 func extractTraceFromTranscript(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	// Read last 32KB of the file to find the last assistant message
-	info, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	offset := info.Size() - 256*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return ""
-	}
-
-	lastText := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		if entry["type"] != "assistant" {
-			continue
-		}
-		msg, ok := entry["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msg["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, block := range content {
-			m, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-			if m["type"] == "text" {
-				if t, ok := m["text"].(string); ok && t != "" {
-					lastText = t
-				}
-			}
-		}
-	}
-
-	if len(lastText) > 200 {
-		lastText = lastText[len(lastText)-200:]
-	}
-	return lastText
+	parser := storelib.DetectParser(path)
+	return parser.ExtractTrace(path)
 }
 
 // extractLastMessages reads the tail of a transcript JSONL and returns
 // the last user message (user_prompt) and last assistant text (last_summary).
-// Reuses the same tail-read + compact_boundary approach as extractTraceFromTranscript.
+// Auto-detects format (Claude, Codex, etc.).
 func extractLastMessages(path string) (userPrompt, lastSummary string) {
 	if path == "" {
 		return "", ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", ""
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return "", ""
-	}
-	// Use 1MB tail — large sessions have many tool_result "user" entries
-	// between actual text prompts, and 256KB may miss the last real prompt.
-	offset := info.Size() - 1024*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return "", ""
-	}
-
-	// Skip past compact_boundary if present
-	tail := string(data)
-	if idx := strings.LastIndex(tail, `"compact_boundary"`); idx >= 0 {
-		if nl := strings.Index(tail[idx:], "\n"); nl >= 0 {
-			tail = tail[idx+nl+1:]
-		}
-	}
-
-	// Track both the last substantive and absolute last message.
-	// Prefer substantive to skip farewell messages like "Bye!" / "Catch you later!".
-	// stripTags removes XML/HTML tags for length measurement — Claude Code wraps
-	// user input in tags like <local-command-stdout> which inflate raw length.
-	stripTags := func(s string) string {
-		out := s
-		for {
-			start := strings.Index(out, "<")
-			if start < 0 {
-				break
-			}
-			end := strings.Index(out[start:], ">")
-			if end < 0 {
-				break
-			}
-			out = out[:start] + out[start+end+1:]
-		}
-		return strings.Join(strings.Fields(out), " ")
-	}
-	var lastSubstantivePrompt, lastAnyPrompt string
-	var lastSubstantiveSummary, lastAnySummary string
-
-	for _, line := range strings.Split(tail, "\n") {
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		entryType, _ := entry["type"].(string)
-		switch entryType {
-		case "user":
-			msg, ok := entry["message"].(map[string]any)
-			if !ok {
-				continue
-			}
-			var text string
-			switch c := msg["content"].(type) {
-			case string:
-				text = c
-			case []any:
-				for _, block := range c {
-					m, ok := block.(map[string]any)
-					if !ok {
-						continue
-					}
-					blockType, _ := m["type"].(string)
-					if blockType == "text" {
-						if t, ok := m["text"].(string); ok && t != "" {
-							text = t
-						}
-					}
-				}
-			}
-			if text != "" {
-				stripped := stripTags(text)
-				trimmed := strings.TrimSpace(text)
-				// Skip system-injected messages and non-user content:
-				// - XML-wrapped messages (tool results, caveats, commands)
-				// - Context continuation summaries
-				// - Image-only messages
-				isSystem := strings.HasPrefix(trimmed, "<") ||
-					strings.HasPrefix(trimmed, "This session is being continued") ||
-					strings.HasPrefix(trimmed, "[Image:")
-				lastAnyPrompt = text
-				if !isSystem && len(stripped) > 20 {
-					lastSubstantivePrompt = text
-				}
-			}
-		case "assistant":
-			msg, ok := entry["message"].(map[string]any)
-			if !ok {
-				continue
-			}
-			content, ok := msg["content"].([]any)
-			if !ok {
-				continue
-			}
-			for _, block := range content {
-				m, ok := block.(map[string]any)
-				if !ok {
-					continue
-				}
-				if m["type"] == "text" {
-					if t, ok := m["text"].(string); ok && t != "" {
-						lastAnySummary = t
-						if len(stripTags(t)) > 30 {
-							lastSubstantiveSummary = t
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Prefer substantive messages over farewell one-liners
-	userPrompt = lastSubstantivePrompt
-	if userPrompt == "" {
-		userPrompt = lastAnyPrompt
-	}
-	lastSummary = lastSubstantiveSummary
-	if lastSummary == "" {
-		lastSummary = lastAnySummary
-	}
-
-	// Truncate to reasonable lengths
-	if len(userPrompt) > 500 {
-		userPrompt = userPrompt[:500]
-	}
-	if len(lastSummary) > 500 {
-		lastSummary = lastSummary[:500]
-	}
-	return userPrompt, lastSummary
+	parser := storelib.DetectParser(path)
+	return parser.ExtractLastMessages(path)
 }
 
 // extractActivityFeed reads the transcript and builds a unified timeline of
 // tool calls and text/thinking output from the last user turn.
+// Auto-detects format (Claude, Codex, etc.).
 func extractActivityFeed(path string) []ActivityItem {
 	if path == "" {
 		return nil
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	// Read last 64KB
-	info, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	offset := info.Size() - 256*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil
-	}
-
-	// Find the last user message, then collect all assistant content after it
-	type rawEntry struct {
-		Type    string `json:"type"`
-		Message struct {
-			Content []json.RawMessage `json:"content"`
-		} `json:"message"`
-		Timestamp string `json:"timestamp"`
-	}
-
-	var entries []rawEntry
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		var e rawEntry
-		if json.Unmarshal([]byte(line), &e) == nil {
-			entries = append(entries, e)
-		}
-	}
-
-	// Find last user message index
-	lastUserIdx := -1
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type == "user" {
-			lastUserIdx = i
-			break
-		}
-	}
-
-	var feed []ActivityItem
-	startIdx := lastUserIdx + 1
-	if startIdx < 0 {
-		startIdx = 0
-	}
-
-	for _, e := range entries[startIdx:] {
-		if e.Type != "assistant" {
-			continue
-		}
-		ts := ""
-		if e.Timestamp != "" {
-			if t, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil {
-				ts = t.Local().Format("15:04:05")
-			} else if t, err := time.Parse(time.RFC3339, e.Timestamp); err == nil {
-				ts = t.Local().Format("15:04:05")
-			}
-		}
-
-		for _, raw := range e.Message.Content {
-			var block map[string]any
-			if json.Unmarshal(raw, &block) != nil {
-				continue
-			}
-			btype, _ := block["type"].(string)
-			switch btype {
-			case "thinking":
-				if t, ok := block["thinking"].(string); ok && t != "" {
-					text := t
-					if len(text) > 150 {
-						text = text[len(text)-150:]
-					}
-					feed = append(feed, ActivityItem{Time: ts, Type: "thinking", Text: text})
-				}
-			case "text":
-				if t, ok := block["text"].(string); ok && t != "" {
-					// Split multi-line text into separate feed items so each line is visible
-					for _, line := range strings.Split(t, "\n") {
-						line = strings.TrimSpace(line)
-						if line == "" {
-							continue
-						}
-						if len(line) > 200 {
-							line = line[:200]
-						}
-						feed = append(feed, ActivityItem{Time: ts, Type: "text", Text: line})
-					}
-				}
-			case "tool_use":
-				name, _ := block["name"].(string)
-				input := ""
-				if m, ok := block["input"].(map[string]any); ok {
-					for _, key := range []string{"command", "file_path", "pattern", "query", "description", "prompt"} {
-						if v, ok := m[key]; ok {
-							input = truncate(fmt.Sprintf("%v", v), 80)
-							break
-						}
-					}
-				}
-				feed = append(feed, ActivityItem{Time: ts, Type: "tool", Text: name + ": " + input})
-			}
-		}
-	}
-
-	// Keep last 30 items
-	if len(feed) > 30 {
-		feed = feed[len(feed)-30:]
+	parser := storelib.DetectParser(path)
+	storeFeed := parser.ExtractActivityFeed(path)
+	// Convert store.ActivityItem to server.ActivityItem
+	feed := make([]ActivityItem, len(storeFeed))
+	for i, item := range storeFeed {
+		feed[i] = ActivityItem{Time: item.Time, Type: item.Type, Text: item.Text}
 	}
 	return feed
 }
 
 // extractLastUserPrompt reads the transcript and returns the last user message.
+// Auto-detects format (Claude, Codex, etc.).
 func extractLastUserPrompt(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	offset := info.Size() - 256*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return ""
-	}
-
-	lastPrompt := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		if entry["type"] != "user" {
-			continue
-		}
-		msg, ok := entry["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		content := msg["content"]
-		switch c := content.(type) {
-		case string:
-			if c != "" {
-				lastPrompt = c
-			}
-		case []any:
-			for _, block := range c {
-				if m, ok := block.(map[string]any); ok {
-					if t, ok := m["text"].(string); ok && t != "" {
-						lastPrompt = t
-					}
-				}
-			}
-		}
-	}
-
-	r := []rune(lastPrompt)
-	if len(r) > 200 {
-		return string(r[:200])
-	}
-	return lastPrompt
+	parser := storelib.DetectParser(path)
+	return parser.ExtractLastUserPrompt(path)
 }
 
 // extractLastAssistantMessage reads the tail of a transcript and returns the
 // last assistant text block, truncated to 200 chars from the start. Used to
 // backfill LastSummary on cold start when hooks haven't fired yet.
+// Auto-detects format (Claude, Codex, etc.).
 func extractLastAssistantMessage(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	offset := info.Size() - 256*1024
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return ""
-	}
-
-	lastText := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
+	// Use ExtractTrace which already does tail-200 extraction
+	parser := storelib.DetectParser(path)
+	trace := parser.ExtractTrace(path)
+	// ExtractTrace returns last 200 chars from the end; we want first 200 for summary
+	_, summary := parser.ExtractLastMessages(path)
+	if summary != "" {
+		r := []rune(summary)
+		if len(r) > 200 {
+			return string(r[:200])
 		}
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		if entry["type"] != "assistant" {
-			continue
-		}
-		msg, ok := entry["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msg["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, block := range content {
-			m, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-			if m["type"] == "text" {
-				if t, ok := m["text"].(string); ok && t != "" {
-					lastText = t
-				}
-			}
-		}
+		return summary
 	}
-
-	r := []rune(lastText)
-	if len(r) > 200 {
-		return string(r[:200])
-	}
-	return lastText
+	return trace
 }
 
 // isTranscriptInterrupted checks if the last entry in a transcript JSONL is
 // "[Request interrupted by user]" — written by Claude Code on Ctrl+C.
 // No hook fires for interrupts, so the poller must detect this from the transcript.
+// Auto-detects format (Claude, Codex, etc.).
 func isTranscriptInterrupted(path string) bool {
 	if path == "" {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	// Read last 4KB — the interrupt entry is tiny
-	info, _ := f.Stat()
-	if info == nil {
-		return false
-	}
-	offset := info.Size() - 4096
-	if offset < 0 {
-		offset = 0
-	}
-	f.Seek(offset, 0)
-	data, _ := io.ReadAll(f)
-
-	// Find the last non-empty line
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 0 {
-		return false
-	}
-	lastLine := lines[len(lines)-1]
-
-	var entry struct {
-		Type    string `json:"type"`
-		Message struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if json.Unmarshal([]byte(lastLine), &entry) != nil {
-		return false
-	}
-	if entry.Type == "user" && len(entry.Message.Content) > 0 {
-		return strings.Contains(entry.Message.Content[0].Text, "interrupted by user")
-	}
-	return false
+	parser := storelib.DetectParser(path)
+	return parser.IsInterrupted(path)
 }

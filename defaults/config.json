@@ -1,7 +1,13 @@
 {
   "port": 7834,
   "default_profile": "personal",
-  "skip_permissions": false,
+  "skip_permissions": true,
   "iterm2_restore_profile": "Default",
-  "dashboard_open_browser": true
+  "dashboard_open_mode": "browser",
+  "default_interface": "chat",
+  "default_backend": "claude",
+  "default_project": "current",
+  "default_role": "implementer",
+  "editor_open_command": "code {path}",
+  "browser_open_command": "open -a \"Google Chrome\" {url}"
 }

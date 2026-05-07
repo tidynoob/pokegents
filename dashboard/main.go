@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -25,7 +26,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "serve":
-		runServe()
+		runServe(os.Args[2:])
 	case "index":
 		runIndex()
 	default:
@@ -34,9 +35,15 @@ func main() {
 	}
 }
 
-func runServe() {
+func runServe(args []string) {
 	cfg := server.DefaultConfig()
-
+	flags := flag.NewFlagSet("serve", flag.ExitOnError)
+	port := flags.Int("port", 0, "dashboard listen port (overrides config/env when non-zero)")
+	bindHost := flags.String("bind", "", "dashboard bind host (default 127.0.0.1)")
+	webDir := flags.String("web-dir", "", "dashboard web assets directory")
+	if err := flags.Parse(args); err != nil {
+		log.Fatalf("failed to parse serve flags: %v", err)
+	}
 	// Override from environment
 	if v := os.Getenv("POKEGENTS_DATA"); v != "" {
 		cfg.DataDir = v
@@ -46,6 +53,15 @@ func runServe() {
 		if p, err := strconv.Atoi(v); err == nil {
 			cfg.Port = p
 		}
+	}
+	if v := os.Getenv("POKEGENTS_BIND_HOST"); v != "" {
+		cfg.BindHost = v
+	}
+	if *port > 0 {
+		cfg.Port = *port
+	}
+	if *bindHost != "" {
+		cfg.BindHost = *bindHost
 	}
 
 	// Find web directory: check relative to binary, then cwd
@@ -57,6 +73,9 @@ func runServe() {
 			cfg.WebDir = candidate
 			break
 		}
+	}
+	if *webDir != "" {
+		cfg.WebDir = *webDir
 	}
 
 	s, err := server.NewServer(cfg)

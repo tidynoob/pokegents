@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AgentState } from '../types'
 import { CreatureIcon, hashString } from './CreatureIcon'
-import { focusAgent, setSprite, sendPrompt, ProjectInfo, RoleInfo } from '../api'
+import { focusAgent, setSprite, sendPrompt, restartBackend, ProjectInfo, RoleInfo } from '../api'
 import { SpritePicker } from './SpritePicker'
 import { BusyBubble, DoneBubble, ReadingIndicator } from './MessageAnimations'
 import { useSpriteAnimation } from './spriteAnimations'
@@ -19,7 +19,7 @@ export function ProfilePill({ name, color }: { name: string; color?: [number, nu
   const [r, g, b] = color || [100, 100, 100]
   return (
     <span
-      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      className="text-xs leading-none theme-font-display theme-text-primary rounded-sm px-1 py-0 pixel-shadow shrink-0 uppercase max-w-full truncate"
       style={{ background: `rgba(${r}, ${g}, ${b}, 0.6)`, border: `1px solid rgba(${r}, ${g}, ${b}, 0.8)` }}
     >{name}</span>
   )
@@ -27,8 +27,8 @@ export function ProfilePill({ name, color }: { name: string; color?: [number, nu
 
 export function RolePill({ name }: { name: string }) {
   return (
-    <span className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
-      style={{ background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.2)' }}
+    <span className="text-xs leading-none theme-font-display theme-text-primary rounded-sm px-1 py-0 pixel-shadow shrink-0 uppercase max-w-full truncate"
+      style={{ background: 'var(--theme-panel-muted-bg)', border: '1px solid rgba(255,255,255,0.2)' }}
     >{name}</span>
   )
 }
@@ -47,7 +47,7 @@ export function TaskGroupPill({ name }: { name: string }) {
   const [r, g, b] = GROUP_COLORS[idx]
   return (
     <span
-      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
+      className="text-xs leading-none theme-font-display theme-text-primary rounded-sm px-1 py-0 pixel-shadow shrink-0 uppercase max-w-full truncate"
       style={{ background: `rgba(${r}, ${g}, ${b}, 0.6)`, border: `1px solid rgba(${r}, ${g}, ${b}, 0.8)` }}
     >{name}</span>
   )
@@ -56,43 +56,43 @@ export function TaskGroupPill({ name }: { name: string }) {
 function SubagentPill({ type }: { type?: string }) {
   return (
     <span
-      className="text-[6px] font-pixel text-white rounded-sm px-1.5 py-px pixel-shadow shrink-0 uppercase"
-      style={{ background: 'rgba(120, 180, 255, 0.6)', border: '1px solid rgba(120, 180, 255, 0.8)' }}
+      className="text-xs leading-none theme-font-display theme-text-primary rounded-sm px-1 py-0 pixel-shadow shrink-0 uppercase max-w-full truncate"
+      style={{ background: 'var(--theme-accent-blue)', border: '1px solid rgba(120, 180, 255, 0.8)' }}
     >{type || 'subagent'}</span>
   )
 }
 
-export function HealthBar({ tokens, window: ctxWindow }: { tokens: number; window: number }) {
+export function HealthBar({ tokens, window: ctxWindow, showNumbers = true }: { tokens: number; window: number; showNumbers?: boolean }) {
   if (!ctxWindow && !tokens) {
     return (
       <div className="flex items-center gap-1.5 mt-1">
-                <span className="text-[7px] font-pixel font-bold text-accent-yellow pixel-shadow shrink-0">HP</span>
+        <span className="text-xs theme-font-display text-accent-yellow pixel-shadow shrink-0 uppercase">CTX</span>
         <div className="flex-1 h-[6px] gba-hp-bar" />
-        <span className="text-[7px] font-pixel text-white/30 shrink-0">—</span>
+        {showNumbers && <span className="text-s theme-font-mono theme-text-faint shrink-0">—</span>}
       </div>
     )
   }
 
-  const usage = tokens / (ctxWindow || 1000000)
-  const hp = Math.max(0, Math.min(100, (1 - usage) * 100))
+  const usage = Math.max(0, Math.min(1, tokens / (ctxWindow || 1000000)))
+  const remaining = Math.max(0, ctxWindow - tokens)
+  const remainingPct = (1 - usage) * 100
 
-  let color = '#58d898'  // GBA green
-  if (hp < 20) color = '#f85858'  // GBA red
-  else if (hp < 50) color = '#f8d830'  // GBA yellow
+  let color = 'var(--theme-accent-green)'  // GBA green
+  if (remainingPct < 20) color = 'var(--theme-accent-red)'  // GBA red
+  else if (remainingPct < 50) color = 'var(--theme-accent-yellow)'  // GBA yellow
 
-  const usedK = Math.round(tokens / 1000)
-  const totalK = Math.round(ctxWindow / 1000)
+  const formatK = (value: number) => `${Math.round((value || 0) / 1000)}k`
 
   return (
     <div className="flex items-center gap-1.5 mt-1">
-      <span className="text-[7px] font-pixel font-bold text-accent-yellow pixel-shadow shrink-0">HP</span>
+      <span className="text-xs theme-font-display text-accent-yellow pixel-shadow shrink-0 uppercase">CTX</span>
       <div className="flex-1 h-[6px] gba-hp-bar overflow-hidden">
         <div
           className="h-full transition-all duration-1000"
-          style={{ width: `${hp}%`, background: `linear-gradient(180deg, ${color} 0%, ${color}cc 100%)` }}
+          style={{ width: `${remainingPct}%`, background: color }}
         />
       </div>
-      <span className="text-[7px] font-mono text-white/60 pixel-shadow shrink-0 tabular-nums">{usedK}/{totalK}</span>
+      {showNumbers && <span className="text-s theme-font-mono theme-text-muted pixel-shadow shrink-0 tabular-nums">{formatK(remaining)}/{formatK(ctxWindow)}</span>}
     </div>
   )
 }
@@ -103,7 +103,6 @@ interface AgentCardProps {
   agent: AgentState
   onClick: () => void
   mode: LayoutMode
-  connectedAgents?: { session_id: string; emoji: string; display_name: string }[]
   spriteOverride?: string
   isReading?: boolean
   hideSprite?: boolean
@@ -116,6 +115,16 @@ interface AgentCardProps {
   /** When true, shows a brief accent-blue glow ring to indicate this card's
    *  chat panel is active on the right. */
   glowActive?: boolean
+  /** Chat agent whose WebSocket hasn't connected yet. */
+  isConnecting?: boolean
+  /** Overrides quick-input submission; chat cards pass the WebSocket action so card input matches ChatPanel behavior. */
+  quickSendPrompt?: (text: string) => void | Promise<void>
+  quickInputDisabled?: boolean
+  quickInputPlaceholder?: string
+  quickInputBusy?: boolean
+  quickInputSlashCommands?: boolean
+  shortcutLabel?: string
+  shortcutVisible?: boolean
 }
 
 const HIDE_DETAILS = new Set(['finished', 'session started', 'processing prompt'])
@@ -129,22 +138,27 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive, isConnecting, quickSendPrompt, quickInputDisabled, quickInputPlaceholder, quickInputBusy, quickInputSlashCommands, shortcutLabel, shortcutVisible }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
-  const outputH = 'flex-1 min-h-[40px]'
+  const outputH = 'flex-1 min-h-0'
   const title = agent.display_name || agent.profile_name || 'Agent'
   const showDetail = agent.detail && !HIDE_DETAILS.has(agent.detail)
   const [r, g, b] = agent.color
   const agentState = useAgentState(agent)
-  const { isBusy, isError, isIdle } = agentState
-  const isDone = false // Phase 2: done collapsed into idle
+  const backendDeadRaw = agent.interface === 'chat' && !agent.is_alive
+  const [backendDeadGraceElapsed, setBackendDeadGraceElapsed] = useState(false)
+  const [restartPending, setRestartPending] = useState(false)
+  const { isBusy, isDone, isError, isIdle } = agentState
   const ageSeconds = agent.last_updated ? (Date.now() - new Date(agent.last_updated).getTime()) / 1000 : 0
   const isCompacting = agent.detail === 'compacting'
-  const outputText = isCompacting ? null : (isBusy ? agent.last_trace : agent.last_summary)
+  const preview = agent.card_preview
+  const outputText = isCompacting
+    ? null
+    : (preview && preview.phase !== 'empty' ? (preview.text || null) : (isBusy ? agent.last_trace : agent.last_summary))
 
-  const rename = useAgentRename(agent.session_id, title)
+  const rename = useAgentRename(agent.pokegent_id || agent.session_id, title)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [showSpritePicker, setShowSpritePicker] = useState(false)
@@ -153,6 +167,17 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   const renameInputRef = useRef<HTMLInputElement>(null)
   const allCaps = useRuntimeCapabilities()
   const caps = capsFor(allCaps, agent.interface)
+
+  useEffect(() => {
+    if (!backendDeadRaw || agent.state === 'reconfiguring' || isConnecting) {
+      setBackendDeadGraceElapsed(false)
+      return
+    }
+    const t = setTimeout(() => setBackendDeadGraceElapsed(true), 8000)
+    return () => clearTimeout(t)
+  }, [backendDeadRaw, agent.state, isConnecting, agent.pokegent_id, agent.session_id])
+
+  const backendDead = backendDeadRaw && agent.state !== 'reconfiguring' && !isConnecting && backendDeadGraceElapsed
 
   useEffect(() => {
     if (rename.isRenaming) {
@@ -166,6 +191,14 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
     if (isBusy) setFlashDismissed(false)
   }, [isBusy])
 
+  const showDoneFlash = isDone && !flashDismissed
+
+  const acknowledgeDone = () => {
+    if (!showDoneFlash) return
+    setFlashDismissed(true)
+    fetch(`/api/sessions/${agent.pokegent_id || agent.session_id}/acknowledge`, { method: 'POST' })
+  }
+
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
     setMenuPos({ x: e.clientX, y: e.clientY })
@@ -173,7 +206,18 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   }
 
   const iconSize = compact ? 20 : 32
-  const textSize = 'text-[10px]'
+  const textSize = 'text-m'
+  const headerTags = compact ? [] : [
+    agentState.backgroundTasks > 0 ? (
+      <span key="background-tasks" className="text-m theme-text-warning leading-none shrink-0">
+        {agentState.backgroundTasks} bg
+      </span>
+    ) : null,
+    agent.ephemeral ? <SubagentPill key="subagent" type={agent.subagent_type} /> : null,
+    agent.task_group ? <TaskGroupPill key="task-group" name={agent.task_group} /> : null,
+    agent.role ? <RolePill key="role" name={agent.role} /> : null,
+    !agent.ephemeral ? <ProfilePill key="profile" name={agent.project || agent.profile_name} color={agent.project_color || agent.color} /> : null,
+  ].filter(Boolean)
   // In compact mode padding stays tight — there's not enough vertical space
   // for the user's preferred padding. Standard mode honours --card-padding.
   const cardStyle: React.CSSProperties = compact
@@ -185,30 +229,85 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
       <div
         ref={cardRef ? (el) => cardRef(el) : undefined}
         onContextMenu={handleContextMenu}
+        onClickCapture={acknowledgeDone}
         className={`text-left cursor-default overflow-visible flex flex-col h-full transition-all duration-300 relative group ${
           isBusy ? 'gba-card-selected' : 'gba-card'
         } ${agent.ephemeral ? 'opacity-80' : ''}`}
         style={{
           ...cardStyle,
           ...(agent.ephemeral ? { borderStyle: 'dashed' } : {}),
-          ...(glowActive ? { boxShadow: '0 0 0 2px rgba(248,216,48,0.6), 0 0 16px rgba(248,216,48,0.2)' } : {}),
-        }}
-        onMouseEnter={() => {
-          if (isDone && !flashDismissed) setFlashDismissed(true)
+          ...(glowActive ? { boxShadow: '0 0 0 2px rgb(var(--theme-accent-yellow-rgb) / 0.6), 0 0 16px rgb(var(--theme-accent-yellow-rgb) / 0.2)' } : {}),
+          ...(showDoneFlash ? { boxShadow: '0 0 0 2px rgb(var(--theme-accent-green-rgb) / 0.72), 0 0 18px rgb(var(--theme-accent-green-rgb) / 0.55), 0 0 34px rgb(var(--theme-accent-green-rgb) / 0.22)' } : {}),
         }}
       >
-        {/* Done flash — pulses for 1 minute after completion, dismissed on hover */}
-        {isDone && !isIdle && ageSeconds < 60 && !flashDismissed && (
-          <div
-            className="card-done-flash absolute inset-0 rounded-lg pointer-events-none group-hover:hidden"
-            style={{ background: 'rgba(88, 216, 152, 0.15)' }}
-          />
+        {showDoneFlash && (
+          <div className="pointer-events-none absolute inset-0 rounded-lg card-done-green-overlay z-[1]" />
+        )}
+
+        {shortcutVisible && shortcutLabel && (
+          <div className="pointer-events-none absolute inset-0 rounded-lg z-30 flex items-start justify-end p-2"
+            style={{ background: 'rgba(0,0,0,0.18)', boxShadow: 'inset 0 0 0 1px rgb(var(--theme-accent-yellow-rgb) / 0.38)', backdropFilter: 'blur(1px)' }}
+          >
+            <div
+              className="theme-font-display pixel-shadow flex items-center justify-center"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                background: 'var(--theme-chat-tool-bg)',
+                color: 'var(--theme-text-primary)',
+                border: '1px solid var(--theme-panel-divider)',
+                fontSize: 'var(--theme-type-xl)',
+                lineHeight: '28px',
+                boxShadow: 'var(--theme-shadow-panel)',
+              }}
+            >
+              ⌘{shortcutLabel}
+            </div>
+          </div>
+        )}
+
+        {/* Dead chat backend overlay */}
+        {backendDead && (
+          <div className="absolute inset-0 rounded-lg flex items-center justify-center z-20" style={{ background: 'var(--theme-modal-scrim)' }}>
+            <div className="flex flex-col items-center gap-1.5 px-3 text-center">
+              <span className="text-s theme-font-display text-accent-red pixel-shadow">BACKEND OFFLINE</span>
+              <button
+                type="button"
+                disabled={restartPending}
+                onClick={async (e) => {
+                  e.stopPropagation()
+                  setRestartPending(true)
+                  setToast('Restarting backend…')
+                  try {
+                    await restartBackend(agent.pokegent_id || agent.session_id)
+                  } catch (err) {
+                    setToast(`Restart failed: ${err instanceof Error ? err.message : String(err)}`)
+                    setRestartPending(false)
+                  }
+                }}
+                className="gba-button px-2 py-1 text-s theme-font-display theme-text-primary disabled:opacity-50"
+              >
+                {restartPending ? 'RESTARTING…' : 'RESTART'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Connecting overlay */}
+        {isConnecting && (
+          <div className="absolute inset-0 rounded-lg flex items-center justify-center z-10" style={{ background: 'var(--theme-chat-bg)' }}>
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 border-2 theme-border-subtle border-t-white/90 rounded-full animate-spin" />
+              <span className="text-s theme-font-display theme-text-secondary pixel-shadow">CONNECTING</span>
+            </div>
+          </div>
         )}
 
         {/* Toast overlay */}
         {toast && (
-          <div className="absolute inset-0 rounded-lg flex items-center justify-center pointer-events-none z-20" style={{ background: 'rgba(0,0,0,0.5)' }}>
-            <span className="text-[7px] font-pixel text-accent-yellow pixel-shadow">{toast}</span>
+          <div className="absolute inset-0 rounded-lg flex items-center justify-center pointer-events-none z-20" style={{ background: 'var(--theme-modal-scrim)' }}>
+            <span className="text-s theme-font-display text-accent-yellow pixel-shadow">{toast}</span>
           </div>
         )}
 
@@ -217,8 +316,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
             <button
               onClick={(e) => { e.stopPropagation(); onCollapse() }}
-              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-accent-red hover:bg-accent-red/80 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white leading-none"
-              style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-accent-red hover:bg-accent-red/80 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-s theme-font-display theme-text-primary leading-none"
+              style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
               title="Collapse"
             >
               −
@@ -231,8 +330,8 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           <div className="absolute top-0 right-0 w-[10%] h-[15%] z-10 group/corner">
             <button
               onClick={(e) => { e.stopPropagation(); onDismiss() }}
-              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-white/20 hover:bg-white/40 opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-[8px] font-bold text-white leading-none"
-              style={{ boxShadow: '1px 1px 0 rgba(0,0,0,0.3)' }}
+              className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full theme-bg-panel-subtle theme-bg-panel-hover opacity-0 group-hover/corner:opacity-100 transition-opacity flex items-center justify-center text-s theme-font-display theme-text-primary leading-none"
+              style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
               title="Dismiss"
             >
               ×
@@ -241,7 +340,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         )}
 
         {/* Header: icon + name + status */}
-        <div className={`flex items-center ${compact ? 'gap-1.5 mb-1' : 'gap-3 mb-2'} shrink-0`}>
+        <div className={`flex items-center ${compact ? 'gap-1.5 mb-1' : 'gap-2 mb-2'} shrink-0`}>
           {/* Click sprite → change sprite */}
           <div
             onClick={(e) => { e.stopPropagation(); setShowSpritePicker(true) }}
@@ -249,9 +348,9 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
             style={{ width: iconSize, height: iconSize }}
           >
             {/* Static background box */}
-            {!compact && <div className="absolute inset-0 bg-black/20 rounded-lg" />}
+            {!compact && <div className="absolute inset-0 theme-bg-panel-muted rounded-lg" />}
             {/* Animated sprite + bubbles */}
-            <SpriteAnimWrapper state={isDone && !isIdle && ageSeconds < 60 && !flashDismissed ? 'celebrating' : agent.state} compact={compact}>
+            <SpriteAnimWrapper state={showDoneFlash && !isIdle && ageSeconds < 60 ? 'celebrating' : agent.state} compact={compact}>
               <div style={{ opacity: hideSprite ? 0 : 1, transition: 'opacity 0.15s' }}>
                 <CreatureIcon sessionId={agent.session_id} size={iconSize} noGlow={compact} doneFlash={false} spriteOverride={spriteOverride} noBg />
               </div>
@@ -260,63 +359,55 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
               <ReadingIndicator isReading={!!isReading} />
             </SpriteAnimWrapper>
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex-1 min-w-0">
-                {/* Click name → rename */}
-                {rename.isRenaming ? (
-                  <input
-                    ref={renameInputRef}
-                    value={rename.newName}
-                    onChange={(e) => rename.setNewName(e.target.value)}
-                    onBlur={rename.submitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') rename.submitRename()
-                      if (e.key === 'Escape') rename.cancelRename()
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white bg-transparent border-b border-white/50 outline-none w-full pixel-shadow`}
-                  />
-                ) : (
-                  <h3
-                    className={`${compact ? 'text-[7px]' : 'text-[8px]'} font-pixel text-white truncate cursor-pointer hover:text-accent-yellow pixel-shadow`}
-                    onClick={(e) => { e.stopPropagation(); rename.startRename() }}
-                  >
-                    {title}
-                  </h3>
-                )}
-                <HealthBar tokens={agent.context_tokens} window={agent.context_window} />
+          <div className="flex-1 min-w-0 relative">
+            {/* Left header column: title/state + context. Tags live in a right
+                rail so they never consume title width inside the same row. */}
+            {rename.isRenaming ? (
+              <input
+                ref={renameInputRef}
+                value={rename.newName}
+                onChange={(e) => rename.setNewName(e.target.value)}
+                onBlur={rename.submitRename}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') rename.submitRename()
+                  if (e.key === 'Escape') rename.cancelRename()
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className={`${compact ? 'text-s' : 'text-s'} theme-font-display theme-text-primary bg-transparent border-b theme-border-subtle outline-none w-full pixel-shadow`}
+              />
+            ) : (
+              <div className="flex items-center gap-1.5 min-w-0">
+                <h3
+                  className={`${compact ? 'text-xs' : 'text-s'} theme-font-display theme-text-primary truncate cursor-pointer hover:text-accent-yellow pixel-shadow min-w-0`}
+                  onClick={(e) => { e.stopPropagation(); rename.startRename() }}
+                >
+                  {title}
+                </h3>
+                {!compact && <StateBadge state={(agent.state || 'idle') as AgentLifecycleState} busySince={agent.busy_since} compact />}
               </div>
-              <div className="flex flex-col items-end gap-0.5 shrink-0">
-                {!compact && (
-                  <>
-                    <div className="flex items-center gap-1">
-                      <StateBadge state={(agent.state || 'idle') as AgentLifecycleState} busySince={agent.busy_since} compact />
-                      {agentState.backgroundTasks > 0 && (
-                        <span className="text-[10px] text-amber-400/80 ml-1">
-                          {agentState.backgroundTasks} bg
-                        </span>
-                      )}
-                    </div>
-                    {agent.ephemeral && <SubagentPill type={agent.subagent_type} />}
-                    {agent.task_group && <TaskGroupPill name={agent.task_group} />}
-                    {agent.role && <RolePill name={agent.role} />}
-                    {!agent.ephemeral && <ProfilePill name={agent.project || agent.profile_name} color={agent.project_color || agent.color} />}
-                  </>
-                )}
-              </div>
-            </div>
+            )}
+
+            <HealthBar tokens={agent.context_tokens} window={agent.context_window} showNumbers={false} />
           </div>
+          {!compact && headerTags.length > 0 && (
+            <div className="w-fit max-w-[24%] shrink-0 flex flex-col items-end gap-px overflow-hidden">
+              {headerTags.map((tag, idx) => (
+                <div key={idx} className="max-w-full flex justify-end overflow-hidden">
+                  {tag}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Last prompt — shown in standard modes */}
         {showPrompt && agent.user_prompt && (
           <div
             className="rounded-md px-3 py-0.5 mb-1 shrink-0 overflow-hidden"
-            style={{ background: 'rgba(0, 0, 0, 0.40)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)', fontSize: 'var(--output-font-size, 11px)' }}
+            style={{ background: 'var(--theme-chat-tool-bg)', boxShadow: 'var(--theme-shadow-panel)', fontSize: 'var(--agent-card-output-font-size, 10px)' }}
           >
-            <div className="font-mono text-white/50 truncate leading-snug">
-              <span className="text-amber-300/60 mr-1">&gt;</span>
+            <div className="theme-font-mono theme-text-muted truncate leading-snug">
+              <span className="theme-text-warning mr-1">&gt;</span>
               {agent.user_prompt}
             </div>
           </div>
@@ -330,6 +421,7 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
           isError={isError}
           isCompacting={isCompacting}
           outputText={outputText}
+          preview={preview}
           compact={compact}
           outputH={outputH}
           textSize={textSize}
@@ -337,10 +429,15 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
         {/* Quick command input */}
         {showInput && (
           <PromptInput
-            sessionId={agent.session_id}
-            onSend={(text) => sendPrompt(agent.session_id, text)}
+            sessionId={agent.pokegent_id || agent.session_id}
+            onSend={quickSendPrompt ?? ((text) => sendPrompt(agent.pokegent_id || agent.session_id, text))}
             variant="card"
-            maxHeight={80}
+            maxHeight={compact ? 72 : 120}
+            maxLines={8}
+            disabled={backendDead || quickInputDisabled}
+            placeholder={quickInputPlaceholder ?? 'What will you do?'}
+            isBusy={quickInputBusy ?? isBusy}
+            enableSlashCommands={quickInputSlashCommands ?? agent.interface === 'chat'}
           />
         )}
       </div>
@@ -377,12 +474,18 @@ export function AgentCard({ agent, onClick, mode, connectedAgents, spriteOverrid
   )
 }
 
-function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText, compact, outputH, textSize }: {
+function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText, preview, compact, outputH, textSize }: {
   agent: AgentState; isBusy: boolean; isDone: boolean; isError: boolean; isCompacting: boolean;
-  outputText: string | null; compact: boolean; outputH: string; textSize: string;
+  outputText: string | null; preview?: AgentState['card_preview']; compact: boolean; outputH: string; textSize: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  const feed = agent.activity_feed
+  // If the server sent a normalized preview, trust it as the current-turn
+  // source of truth. Falling back to agent.activity_feed when preview.feed is
+  // omitted resurrects stale commands from the previous turn during the small
+  // window after a new prompt is submitted but before new tool events arrive.
+  const feed = preview ? (preview.feed ?? []) : agent.activity_feed
+  const feedSignature = feed.map(item => `${item.time}|${item.type}|${item.text}`).join('\n')
+  const phase = preview?.phase
   const [, setTick] = useState(0)
 
   // Auto-scroll to bottom when feed updates
@@ -390,7 +493,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
     if (scrollRef.current && isBusy) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [feed?.length, isBusy])
+  }, [feedSignature, isBusy])
 
   // Tick timer every 1s for elapsed display
   useEffect(() => {
@@ -407,7 +510,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
         ref={scrollRef}
         data-no-drag
         className={`rounded-md ${compact ? 'px-2 py-1.5' : 'px-3 py-2'} h-full overflow-y-auto overflow-x-hidden cursor-pointer hover:brightness-110`}
-        style={{ background: 'rgba(0, 0, 0, 0.45)', boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.4)', fontSize: 'var(--output-font-size, 11px)' }}
+        style={{ background: 'var(--theme-chat-tool-bg)', boxShadow: 'var(--theme-shadow-panel)', fontSize: 'var(--agent-card-output-font-size, 10px)' }}
         onClick={(e) => {
           e.stopPropagation()
           // Route by interface — chat-backed agents don't have an iTerm tab to
@@ -423,39 +526,47 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
         }}
       >
       {isCompacting ? (
-        <div className="font-mono text-accent-yellow/80 animate-pulse">
-          Compacting conversation history...
+        <div className="theme-font-mono text-accent-yellow/80 animate-pulse">
+          {preview?.text || 'Compacting conversation history...'}
+        </div>
+      ) : phase === 'error' ? (
+        <div className="theme-font-mono text-accent-orange">
+          ! {outputText || agent.detail || 'API error - reprompt to retry'}
+        </div>
+      ) : phase === 'waiting' ? (
+        <div className="theme-font-mono text-accent-yellow/80">
+          {outputText || agent.detail || 'Needs input'}
         </div>
       ) : isBusy && feed && feed.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           {feed.map((item, i) => (
-            <div key={i} className={`font-mono leading-snug truncate ${
+            <div key={i} className={`theme-font-mono leading-snug truncate ${
               i === feed.length - 1 ? (
-                item.type === 'tool' ? 'text-accent-yellow' : 'text-white/90'
+                item.type === 'tool' ? 'text-accent-yellow' : 'theme-text-primary'
               ) : (
-                item.type === 'tool' ? 'text-white/40' : 'text-white/30'
+                item.type === 'tool' ? 'theme-text-faint' : 'theme-text-faint'
               )
             }`}>
-              <span className="text-white/20 mr-1 select-none">{item.time}</span>
-              {item.type === 'tool' && <span className="text-white/40 mr-0.5">▸</span>}
+              <span className="theme-text-faint mr-1 select-none">{item.time}</span>
+              {item.type === 'tool' && <span className="theme-text-faint mr-0.5">▸</span>}
               {item.type === 'thinking' ? <span className="italic">{item.text}</span> : item.text}
             </div>
           ))}
         </div>
       ) : outputText ? (
         <div
-          className={`font-mono leading-relaxed whitespace-pre-wrap ${
-            isDone ? 'text-accent-green/80' : 'text-white/70'
-          } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-black/20`}
+          className={`theme-font-mono leading-relaxed whitespace-pre-wrap ${
+            isDone ? 'text-accent-green/80' : phase === 'thinking' ? 'theme-text-faint' : 'theme-text-secondary'
+          } [&_strong]:font-bold [&_strong]:text-current [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:theme-bg-panel-muted`}
         >
           <span dangerouslySetInnerHTML={{ __html: renderMiniMarkdown(outputText) }} />
         </div>
       ) : isError ? (
-        <div className="font-mono text-accent-orange">
+        <div className="theme-font-mono text-accent-orange">
           ! {agent.detail || 'API error - reprompt to retry'}
         </div>
       ) : (
-        <div className="font-mono text-white/20">
+        <div className="theme-font-mono theme-text-faint">
           {isBusy ? 'Working...' : 'No output yet'}
         </div>
       )}
@@ -463,11 +574,10 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
       {/* Pinned elapsed timer — outside scroll area, shifts right when scrollbar visible */}
       {elapsed && (
         <div
-          className="absolute bottom-1.5 text-[8px] font-mono text-white/35 pointer-events-none"
+          className="absolute bottom-1.5 text-s theme-font-mono theme-text-faint pointer-events-none"
           style={{ right: scrollRef.current && scrollRef.current.scrollHeight > scrollRef.current.clientHeight ? 16 : 8 }}
         >{elapsed}</div>
       )}
     </div>
   )
 }
-

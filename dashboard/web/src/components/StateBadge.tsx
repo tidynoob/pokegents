@@ -40,7 +40,7 @@ const STATE_LABEL: Record<AgentLifecycleState, string> = {
 
 const STATE_BG: Record<AgentLifecycleState, string> = {
   busy: 'bg-accent-red animate-pulse-soft',
-  idle: 'bg-white/30',
+  idle: 'theme-bg-panel-subtle',
   done: 'bg-accent-green',
   error: 'bg-accent-red',
   needs_input: 'bg-accent-yellow animate-pulse-soft',
@@ -58,14 +58,14 @@ export function StateBadge({ state, busySince, compact }: StateBadgeProps) {
   }, [state, busySince])
 
   const label = STATE_LABEL[state] ?? state.toUpperCase()
-  const bg = STATE_BG[state] ?? 'bg-white/30'
+  const bg = STATE_BG[state] ?? 'theme-bg-panel-subtle'
   const elapsed = state === 'busy' && busySince ? formatElapsed(busySince) : ''
-  const px = compact ? 'px-1.5 py-px text-[6px]' : 'px-2 py-px text-[7px]'
+  const px = compact ? 'px-1.5 py-px text-xs' : 'px-2 py-px text-s'
 
   return (
     <span
-      className={`font-pixel ${px} rounded-full leading-none ${bg} text-white`}
-      style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+      className={`theme-font-display ${px} rounded-full leading-none ${bg} theme-text-primary`}
+      style={{ textShadow: 'var(--theme-text-shadow-pixel)' }}
     >
       {label}
       {elapsed && <span className="ml-1 opacity-80">{elapsed}</span>}

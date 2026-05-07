@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "audit:theme": "node scripts/audit-theme-tokens.mjs",
+    "preview": "vite preview",
+    "audit:typography": "node scripts/audit-typography-tokens.mjs"
   },
   "dependencies": {
     "prism-react-renderer": "^2.4.1",

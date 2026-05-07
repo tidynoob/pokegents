@@ -1,11 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync } from "fs";
 import { join } from "path";
 
-// Support both new (POKEGENTS_*) and legacy (CCD_*) env vars during migration
-const POKEGENTS_DATA = process.env.POKEGENTS_DATA || process.env.CCD_DATA || join(process.env.HOME, ".pokegents");
+const POKEGENTS_DATA = process.env.POKEGENTS_DATA || join(process.env.HOME, ".pokegents");
 
 // Read port from config file, fall back to env var, then default
 function getPort() {
@@ -14,8 +14,8 @@ function getPort() {
     return cfg.port || 7834;
   } catch { return 7834; }
 }
-const DASHBOARD_URL = process.env.POKEGENTS_DASHBOARD_URL || process.env.CCD_DASHBOARD_URL || `http://localhost:${getPort()}`;
-const MESSAGE_BUDGET = parseInt(process.env.POKEGENTS_MESSAGE_BUDGET || process.env.CCD_MESSAGE_BUDGET || "15");
+const DASHBOARD_URL = process.env.POKEGENTS_DASHBOARD_URL || `http://localhost:${getPort()}`;
+const MESSAGE_BUDGET = parseInt(process.env.POKEGENTS_MESSAGE_BUDGET || "15");
 const API_TIMEOUT = 2000; // 2s timeout before falling back to files
 
 // ── Dashboard API with timeout ──────────────────────────────────────────
@@ -74,14 +74,15 @@ function invalidateAgentCache() {
   agentCacheTime = 0;
 }
 
-// Cache own CCD session ID (stable for lifetime of MCP process).
+// Cache own pokegent ID (stable for lifetime of MCP process).
 // We only cache the ID, not the full agent object, since display_name can change.
-let selfCCDSessionId = null;
+let selfPokegentId = null;
 
 function getSelfId() {
-  if (selfCCDSessionId) return selfCCDSessionId;
+  if (selfPokegentId) return selfPokegentId;
   const sessionIdEnv = getMySessionId();
-  return sessionIdEnv || null;
+  if (sessionIdEnv) return sessionIdEnv;
+  return inferSelfIdFromProcessTree();
 }
 
 function resolveSelf(agents) {
@@ -89,7 +90,7 @@ function resolveSelf(agents) {
   if (!hint) return null;
   const me = resolveAgent(agents, hint.slice(0, 8));
   if (me) {
-    selfCCDSessionId = me.pokegent_id || me.ccd_session_id || me.session_id;
+    selfPokegentId = me.pokegent_id || me.session_id;
   }
   return me;
 }
@@ -119,7 +120,6 @@ function fileListAgents() {
         agents.push({
           profile_name: rf.profile || "",
           session_id: sid,
-          ccd_session_id: rf.ccd_session_id || sid,
           display_name: rf.display_name || rf.profile || "",
           state,
           detail,
@@ -140,7 +140,6 @@ function fileListAgents() {
         agents.push({
           profile_name: ef.agent_type || "subagent",
           session_id: ef.agent_id || file.replace(".json", ""),
-          ccd_session_id: ef.agent_id || file.replace(".json", ""),
           display_name: ef.description || ef.agent_type || "subagent",
           state: ef.state === "running" ? "busy" : ef.state === "completed" ? "done" : (ef.state || "busy"),
           detail: ef.agent_type ? `${ef.agent_type} subagent` : "",
@@ -209,9 +208,7 @@ function fileResolveAgent(agents, idPrefix) {
       a.session_id === idPrefix ||
       a.session_id.startsWith(idPrefix) ||
       (a.pokegent_id && a.pokegent_id === idPrefix) ||
-      (a.pokegent_id && a.pokegent_id.startsWith(idPrefix)) ||
-      (a.ccd_session_id && a.ccd_session_id === idPrefix) ||
-      (a.ccd_session_id && a.ccd_session_id.startsWith(idPrefix))
+      (a.pokegent_id && a.pokegent_id.startsWith(idPrefix))
   ) || null;
 }
 
@@ -262,7 +259,42 @@ function resolveAgent(agents, idPrefix) {
 // ── Helper: get my session ID ───────────────────────────────────────────
 
 function getMySessionId() {
-  return process.env.POKEGENT_ID || process.env.POKEGENTS_SESSION_ID || process.env.CCD_SESSION_ID || "";
+  return process.env.POKEGENT_ID || process.env.POKEGENTS_SESSION_ID || "";
+}
+
+function inferSelfIdFromProcessTree() {
+  try {
+    const ps = execFileSync("ps", ["-axo", "pid=,ppid=,command="], {
+      encoding: "utf8",
+      timeout: 1000,
+    });
+    const parents = new Map();
+    for (const line of ps.split("\n")) {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+/);
+      if (match) parents.set(match[1], match[2]);
+    }
+
+    const ancestors = new Set();
+    let pid = String(process.pid);
+    for (let i = 0; pid && pid !== "0" && i < 32; i++) {
+      ancestors.add(pid);
+      pid = parents.get(pid);
+    }
+
+    const runningDir = join(POKEGENTS_DATA, "running");
+    for (const file of readdirSync(runningDir)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const rf = JSON.parse(readFileSync(join(runningDir, file), "utf8"));
+        const sessionPid = rf.pid ? String(rf.pid) : "";
+        const claudePid = rf.claude_pid ? String(rf.claude_pid) : "";
+        if ((sessionPid && ancestors.has(sessionPid)) || (claudePid && ancestors.has(claudePid))) {
+          return rf.pokegent_id || rf.session_id || "";
+        }
+      } catch {}
+    }
+  } catch {}
+  return "";
 }
 
 // ── MCP Server ──────────────────────────────────────────────────────────
@@ -280,7 +312,7 @@ server.tool(
   async () => {
     const agents = await getCachedAgents();
     const lines = agents.map((a) => {
-      const id = (a.pokegent_id || a.ccd_session_id || a.session_id).slice(0, 8);
+      const id = (a.pokegent_id || a.session_id).slice(0, 8);
       const group = a.task_group ? ` (group: ${a.task_group})` : "";
       const task = a.user_prompt ? `\n  Last task: ${a.user_prompt.slice(0, 100)}` : "";
 
@@ -321,13 +353,13 @@ server.tool(
       .describe("Message content. Be specific: include file paths, line numbers, and actionable feedback."),
   },
   async ({ from, to, content }) => {
-    const sessionIdEnv = getMySessionId();
-    const fromHint = from || sessionIdEnv.slice(0, 8);
+    const selfId = getSelfId() || "";
+    const fromHint = from || selfId.slice(0, 8);
 
     // Budget check (local, no network)
     const agents = await getCachedAgents();
     const fromAgent = resolveSelf(agents) || resolveAgent(agents, fromHint);
-    const fromId = fromAgent ? (fromAgent.pokegent_id || fromAgent.ccd_session_id || fromAgent.session_id) : (from || sessionIdEnv);
+    const fromId = fromAgent ? (fromAgent.pokegent_id || fromAgent.session_id) : (from || selfId);
 
     const sent = getMessageCount(fromId);
     if (sent >= MESSAGE_BUDGET) {
@@ -383,7 +415,7 @@ server.tool(
             }],
           };
         }
-        toId = toAgent.pokegent_id || toAgent.ccd_session_id || toAgent.session_id;
+        toId = toAgent.pokegent_id || toAgent.session_id;
         toName = toAgent.display_name || toAgent.profile_name;
         const fromName = fromAgent ? (fromAgent.display_name || fromAgent.profile_name) : fromId;
         fileSendMessage(fromId, fromName, toId, toName, content);
@@ -413,12 +445,12 @@ server.tool(
       .describe("Optional: your session ID. Usually auto-detected from environment."),
   },
   async ({ my_session_id }) => {
-    const sessionIdEnv = getMySessionId();
+    const selfId = getSelfId() || "";
 
     // Resolve own ID (cached after first call)
     const agents = await getCachedAgents();
-    const me = resolveSelf(agents) || resolveAgent(agents, my_session_id || sessionIdEnv.slice(0, 8));
-    const sessionId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : (my_session_id || sessionIdEnv);
+    const me = resolveSelf(agents) || resolveAgent(agents, my_session_id || selfId.slice(0, 8));
+    const sessionId = me ? (me.pokegent_id || me.session_id) : (my_session_id || selfId);
 
     // Consume messages (API or file fallback) — single round-trip
     let messages;
@@ -450,7 +482,7 @@ server.tool(
 // Spawn a new agent
 server.tool(
   "spawn_agent",
-  "Spawn a new agent in a new iTerm2 tab. Use role@project syntax (e.g. 'implementer@platform') or just a profile name. The dashboard must be running. Use this when you need another agent to help with a task. Optionally name it for easier messaging.",
+  "Spawn a new dashboard agent card. By default it launches through the same chat backend/model as the caller (for example a Codex-backed caller spawns a Codex-backed card) instead of opening a new iTerm2 tab. Use role@project syntax (e.g. 'implementer@platform') or just a profile name. The dashboard must be running. Optionally name it, assign a task group, and send an initial message.",
   {
     profile: z
       .string()
@@ -467,104 +499,96 @@ server.tool(
       .string()
       .optional()
       .describe("Optional task group to assign (e.g. 'proxy', 'auth-migration'). Groups agents by workstream in the dashboard."),
+    agent_backend: z
+      .string()
+      .optional()
+      .describe("Optional backend override. Defaults to the caller's agent_backend, e.g. gpt-55/codex/claude."),
+    model: z
+      .string()
+      .optional()
+      .describe("Optional model override. Defaults to the caller's model when available."),
+    effort: z
+      .string()
+      .optional()
+      .describe("Optional reasoning effort override. Defaults to the caller's effort when available."),
   },
-  async ({ profile, name, message, task_group }) => {
-    // Snapshot agents before launch so we can detect the new one
-    let agentsBefore;
-    try {
-      agentsBefore = await apiCall("/api/sessions");
-    } catch {
-      agentsBefore = fileListAgents();
-    }
-    const beforeIds = new Set(agentsBefore.map(a => a.session_id));
+  async ({ profile, name, message, task_group, agent_backend, model, effort }) => {
+    const agentsBefore = await getCachedAgents().catch(() => fileListAgents());
+    const beforeIds = new Set(agentsBefore.map(a => a.pokegent_id || a.session_id).filter(Boolean));
+    const selfId = getSelfId() || "";
+    const caller = resolveSelf(agentsBefore);
+
+    // MCP-spawned agents should appear as dashboard cards, not terminal tabs.
+    // If the caller is ACP/chat-backed, inherit its configured backend so a
+    // Codex-backed caller spawns Codex-backed workers. If the caller is legacy
+    // iTerm2, leave backend empty so the dashboard default chat backend applies.
+    const inheritedBackend = agent_backend || caller?.agent_backend || undefined;
+    const inheritedModel = model || caller?.model || undefined;
+    const inheritedEffort = effort || caller?.effort || undefined;
+    const body = {
+      profile,
+      name: name || undefined,
+      task_group: task_group || undefined,
+      interface: "chat",
+      agent_backend: inheritedBackend,
+      model: inheritedModel,
+      effort: inheritedEffort,
+    };
 
     try {
-      const res = await fetch(`${DASHBOARD_URL}/api/launch`, {
+      const launch = await apiCall("/api/pokegents/launch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, task_group: task_group || undefined }),
+        body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const err = await res.text();
-        return {
-          content: [{
-            type: "text",
-            text: `Failed to spawn ${profile}: ${err}. Make sure the dashboard is running (pokegent dashboard start).`,
-          }],
-        };
-      }
+      invalidateAgentCache();
 
-      // If name or message requested, wait for the new agent to appear
-      let newAgent = null;
-      if (name || message) {
-        for (let attempt = 0; attempt < 10; attempt++) {
-          await new Promise(r => setTimeout(r, 2000));
-          let agentsNow;
-          try {
-            agentsNow = await apiCall("/api/sessions");
-          } catch {
-            agentsNow = fileListAgents();
-          }
-          newAgent = agentsNow.find(a => !beforeIds.has(a.session_id));
-          if (newAgent) break;
-        }
-      }
+      const launchedId = launch?.pokegent_id || "";
+      let newAgent = launchedId ? { pokegent_id: launchedId, profile_name: profile, display_name: name || profile } : null;
 
-      let result = `Spawned ${profile} in a new iTerm2 tab.`;
-
-      if (newAgent && name) {
-        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
+      // Confirm the card exists so list_agents/message names line up with the dashboard state.
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise(r => setTimeout(r, 500));
+        let agentsNow;
         try {
-          await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/rename`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-          });
-          result = `Spawned ${profile} as "${name}" [${sid.slice(0, 8)}].`;
+          agentsNow = await apiCall("/api/sessions");
         } catch {
-          result = `Spawned ${profile} [${sid.slice(0, 8)}] (rename to "${name}" failed).`;
+          agentsNow = fileListAgents();
         }
-      } else if (newAgent) {
-        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
-        result = `Spawned ${profile} [${sid.slice(0, 8)}].`;
+        const byLaunchId = launchedId ? agentsNow.find(a => (a.pokegent_id || a.session_id) === launchedId) : null;
+        const byNewId = agentsNow.find(a => {
+          const id = a.pokegent_id || a.session_id;
+          return id && !beforeIds.has(id);
+        });
+        newAgent = byLaunchId || byNewId || newAgent;
+        if (byLaunchId || byNewId) break;
       }
 
-      if (newAgent && task_group) {
-        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
-        try {
-          await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ task_group }),
-          });
-          result += ` Group: ${task_group}.`;
-        } catch {
-          result += ` (task group assignment failed)`;
-        }
-      }
+      const sid = newAgent ? (newAgent.pokegent_id || newAgent.session_id || launchedId) : launchedId;
+      let result = sid
+        ? `Spawned ${profile} as dashboard card [${sid.slice(0, 8)}] using ${inheritedBackend || "default chat backend"}.`
+        : `Spawned ${profile} as dashboard card using ${inheritedBackend || "default chat backend"}.`;
+      if (name) result = result.replace(`Spawned ${profile}`, `Spawned ${profile} as "${name}"`);
+      if (task_group) result += ` Group: ${task_group}.`;
 
-      if (newAgent && message) {
-        const toId = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
-        const toName = name || newAgent.display_name || newAgent.profile_name;
-        const sessionIdEnv = getMySessionId();
-        const agents = await getCachedAgents();
-        const me = resolveSelf(agents);
-        const fromId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : sessionIdEnv;
-        const fromName = me ? (me.display_name || me.profile_name) : fromId;
+      if (sid && message) {
+        const toName = name || newAgent?.display_name || newAgent?.profile_name || profile;
+        const fromId = caller ? (caller.pokegent_id || caller.session_id) : selfId;
+        const fromName = caller ? (caller.display_name || caller.profile_name) : fromId;
         try {
           await apiCall("/api/messages", {
             method: "POST",
-            body: JSON.stringify({ from: fromId, to: toId, content: message }),
+            body: JSON.stringify({ from: fromId, to: sid, content: message }),
           });
           result += ` Message sent.`;
         } catch {
-          fileSendMessage(fromId, fromName, toId, toName, message);
+          fileSendMessage(fromId, fromName, sid, toName, message);
           result += ` Message queued.`;
         }
-      } else if (message && !newAgent) {
-        result += ` Could not detect new agent to send message — use list_agents and send_message manually.`;
+      } else if (message && !sid) {
+        result += ` Could not resolve new agent ID to send message — use list_agents and send_message manually.`;
       }
 
+      invalidateAgentCache();
       return { content: [{ type: "text", text: result }] };
     } catch (err) {
       return {
@@ -596,7 +620,7 @@ server.tool(
       const agents = await getCachedAgents();
       const me = resolveSelf(agents);
       if (me) {
-        targetId = me.pokegent_id || me.ccd_session_id || me.session_id;
+        targetId = me.pokegent_id || me.session_id;
       } else {
         targetId = getMySessionId();
       }
@@ -605,7 +629,7 @@ server.tool(
       const agents = await getCachedAgents();
       const match = resolveAgent(agents, targetId);
       if (match) {
-        targetId = match.pokegent_id || match.ccd_session_id || match.session_id;
+        targetId = match.pokegent_id || match.session_id;
       }
     }
 
@@ -779,7 +803,7 @@ server.tool(
       let result = `Resumed session ${fullSessionId.slice(0, 8)}.`;
 
       if (newAgent && task_group) {
-        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.session_id;
         try {
           await fetch(`${DASHBOARD_URL}/api/sessions/${sid}/task-group`, {
             method: "POST",
@@ -793,12 +817,12 @@ server.tool(
       }
 
       if (newAgent && message) {
-        const toId = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
+        const toId = newAgent.pokegent_id || newAgent.session_id;
         const toName = newAgent.display_name || newAgent.profile_name;
         const sessionIdEnv = getMySessionId();
         const agents = await getCachedAgents();
         const me = resolveSelf(agents);
-        const fromId = me ? (me.pokegent_id || me.ccd_session_id || me.session_id) : sessionIdEnv;
+        const fromId = me ? (me.pokegent_id || me.session_id) : sessionIdEnv;
         try {
           await apiCall("/api/messages", {
             method: "POST",
@@ -815,7 +839,7 @@ server.tool(
       }
 
       if (newAgent) {
-        const sid = newAgent.pokegent_id || newAgent.ccd_session_id || newAgent.session_id;
+        const sid = newAgent.pokegent_id || newAgent.session_id;
         result += ` New session ID: ${sid.slice(0, 8)}.`;
       }
 

@@ -105,15 +105,15 @@ func TestRunningListByContent(t *testing.T) {
 
 func TestRunningGetBySessionIDNotFilename(t *testing.T) {
 	// After hook reconciliation, filename might not match session_id
-	// e.g. file is "personal-ccd-uuid.json" but content has session_id: "claude-uuid"
+	// e.g. file is "personal-pokegent-uuid.json" but content has session_id: "claude-uuid"
 	dir := setupTestDir(t)
 	runDir := filepath.Join(dir, "running")
 
 	writeTestJSON(t, filepath.Join(runDir, "personal-old-uuid.json"), RunningSession{
-		Profile:      "personal",
-		SessionID:    "new-claude-uuid",
-		CCDSessionID: "old-uuid",
-		PID:          1234,
+		Profile:    "personal",
+		SessionID:  "new-claude-uuid",
+		PokegentID: "old-uuid",
+		PID:        1234,
 	})
 
 	entries, _ := os.ReadDir(runDir)
@@ -191,9 +191,9 @@ func TestRunningCloneCollision(t *testing.T) {
 	})
 
 	// Clone tries to reconcile to same session_id
-	clonePath := filepath.Join(runDir, "personal-ccd-uuid.json")
+	clonePath := filepath.Join(runDir, "personal-pokegent-uuid.json")
 	writeTestJSON(t, clonePath, RunningSession{
-		Profile: "personal", SessionID: "ccd-uuid", CCDSessionID: "ccd-uuid", PID: 200,
+		Profile: "personal", SessionID: "pokegent-uuid", PokegentID: "pokegent-uuid", PID: 200,
 	})
 
 	// Simulate reconciliation: clone wants to rename to personal-sid-1.json
@@ -437,13 +437,13 @@ func TestSessionIDMapRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "session-id-map.json")
 
 	m := map[string]string{
-		"ccd-uuid-1": "claude-uuid-1",
-		"ccd-uuid-2": "claude-uuid-2",
+		"pokegent-uuid-1": "claude-uuid-1",
+		"pokegent-uuid-2": "claude-uuid-2",
 	}
 	writeTestJSON(t, path, m)
 
 	got := readTestJSON[map[string]string](t, path)
-	if got["ccd-uuid-1"] != "claude-uuid-1" {
+	if got["pokegent-uuid-1"] != "claude-uuid-1" {
 		t.Error("session ID map roundtrip failed")
 	}
 }

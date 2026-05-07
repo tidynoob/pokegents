@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { SpritePicker } from './SpritePicker'
 import { setSprite } from '../api'
+import { PixelSprite } from './PixelSprite'
+import { tinySpriteScaleFor, useSpriteNaturalSize } from '../utils/spriteSizing'
 
 export function hashString(s: string): number {
   let hash = 0
@@ -25,6 +27,9 @@ interface CreatureIconProps {
 export function CreatureIcon({ sessionId, size = 40, noGlow, doneFlash, spriteOverride, editable, noBg }: CreatureIconProps) {
   const sprite = spriteOverride || 'pokeball'
   const [showPicker, setShowPicker] = useState(false)
+  const naturalSize = useSpriteNaturalSize(sprite)
+  const baseScale = size < 32 ? size / 32 : 1
+  const scale = baseScale * tinySpriteScaleFor(naturalSize)
 
   const handleSelect = async (newSprite: string) => {
     await setSprite(sessionId, newSprite)
@@ -33,18 +38,15 @@ export function CreatureIcon({ sessionId, size = 40, noGlow, doneFlash, spriteOv
   return (
     <>
       <div
-        className={`shrink-0 flex items-center justify-center overflow-visible ${!noGlow && !noBg ? 'bg-black/20 rounded-lg' : ''} ${editable ? 'cursor-pointer hover:brightness-125' : ''}`}
+        className={`shrink-0 flex items-center justify-center overflow-visible ${!noGlow && !noBg ? 'theme-bg-panel-muted rounded-lg' : ''} ${editable ? 'cursor-pointer hover:brightness-125' : ''}`}
         style={{ width: size, height: size }}
         onClick={editable ? (e) => { e.stopPropagation(); setShowPicker(true) } : undefined}
       >
-        <img
+        <PixelSprite
           className="creature-sprite"
-          src={`/sprites/${sprite}.png`}
+          sprite={sprite}
           alt={sprite}
-          style={{
-            imageRendering: 'pixelated',
-            ...(noGlow ? {} : { transform: 'scale(1.3)' }),
-          }}
+          scale={scale}
         />
       </div>
       {showPicker && createPortal(

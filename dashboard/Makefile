@@ -1,13 +1,17 @@
-.PHONY: build build-server build-web dev install clean
+.PHONY: build build-server build-web build-acp dev install clean
 
 # Build everything
-build: build-server build-web
+build: build-server build-web build-acp
 
 build-server:
 	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard .
 
 build-web:
+	../scripts/fetch-pokesprite-assets.sh
 	cd web && npm ci --silent && npm run build
+
+build-acp:
+	cd acp-fork && npm ci --silent && if [ -f tsconfig.json ]; then npm run build; else test -f dist/index.js; fi
 
 # Dev mode: run both servers
 dev:
@@ -20,8 +24,8 @@ install: build
 	@echo ""
 	@echo "✓ Dashboard built"
 	@echo "  Run ../install.sh to register hooks"
-	@echo "  Start:  ./ccd-dashboard serve"
+	@echo "  Start:  ./pokegents-dashboard serve"
 
 clean:
 	rm -f pokegents-dashboard
-	rm -rf web/dist web/node_modules
+	rm -rf web/dist web/node_modules acp-fork/dist acp-fork/node_modules

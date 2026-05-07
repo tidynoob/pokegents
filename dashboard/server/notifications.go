@@ -15,19 +15,27 @@ import (
 
 // Notifier sends macOS notifications with per-session debounce.
 type Notifier struct {
-	mu         sync.Mutex
-	lastSent   map[string]time.Time // session_id → last notification time
-	debounce   time.Duration
-	spriteDir  string            // path to sprites directory
-	sprites    []string          // sorted sprite names (no extension)
-	overrides  map[string]string // session_id → sprite name
+	mu            sync.Mutex
+	lastSent      map[string]time.Time // session_id → last notification time
+	debounce      time.Duration
+	sink          NotificationSink
+	spriteDir     string            // path to sprites directory
+	sprites       []string          // sorted sprite names (no extension)
+	overrides     map[string]string // session_id → sprite name
 	overridesPath string
 }
+
+type NotificationSink interface {
+	Send(title, body, iconPath string)
+}
+
+type MacNotificationSink struct{}
 
 func NewNotifier(webDir, dataDir string) *Notifier {
 	n := &Notifier{
 		lastSent:      make(map[string]time.Time),
 		debounce:      30 * time.Second,
+		sink:          MacNotificationSink{},
 		spriteDir:     filepath.Join(webDir, "sprites"),
 		overridesPath: filepath.Join(dataDir, "sprite-overrides.json"),
 	}
@@ -77,7 +85,7 @@ func (n *Notifier) spritePathForSession(ids ...string) string {
 		}
 	}
 	if sprite == "" {
-		// Hash the first ID (ccd_session_id) — matches pokegent.sh
+		// Hash the first stable ID.
 		h := int32(0)
 		for _, c := range ids[0] {
 			h = ((h << 5) - h) + int32(c)
@@ -138,16 +146,15 @@ func (n *Notifier) MaybeNotify(evt HookEvent, agent *AgentState) {
 	n.lastSent[evt.SessionID] = time.Now()
 	n.mu.Unlock()
 
-	// Pass both IDs — check overrides under either, hash the ccd_session_id
 	spriteIDs := []string{evt.SessionID}
-	if agent.CCDSessionID != "" {
-		spriteIDs = []string{agent.CCDSessionID, evt.SessionID}
+	if agent.PokegentID != "" {
+		spriteIDs = []string{agent.PokegentID, evt.SessionID}
 	}
 	spritePath := n.spritePathForSession(spriteIDs...)
-	go sendMacNotification(title, body, spritePath)
+	go n.sink.Send(title, body, spritePath)
 }
 
-func sendMacNotification(title, body, iconPath string) {
+func (MacNotificationSink) Send(title, body, iconPath string) {
 	// Prefer terminal-notifier (supports custom icons), fall back to osascript
 	if tn, err := exec.LookPath("terminal-notifier"); err == nil {
 		args := []string{"-title", title, "-message", body, "-group", "pokegents"}

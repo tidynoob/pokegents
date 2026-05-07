@@ -4,12 +4,26 @@
 *.swo
 *~
 
+# Local env/secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+dashboard/config/
+*.sqlite3
+*.sqlite3-*
+*.old
+*.log
+
 # Build artifacts
 bin/
 dashboard/pokegents-dashboard
 dashboard/web/node_modules/
 dashboard/web/dist/
+dashboard/web/public/sprites/
+dashboard/acp-fork/node_modules/
 mcp/node_modules/
+dashboard/vendor/
 *.db
 
 # Never commit user data (lives in ~/.ccsession/)

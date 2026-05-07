@@ -14,7 +14,7 @@ _pokegent_kill_dashboard() {
 }
 
 _pokegent_list_profiles() {
-  echo "Legacy profiles:"
+  echo "Compatibility profiles:"
   local _found=false
   for f in "$POKEGENTS_DATA/profiles"/*.json(N); do
     _found=true
@@ -65,6 +65,4 @@ _pokegent_list_all() {
   _pokegent_list_projects
   echo ""
   _pokegent_list_roles
-  echo ""
-  _pokegent_list_profiles
 }

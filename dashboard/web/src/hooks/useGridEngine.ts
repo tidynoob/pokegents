@@ -31,6 +31,7 @@ const DEFAULT_CARDS_PER_COL = 3
 const DEFAULT_GAP = 8
 const PADDING = 0
 const MIN_CELL_PX = 16
+const MIN_READABLE_CELL_W = 240
 
 // ── Pure helpers ───────────────────────────────────────────
 
@@ -99,8 +100,9 @@ export interface GridEngine {
   effectiveOrder: string[]
   previewOrder: string[] | null
 
-  // Density knobs.
+  // Density knobs. `settings` is the effective responsive density; requestedSettings is the user preference.
   settings: GridEngineSettings
+  requestedSettings: GridEngineSettings
 
   // Cell geometry derived from container size.
   cellW: number
@@ -164,8 +166,9 @@ export function useGridEngine(
 
   // ── Cell dimensions — observed from the scroll container ──
   const [dims, setDims] = useState(() => ({
-    cellW: Math.max(MIN_CELL_PX, (window.innerWidth - PADDING - (cardsPerRow - 1) * gap) / cardsPerRow),
+    cellW: Math.max(MIN_CELL_PX, (window.innerWidth - PADDING - (gap * 2) - (cardsPerRow - 1) * gap) / cardsPerRow),
     cellH: 220,
+    effectiveCardsPerRow: cardsPerRow,
   }))
 
   useEffect(() => {
@@ -175,11 +178,21 @@ export function useGridEngine(
       if (!container) return
       const w = container.clientWidth
       const h = container.clientHeight
-      const cellW = Math.max(MIN_CELL_PX, (w - (cardsPerRow - 1) * gap) / cardsPerRow)
+      const usableW = Math.max(0, w - (gap * 2))
+      // User setting is a maximum column count. If the available width shrinks
+      // (e.g. chat panel is open), reduce columns so cards keep a readable
+      // minimum width instead of crushing content.
+      const maxReadableCols = Math.max(1, Math.floor((usableW + gap) / (MIN_READABLE_CELL_W + gap)))
+      const effectiveCardsPerRow = Math.max(1, Math.min(cardsPerRow, maxReadableCols))
+      const cellW = Math.max(MIN_CELL_PX, (usableW - (effectiveCardsPerRow - 1) * gap) / effectiveCardsPerRow)
       // cardsPerCol determines visible rows: shrink cells so exactly N rows
       // fit. Extra cards wrap below the fold and the container scrolls.
       const cellH = Math.max(MIN_CELL_PX, (h - (cardsPerCol - 1) * gap) / cardsPerCol)
-      setDims(prev => (Math.abs(prev.cellW - cellW) < 1 && Math.abs(prev.cellH - cellH) < 1) ? prev : { cellW, cellH })
+      setDims(prev => (
+        Math.abs(prev.cellW - cellW) < 1 &&
+        Math.abs(prev.cellH - cellH) < 1 &&
+        prev.effectiveCardsPerRow === effectiveCardsPerRow
+      ) ? prev : { cellW, cellH, effectiveCardsPerRow })
     }
     requestAnimationFrame(() => requestAnimationFrame(measure))
     const ro = new ResizeObserver(measure)
@@ -249,6 +262,7 @@ export function useGridEngine(
   }, [agentIds, agentIdSet, cardsPerRow, cardsPerCol, gap, persist])
 
   // ── Card mode (single value, derived from cellH) ──
+  const effectiveCardsPerRow = dims.effectiveCardsPerRow
   const cardMode = useMemo(() => cardModeFor(dims.cellH), [dims.cellH])
   const getCardMode = useCallback((_id: string) => cardMode, [cardMode])
 
@@ -264,14 +278,14 @@ export function useGridEngine(
     for (let i = 0; i < effectiveOrder.length; i++) {
       const id = effectiveOrder[i]
       out[id] = {
-        col: (i % cardsPerRow) + 1,
-        row: Math.floor(i / cardsPerRow) + 1,
+        col: (i % effectiveCardsPerRow) + 1,
+        row: Math.floor(i / effectiveCardsPerRow) + 1,
         w: 1,
         h: 1,
       }
     }
     return out
-  }, [effectiveOrder, cardsPerRow])
+  }, [effectiveOrder, effectiveCardsPerRow])
 
   const gridRectToPixels = useCallback(
     (rect: GridRect): DOMRect => {
@@ -295,12 +309,12 @@ export function useGridEngine(
       const y = py - rect.top + el.scrollTop
       const colSpan = dims.cellW + gap
       const rowSpan = dims.cellH + gap
-      const col = Math.max(0, Math.min(cardsPerRow - 1, Math.floor(x / colSpan)))
+      const col = Math.max(0, Math.min(effectiveCardsPerRow - 1, Math.floor(x / colSpan)))
       const row = Math.max(0, Math.floor(y / rowSpan))
-      const i = row * cardsPerRow + col
+      const i = row * effectiveCardsPerRow + col
       return Math.max(0, Math.min(orderLen - 1, i))
     },
-    [cardsPerRow, dims.cellW, dims.cellH, gap],
+    [effectiveCardsPerRow, dims.cellW, dims.cellH, gap],
   )
 
   const lastDropIdx = useRef(-1)
@@ -407,7 +421,8 @@ export function useGridEngine(
     order,
     effectiveOrder,
     previewOrder,
-    settings: { cardsPerRow, cardsPerCol, gap },
+    settings: { cardsPerRow: effectiveCardsPerRow, cardsPerCol, gap },
+    requestedSettings: { cardsPerRow, cardsPerCol, gap },
     cellW: dims.cellW,
     cellH: dims.cellH,
     gap,

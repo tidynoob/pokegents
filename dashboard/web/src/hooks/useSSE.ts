@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { AgentState, AgentConnection, AgentMessage } from '../types'
+import { AgentState, AgentMessage } from '../types'
+
+
+function activitySignature(items?: { time: string; type: string; text: string }[]): string {
+  return (items || []).map(item => `${item.time}|${item.type}|${item.text}`).join('\n')
+}
+
+function stringListSignature(items?: string[]): string {
+  return (items || []).join('\n')
+}
 
 function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
   if (a.length !== b.length) return false
@@ -9,6 +18,9 @@ function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
         a[i].detail !== b[i].detail ||
         a[i].last_trace !== b[i].last_trace ||
         a[i].last_summary !== b[i].last_summary ||
+        a[i].card_preview?.phase !== b[i].card_preview?.phase ||
+        a[i].card_preview?.text !== b[i].card_preview?.text ||
+        activitySignature(a[i].card_preview?.feed) !== activitySignature(b[i].card_preview?.feed) ||
         a[i].user_prompt !== b[i].user_prompt ||
         a[i].display_name !== b[i].display_name ||
         a[i].sprite !== b[i].sprite ||
@@ -17,8 +29,8 @@ function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
         a[i].project !== b[i].project ||
         a[i].busy_since !== b[i].busy_since ||
         a[i].context_tokens !== b[i].context_tokens ||
-        (a[i].recent_actions?.length || 0) !== (b[i].recent_actions?.length || 0) ||
-        (a[i].activity_feed?.length || 0) !== (b[i].activity_feed?.length || 0)) {
+        stringListSignature(a[i].recent_actions) !== stringListSignature(b[i].recent_actions) ||
+        activitySignature(a[i].activity_feed) !== activitySignature(b[i].activity_feed)) {
       return false
     }
   }
@@ -27,7 +39,6 @@ function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
 
 export function useSSE() {
   const [agents, setAgents] = useState<AgentState[]>([])
-  const [connections, setConnections] = useState<AgentConnection[]>([])
   const [newMessage, setNewMessage] = useState<AgentMessage | null>(null)
   const [connected, setConnected] = useState(false)
   const esRef = useRef<EventSource | null>(null)
@@ -70,7 +81,7 @@ export function useSSE() {
     es.addEventListener('agent_state_patch', (e) => {
       touch()
       try {
-        const patch = JSON.parse(e.data) as {
+        const patch = JSON.parse(e.data) as Partial<AgentState> & {
           pokegent_id: string
           state: string
           busy_since: string
@@ -85,18 +96,18 @@ export function useSSE() {
           updated[idx] = {
             ...updated[idx],
             state: patch.state,
+            detail: patch.detail ?? updated[idx].detail,
             busy_since: patch.busy_since,
+            last_summary: patch.last_summary ?? updated[idx].last_summary,
+            last_trace: patch.last_trace ?? updated[idx].last_trace,
+            user_prompt: patch.user_prompt ?? updated[idx].user_prompt,
+            recent_actions: patch.recent_actions ?? updated[idx].recent_actions,
+            activity_feed: patch.activity_feed ?? updated[idx].activity_feed,
+            card_preview: patch.card_preview ?? updated[idx].card_preview,
             background_tasks: patch.background_tasks,
           }
           return updated
         })
-      } catch { /* ignore */ }
-    })
-
-    es.addEventListener('connections_update', (e) => {
-      touch()
-      try {
-        setConnections(JSON.parse(e.data) as AgentConnection[])
       } catch { /* ignore */ }
     })
 
@@ -142,5 +153,5 @@ export function useSSE() {
     }
   }, [connect])
 
-  return { agents, connections, newMessage, connected }
+  return { agents, newMessage, connected }
 }

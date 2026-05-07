@@ -31,6 +31,29 @@ type runtimeConfigBody struct {
 	Effort string `json:"effort"`
 }
 
+var modelAliases = map[string]string{
+	"opus":       "claude-opus-4-6[1m]",
+	"opus4":      "claude-opus-4-6[1m]",
+	"sonnet":     "claude-sonnet-4-6",
+	"sonnet4":    "claude-sonnet-4-6",
+	"haiku":      "claude-haiku-4-5-20251001",
+	"haiku4":     "claude-haiku-4-5-20251001",
+	"opus-4-7":   "claude-opus-4-7",
+	"opus-4-6":   "claude-opus-4-6[1m]",
+	"sonnet-4-6": "claude-sonnet-4-6",
+	"haiku-4-5":  "claude-haiku-4-5-20251001",
+}
+
+func resolveModelAlias(name string) string {
+	if name == "" {
+		return ""
+	}
+	if resolved, ok := modelAliases[name]; ok {
+		return resolved
+	}
+	return name
+}
+
 func (s *Server) handleSetRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 	var body runtimeConfigBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -41,6 +64,8 @@ func (s *Server) handleSetRuntimeConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "need at least one of {model, effort}", http.StatusBadRequest)
 		return
 	}
+	body.Model = resolveModelAlias(body.Model)
+
 	agent, _, done := s.resolveAgentAndRuntime(w, r)
 	if done {
 		return

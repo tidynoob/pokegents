@@ -1,11 +1,11 @@
 _pokegent_doctor() {
   local ok=0 warn=0 fail=0
 
-  _doc_ok()   { echo "  ✓ $1"; ((ok++)); }
-  _doc_warn() { echo "  · $1"; ((warn++)); }
-  _doc_fail() { echo "  ✗ $1"; ((fail++)); }
+  _doc_ok()   { echo "  ✓ $1"; ((ok++)); return 0; }
+  _doc_warn() { echo "  · $1"; ((warn++)); return 0; }
+  _doc_fail() { echo "  ✗ $1"; ((fail++)); return 0; }
 
-  echo "=== CCD Doctor ==="
+  echo "=== Pokegents Doctor ==="
   echo ""
 
   # ── Dependencies ──
@@ -22,19 +22,25 @@ _pokegent_doctor() {
 
   # ── Data directories ──
   echo "Data directories:"
-  for dir in profiles history running status messages; do
+  for dir in projects roles history running status messages; do
     [[ -d "$POKEGENTS_DATA/$dir" ]] && _doc_ok "$POKEGENTS_DATA/$dir" || _doc_fail "$POKEGENTS_DATA/$dir missing"
   done
   echo ""
 
-  # ── Profiles ──
-  echo "Profiles:"
-  local pcount=0
-  for f in "$POKEGENTS_DATA/profiles"/*.json(N); do ((pcount++)); done
-  if [[ "$pcount" -gt 0 ]]; then
-    _doc_ok "$pcount profile(s) found"
+  # ── Projects / Roles ──
+  echo "Projects / roles:"
+  local project_count=0 role_count=0
+  for f in "$POKEGENTS_DATA/projects"/*.json(N); do ((project_count++)); done
+  for f in "$POKEGENTS_DATA/roles"/*.json(N); do ((role_count++)); done
+  if [[ "$project_count" -gt 0 ]]; then
+    _doc_ok "$project_count project(s) found"
   else
-    _doc_fail "No profiles in $POKEGENTS_DATA/profiles/"
+    _doc_fail "No projects in $POKEGENTS_DATA/projects/"
+  fi
+  if [[ "$role_count" -gt 0 ]]; then
+    _doc_ok "$role_count role(s) found"
+  else
+    _doc_warn "No roles in $POKEGENTS_DATA/roles/"
   fi
   echo ""
 

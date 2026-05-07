@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ProjectInfo, RoleInfo, launchPokegent, sendMessage, setSprite, renameAgent, fetchSessions } from '../api'
+import { GameModal } from './GameModal'
+import { ProjectInfo, RoleInfo, BackendInfo, launchPokegent, setSprite, renameAgent, fetchSessions, fetchBackends, fetchSetupStatus } from '../api'
 import { AgentState } from '../types'
 import { POKEMON_SPRITES } from './sprites'
+import { PixelSprite } from './PixelSprite'
 import { SpritePicker } from './SpritePicker'
 
 interface LaunchModalProps {
@@ -33,28 +35,28 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
 
   return (
     <div ref={ref} className="relative">
-      <label className="text-[7px] font-pixel text-white/50 pixel-shadow block mb-1.5">{label}</label>
+      <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">{label}</label>
       <button
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between gba-panel px-3 py-2 text-[10px] font-mono text-white/90 hover:brightness-110 transition-colors"
+        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors"
       >
         <span className="flex items-center gap-2">
           {selected?.sprite && (
-            <img src={`/sprites/${selected.sprite}.png`} alt="" className="w-4 h-4" style={{ imageRendering: 'pixelated' }} />
+            <div className="w-4 h-4 flex items-center justify-center overflow-visible"><PixelSprite sprite={selected.sprite} scale={0.5} alt="" /></div>
           )}
           {selected?.color && (
             <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${selected.color[0]},${selected.color[1]},${selected.color[2]})` }} />
           )}
           {selected ? selected.label : 'None'}
         </span>
-        <span className="text-white/30 text-[8px]">{open ? '▲' : '▼'}</span>
+        <span className="theme-text-faint text-l">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 gba-panel z-50 py-1 max-h-[200px] overflow-y-auto">
+        <div className="absolute top-full left-0 right-0 mt-1 gba-dialog-dark z-50 py-1 max-h-[220px] overflow-y-auto">
           {allowNone !== false && (
             <button
               onClick={() => { onChange(''); setOpen(false) }}
-              className={`w-full text-left px-3 py-1.5 text-[10px] font-mono hover:bg-white/10 transition-colors ${!value ? 'text-accent-yellow' : 'text-white/50'}`}
+              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-panel-hover transition-colors ${!value ? 'text-accent-yellow' : 'theme-text-muted'}`}
             >
               None
             </button>
@@ -63,10 +65,10 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
             <button
               key={o.key}
               onClick={() => { onChange(o.key); setOpen(false) }}
-              className={`w-full text-left px-3 py-1.5 text-[10px] font-mono hover:bg-white/10 transition-colors flex items-center gap-2 ${value === o.key ? 'text-accent-yellow' : 'text-white/90'}`}
+              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-panel-hover transition-colors flex items-center gap-2 ${value === o.key ? 'text-accent-yellow' : 'theme-text-primary'}`}
             >
               {o.sprite && (
-                <img src={`/sprites/${o.sprite}.png`} alt="" className="w-4 h-4" style={{ imageRendering: 'pixelated' }} />
+                <div className="w-4 h-4 flex items-center justify-center overflow-visible"><PixelSprite sprite={o.sprite} scale={0.5} alt="" /></div>
               )}
               {o.color && (
                 <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${o.color[0]},${o.color[1]},${o.color[2]})` }} />
@@ -80,50 +82,79 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
   )
 }
 
-export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalProps) {
-  const [selectedParent, setSelectedParent] = useState('')
-  const [selectedRole, setSelectedRole] = useState('')
-  const [selectedProject, setSelectedProject] = useState('')
-  const [name, setName] = useState('')
+
+function pokemonDisplayName(sprite: string): string {
+  return sprite
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function backendKindForBackend(backend?: BackendInfo): 'claude' | 'codex' {
+  const haystack = `${backend?.id || ''} ${backend?.name || ''} ${backend?.type || ''}`.toLowerCase()
+  return haystack.includes('codex') || haystack.includes('gpt') || haystack.includes('openai') ? 'codex' : 'claude'
+}
+
+function backendIdForKind(backends: BackendInfo[], kind: 'claude' | 'codex'): string | undefined {
+  const match = backends.find(b => backendKindForBackend(b) === kind)
+  if (match) return match.id
+  return kind === 'claude' ? 'claude' : 'codex'
+}
+
+export function LaunchModal({ projects, roles, agents: _agents, onClose }: LaunchModalProps) {
+  const [randomSprite] = useState(() => POKEMON_SPRITES[Math.floor(Math.random() * POKEMON_SPRITES.length)])
+  const [selectedRole, setSelectedRole] = useState('implementer')
+  const [selectedProject, setSelectedProject] = useState('current')
+  const [name, setName] = useState(() => pokemonDisplayName(randomSprite))
   const [sprite, setSelectedSprite] = useState('')
   const [showSpritePicker, setShowSpritePicker] = useState(false)
   const [launching, setLaunching] = useState(false)
-  const [iface, setIface] = useState<'iterm2' | 'chat'>(() => {
-    try { return (localStorage.getItem('pokegents-launch-interface') as 'iterm2' | 'chat') || 'iterm2' }
-    catch { return 'iterm2' }
+  const [backends, setBackends] = useState<BackendInfo[]>([])
+  const [backendKind, setBackendKind] = useState<'claude' | 'codex'>('claude')
+  const [iface, setIface] = useState<'terminal' | 'chat'>(() => {
+    try {
+      const stored = localStorage.getItem('pokegents-launch-interface')
+      return stored === 'terminal' || stored === 'iterm2' ? 'terminal' : 'chat'
+    }
+    catch { return 'chat' }
   })
   useEffect(() => {
     try { localStorage.setItem('pokegents-launch-interface', iface) } catch { /* ignore */ }
   }, [iface])
 
+  // Fetch setup defaults + backends on mount
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+    fetchSetupStatus().then(status => {
+      const prefInterface = status?.preferences?.default_interface
+      if (prefInterface === 'chat') setIface('chat')
+      else if (prefInterface === 'terminal' || prefInterface === 'iterm2') setIface('terminal')
+    }).catch(() => {})
+    fetchBackends().then(list => {
+      setBackends(list)
+      const def = list.find(b => b.default)
+      if (def) setBackendKind(backendKindForBackend(def))
+    })
+  }, [])
 
-  // When parent changes, pre-select their role and project
-  const handleParentChange = (parentId: string) => {
-    setSelectedParent(parentId)
-    if (parentId) {
-      const parent = agents.find(a => a.session_id === parentId)
-      if (parent) {
-        if (parent.role && roles.some(r => r.name === parent.role)) setSelectedRole(parent.role)
-        if (parent.project && projects.some(p => p.name === parent.project)) setSelectedProject(parent.project)
-      }
+
+  useEffect(() => {
+    if (selectedRole && roles.length > 0 && !roles.some(r => r.name === selectedRole)) {
+      setSelectedRole(roles.find(r => r.name === 'implementer')?.name || roles[0]?.name || '')
     }
-  }
+  }, [roles, selectedRole])
+
+  useEffect(() => {
+    if (selectedProject && projects.length > 0 && !projects.some(p => p.name === selectedProject)) {
+      setSelectedProject(projects.find(p => p.name === 'current')?.name || projects[0]?.name || '')
+    }
+  }, [projects, selectedProject])
 
   const canLaunch = selectedProject || selectedRole
 
   const roleOptions = roles.map(r => ({ key: r.name, label: r.title }))
   const projectOptions = projects.map(p => ({ key: p.name, label: p.title, color: p.color }))
-  const agentOptions = agents.map(a => ({
-    key: a.session_id,
-    label: a.display_name || a.profile_name,
-  }))
 
-  const [randomSprite] = useState(() => POKEMON_SPRITES[Math.floor(Math.random() * POKEMON_SPRITES.length)])
   const displaySprite = sprite || randomSprite
 
   const handleLaunch = async () => {
@@ -145,6 +176,7 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
         sprite: wantSprite || undefined,
         task_group: undefined,
         interface: iface,
+        agent_backend: backendIdForKind(backends, backendKind),
       })
     } catch (err) {
       console.error('launch failed', err)
@@ -164,133 +196,115 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
         const newAgent = fresh.find(a => a.pokegent_id === pokegentId && a.session_id && a.is_alive)
         if (newAgent) {
           if (wantSprite) await setSprite(newAgent.session_id, wantSprite)
-          if (wantName) await renameAgent(newAgent.session_id, wantName)
+          if (wantName) await renameAgent(newAgent.pokegent_id || newAgent.session_id, wantName)
           break
         }
       }
     }
 
-    if (selectedParent) {
-      const roleName = roles.find(r => r.name === selectedRole)?.title || selectedRole
-      const projectName = projects.find(p => p.name === selectedProject)?.title || selectedProject
-      const agentName = name || [roleName, projectName].filter(Boolean).join(' @ ')
-      const desc = [roleName, projectName].filter(Boolean).join(' @ ')
-      await sendMessage(
-        'dashboard',
-        selectedParent,
-        `New agent "${agentName}" spawned reporting to you (${desc}). They've been instructed to follow your direction.`
-      )
-    }
 
     setLaunching(false)
     onClose()
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onClick={onClose}>
+    <GameModal
+      title="New Agent"
+      onClose={onClose}
+      width="min(420px, 96vw)"
+      height="auto"
+      maxHeight="92vh"
+      scanlines={false}
+    >
       <div
-        className="gba-panel p-5 w-[340px] flex flex-col gap-3"
-        onClick={e => e.stopPropagation()}
+        className="p-4 flex flex-col gap-3"
+        style={{
+          borderRadius: '0 0 8px 8px',
+          overflow: 'visible',
+          background: 'var(--theme-chat-panel-bg)',
+          border: '2px solid var(--theme-panel-border)',
+          color: 'var(--theme-panel-text)',
+          fontFamily: 'var(--theme-font-mono)',
+          boxShadow: 'var(--theme-shadow-panel)',
+        }}
       >
-        <div className="flex items-center justify-between">
-          <h3 className="text-[9px] font-pixel text-white pixel-shadow">NEW AGENT</h3>
-          <button onClick={onClose} className="gba-button text-[6px] font-pixel px-2 py-1">CANCEL</button>
-        </div>
+        <GbaDropdown
+          label="Interface"
+          value={iface}
+          options={[
+            { key: 'chat', label: 'Pokegent Chat' },
+            { key: 'terminal', label: 'Terminal' },
+          ]}
+          onChange={key => setIface(key as 'terminal' | 'chat')}
+          allowNone={false}
+        />
 
-        {/* Interface picker — iTerm2 (Claude Code in a tab) vs Chat (ACP panel). */}
-        <div>
-          <label className="text-[7px] font-pixel text-white/50 pixel-shadow block mb-1.5">INTERFACE</label>
-          <div className="flex gap-1">
-            {(['iterm2', 'chat'] as const).map(opt => (
-              <button
-                key={opt}
-                onClick={() => setIface(opt)}
-                className={`flex-1 text-[7px] font-pixel px-2 py-1.5 rounded transition-colors ${
-                  iface === opt ? 'bg-accent-blue text-white' : 'bg-white/10 text-white/50 hover:bg-white/20'
-                }`}
-                style={{
-                  boxShadow: iface === opt
-                    ? 'inset 1px 1px 0 rgba(255,255,255,0.2), inset -1px -1px 0 rgba(0,0,0,0.2)'
-                    : 'none',
-                  textShadow: '1px 1px 0 rgba(0,0,0,0.4)',
-                }}
-              >
-                {opt === 'iterm2' ? 'ITERM2' : 'CHAT'}
-              </button>
-            ))}
-          </div>
-        </div>
+        <GbaDropdown
+          label="Agent backend"
+          value={backendKind}
+          options={[
+            { key: 'claude', label: 'Claude' },
+            { key: 'codex', label: 'Codex' },
+          ]}
+          onChange={key => setBackendKind(key as 'claude' | 'codex')}
+          allowNone={false}
+        />
 
         {/* Name & Pokemon */}
         <div className="flex gap-2 items-end">
-          <div className="flex-1">
-            <label className="text-[7px] font-pixel text-white/50 pixel-shadow block mb-1.5">NAME</label>
+          <div className="flex-1 min-w-0">
+            <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">Name</label>
             <input
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
-              placeholder="Auto-generated"
-              className="w-full gba-panel px-3 py-2 text-[10px] font-mono text-white/90 placeholder:text-white/30 outline-none"
+              placeholder="Pokemon name"
+              className="w-full gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary theme-placeholder-input outline-none focus:border-accent-blue transition-colors"
             />
           </div>
           <div>
-            <label className="text-[7px] font-pixel text-white/50 pixel-shadow block mb-1.5">SPRITE</label>
+            <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">Pokemon</label>
             <button
               onClick={() => setShowSpritePicker(true)}
-              className="gba-panel px-2 py-1 hover:brightness-110 transition-colors flex items-center gap-1.5"
+              className="gba-dialog-dark px-2.5 py-2 hover:brightness-110 focus:border-accent-blue transition-colors flex items-center gap-1.5"
             >
-              <img
-                src={`/sprites/${displaySprite}.png`}
-                alt=""
-                className="w-6 h-6"
-                style={{ imageRendering: 'pixelated' }}
-              />
-              <span className="text-white/30 text-[8px]">▼</span>
+              <div className="w-6 h-6 flex items-center justify-center overflow-visible">
+                <PixelSprite sprite={displaySprite} scale={0.75} alt="" />
+              </div>
+              <span className="theme-text-faint text-l">▼</span>
             </button>
           </div>
         </div>
 
-        {/* Reports To */}
-        <GbaDropdown label="REPORTS TO" value={selectedParent} options={agentOptions} onChange={handleParentChange} />
-
         {/* Role & Project side by side */}
         <div className="flex gap-2">
-          <div className="flex-1">
-            <GbaDropdown label="ROLE" value={selectedRole} options={roleOptions} onChange={setSelectedRole} />
+          <div className="flex-1 min-w-0">
+            <GbaDropdown label="Role" value={selectedRole} options={roleOptions} onChange={setSelectedRole} />
           </div>
-          <div className="flex-1">
-            <GbaDropdown label="PROJECT" value={selectedProject} options={projectOptions} onChange={setSelectedProject} />
+          <div className="flex-1 min-w-0">
+            <GbaDropdown label="Project" value={selectedProject} options={projectOptions} onChange={setSelectedProject} />
           </div>
         </div>
 
-        {/* Preview */}
-        <div className="text-[8px] font-mono text-white/40 px-1">
-          {canLaunch ? (
-            <>
-              pokegent {selectedRole && selectedProject
-                ? `${selectedRole}@${selectedProject}`
-                : selectedProject
-                  ? `@${selectedProject}`
-                  : `${selectedRole}@`
-              }
-              {selectedParent && (
-                <span className="text-white/25"> → {agents.find(a => a.session_id === selectedParent)?.display_name}</span>
-              )}
-            </>
-          ) : (
-            <span className="text-white/20">Select a role or project</span>
-          )}
-        </div>
 
-        <button
-          onClick={handleLaunch}
-          disabled={!canLaunch || launching}
-          className={`w-full gba-button text-[8px] font-pixel px-3 py-2.5 transition-colors ${
-            !canLaunch ? 'opacity-30 cursor-not-allowed' : ''
-          }`}
-        >
-          {launching ? 'LAUNCHING...' : 'GO!'}
-        </button>
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={onClose}
+            disabled={launching}
+            className="gba-button text-m theme-font-display px-3 py-2.5 transition-colors opacity-80"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleLaunch}
+            disabled={!canLaunch || launching}
+            className={`flex-1 gba-button text-m theme-font-display px-3 py-2.5 transition-colors ${
+              !canLaunch ? 'opacity-30 cursor-not-allowed' : ''
+            }`}
+          >
+            {launching ? 'Launching...' : 'Launch'}
+          </button>
+        </div>
       </div>
 
       {showSpritePicker && createPortal(
@@ -301,6 +315,6 @@ export function LaunchModal({ projects, roles, agents, onClose }: LaunchModalPro
         />,
         document.body
       )}
-    </div>
+    </GameModal>
   )
 }

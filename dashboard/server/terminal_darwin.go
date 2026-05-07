@@ -80,7 +80,7 @@ func (t *ITerm2Terminal) CloseSession(itermSessionID, tty string) error {
 func (t *ITerm2Terminal) CloneSession(profile, sessionIDPrefix string) error {
 	safeProfile := strings.ReplaceAll(profile, `"`, `\"`)
 	safeSID := strings.ReplaceAll(sessionIDPrefix, `"`, `\"`)
-	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
+	// Delay 1s after creating tab to let the shell initialize PATH/shims.
 	script := fmt.Sprintf(`
 tell application "iTerm2"
 	tell current window
@@ -112,6 +112,10 @@ func (t *ITerm2Terminal) LaunchProfile(opts LaunchOptions) error {
 		safeGroup := strings.ReplaceAll(opts.TaskGroup, `"`, `\"`)
 		cmd = fmt.Sprintf("%s --group %s", cmd, safeGroup)
 	}
+	if opts.HandoffContextPath != "" {
+		cmd = fmt.Sprintf("%s --handoff-context-file %s", cmd, shellQuote(opts.HandoffContextPath))
+	}
+	cmd = strings.ReplaceAll(cmd, `"`, `\"`)
 	script := fmt.Sprintf(`
 tell application "iTerm2"
 	tell current window
@@ -123,6 +127,10 @@ tell application "iTerm2"
 	end tell
 end tell`, createTab, cmd)
 	return exec.Command("osascript", "-e", script).Run()
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (t *ITerm2Terminal) ResumeSession(profile, sessionID, compact string) error {
@@ -139,7 +147,7 @@ func (t *ITerm2Terminal) ResumePokegent(profile, sessionID, pokegentID, compact 
 	if safePgid != "" {
 		pgidArg = fmt.Sprintf(" --pokegent-id %s", safePgid)
 	}
-	// Delay 1s after creating tab to let zsh source .zshrc (which defines pokegents)
+	// Delay 1s after creating tab to let the shell initialize PATH/shims.
 	autoAnswer := ""
 	if compact == "yes" {
 		autoAnswer = `

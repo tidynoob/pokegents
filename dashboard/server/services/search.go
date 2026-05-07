@@ -52,15 +52,15 @@ type SearchResponse struct {
 
 // TranscriptSummary is a per-conversation entry under a pokegent.
 type TranscriptSummary struct {
-	SessionID      string  `json:"session_id"`
-	StartedAt      string  `json:"started_at"`
-	LastModified   float64 `json:"last_modified"`
-	CustomTitle    string  `json:"custom_title"`
-	FirstUserMsg   string  `json:"first_user_msg"`
-	ProjectDir     string  `json:"project_dir"`
-	GitBranch      string  `json:"git_branch"`
-	CWD            string  `json:"cwd"`
-	Snippet        string  `json:"snippet,omitempty"`
+	SessionID    string  `json:"session_id"`
+	StartedAt    string  `json:"started_at"`
+	LastModified float64 `json:"last_modified"`
+	CustomTitle  string  `json:"custom_title"`
+	FirstUserMsg string  `json:"first_user_msg"`
+	ProjectDir   string  `json:"project_dir"`
+	GitBranch    string  `json:"git_branch"`
+	CWD          string  `json:"cwd"`
+	Snippet      string  `json:"snippet,omitempty"`
 }
 
 // PokegentSummary is one row in the PC box — an agent (pokegent_id) with its latest transcript.
@@ -196,32 +196,72 @@ func (ss *SearchService) BuildIndex() {
 	// Intentionally does NOT hold ss.mu — walking 100s of JSONL files would
 	// block all read handlers for seconds. Per-row DB writes are safe because
 	// sqlite3 serializes at the connection layer.
+	indexed := 0
 	entries, err := os.ReadDir(ss.claudeProjectDir)
 	if err != nil {
 		log.Printf("search: cannot read projects dir: %v", err)
-		return
-	}
-
-	indexed := 0
-	for _, dirEntry := range entries {
-		if !dirEntry.IsDir() {
-			continue
-		}
-		projDir := filepath.Join(ss.claudeProjectDir, dirEntry.Name())
-		files, err := filepath.Glob(filepath.Join(projDir, "*.jsonl"))
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if ss.indexFileIfNeeded(f, dirEntry.Name()) {
-				indexed++
+	} else {
+		for _, dirEntry := range entries {
+			if !dirEntry.IsDir() {
+				continue
+			}
+			projDir := filepath.Join(ss.claudeProjectDir, dirEntry.Name())
+			files, err := filepath.Glob(filepath.Join(projDir, "*.jsonl"))
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if ss.indexFileIfNeeded(f, dirEntry.Name()) {
+					indexed++
+				}
 			}
 		}
+	}
+	for _, root := range codexSessionRoots() {
+		backendName := "codex"
+		parts := strings.Split(filepath.ToSlash(root), "/")
+		for i, part := range parts {
+			if part == "codex-homes" && i+1 < len(parts) {
+				backendName = "codex:" + parts[i+1]
+				break
+			}
+		}
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".jsonl") {
+				return nil
+			}
+			if ss.indexFileIfNeeded(path, backendName) {
+				indexed++
+			}
+			return nil
+		})
 	}
 
 	if indexed > 0 {
 		log.Printf("search: indexed %d session files", indexed)
 	}
+}
+
+func codexSessionRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	roots := []string{filepath.Join(home, ".codex", "sessions")}
+	codexHomes, _ := filepath.Glob(filepath.Join(home, ".pokegents", "codex-homes", "*", "sessions"))
+	roots = append(roots, codexHomes...)
+	out := roots[:0]
+	seen := map[string]bool{}
+	for _, root := range roots {
+		if root == "" || seen[root] {
+			continue
+		}
+		if st, err := os.Stat(root); err == nil && st.IsDir() {
+			seen[root] = true
+			out = append(out, root)
+		}
+	}
+	return out
 }
 
 func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
@@ -232,25 +272,19 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 	modTime := float64(info.ModTime().UnixMilli()) / 1000.0
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 
-	var existingMod float64
-	err = ss.db.QueryRow("SELECT last_modified FROM session_meta WHERE session_id = ?", sessionID).Scan(&existingMod)
-	if err == nil && existingMod >= modTime {
-		return false
-	}
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 
 	var (
-		customTitle       string
-		firstUserMessage  string
-		userMessages      strings.Builder
-		assistantMsgs     strings.Builder
-		cwd               string
-		gitBranch         string
-		startedAt         string
+		customTitle        string
+		firstUserMessage   string
+		userMessages       strings.Builder
+		assistantMsgs      strings.Builder
+		cwd                string
+		gitBranch          string
+		startedAt          string
 		embeddedPokegentID string
 	)
 
@@ -264,15 +298,26 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 		}
 
 		entryType, _ := entry["type"].(string)
+		payload, _ := entry["payload"].(map[string]any)
 
 		if cwd == "" {
 			if c, ok := entry["cwd"].(string); ok {
 				cwd = c
+			} else if payload != nil {
+				if c, ok := payload["cwd"].(string); ok {
+					cwd = c
+				}
 			}
 		}
 		if gitBranch == "" {
 			if b, ok := entry["gitBranch"].(string); ok {
 				gitBranch = b
+			} else if payload != nil {
+				if git, ok := payload["git"].(map[string]any); ok {
+					if b, ok := git["branch"].(string); ok {
+						gitBranch = b
+					}
+				}
 			}
 		}
 		if startedAt == "" {
@@ -282,6 +327,12 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 		}
 
 		switch entryType {
+		case "session_meta":
+			if payload != nil {
+				if id, ok := payload["id"].(string); ok && id != "" {
+					sessionID = id
+				}
+			}
 		case "pokegent-id":
 			if p, ok := entry["pokegent_id"].(string); ok {
 				embeddedPokegentID = p
@@ -305,7 +356,58 @@ func (ss *SearchService) indexFileIfNeeded(path, projectDir string) bool {
 				assistantMsgs.WriteString(text)
 				assistantMsgs.WriteString("\n")
 			}
+		case "response_item":
+			if payload == nil {
+				continue
+			}
+			role, _ := payload["role"].(string)
+			text := extractCodexPayloadText(payload)
+			if text == "" {
+				continue
+			}
+			switch role {
+			case "user":
+				trimmed := strings.TrimSpace(text)
+				if strings.HasPrefix(trimmed, "<") {
+					continue
+				}
+				if firstUserMessage == "" {
+					firstUserMessage = truncate(text, 200)
+				}
+				userMessages.WriteString(text)
+				userMessages.WriteString("\n")
+			case "assistant":
+				assistantMsgs.WriteString(text)
+				assistantMsgs.WriteString("\n")
+			}
+		case "event_msg":
+			if payload == nil {
+				continue
+			}
+			msgType, _ := payload["type"].(string)
+			msg, _ := payload["message"].(string)
+			if msg == "" {
+				continue
+			}
+			switch msgType {
+			case "user_message":
+				if firstUserMessage == "" {
+					firstUserMessage = truncate(msg, 200)
+				}
+				userMessages.WriteString(msg)
+				userMessages.WriteString("\n")
+			case "agent_message":
+				assistantMsgs.WriteString(msg)
+				assistantMsgs.WriteString("\n")
+			}
 		}
+	}
+
+	var existingMod, existingTranscriptMod float64
+	metaOK := ss.db.QueryRow("SELECT last_modified FROM session_meta WHERE session_id = ?", sessionID).Scan(&existingMod) == nil
+	transcriptOK := ss.db.QueryRow("SELECT last_modified FROM session_transcripts WHERE session_id = ?", sessionID).Scan(&existingTranscriptMod) == nil
+	if metaOK && existingMod >= modTime && transcriptOK && existingTranscriptMod >= modTime {
+		return false
 	}
 
 	profileName := ""
@@ -919,8 +1021,8 @@ func (ss *SearchService) SearchPokegents(query string, limit int) ([]PokegentSum
 
 // MigrateFromSessionMeta backfills session_transcripts + pokegents_meta from
 // existing data. Idempotent — skips if session_transcripts already has rows.
-// sessionIDMap is the legacy ccd_session_id → claude_session_id map used only
-// here as a last-resort attribution source.
+// sessionIDMap is the pokegent_id → claude_session_id map used only here as a
+// last-resort attribution source.
 func (ss *SearchService) MigrateFromSessionMeta(
 	identities []IdentitySnapshot,
 	sessionIDMap map[string]string,
@@ -938,13 +1040,13 @@ func (ss *SearchService) MigrateFromSessionMeta(
 	}
 	log.Printf("search: migrating legacy session_meta → session_transcripts + pokegents_meta")
 
-	// Build lookup: claude_sid → pokegent_id from the legacy session-id-map.
-	// sessionIDMap is ccd_sid → claude_sid, but ccd_sid historically equals pokegent_id.
+	// Build lookup: claude_sid → pokegent_id from the session-id map.
+	// sessionIDMap is pokegent_id → claude_sid.
 	claudeToPgid := make(map[string]string, len(sessionIDMap))
-	for ccdSID, claudeSID := range sessionIDMap {
+	for pokegentID, claudeSID := range sessionIDMap {
 		// Last-write wins is fine here — sprites within a cluster were equalized
 		// by the one-time identity patch.
-		claudeToPgid[claudeSID] = ccdSID
+		claudeToPgid[claudeSID] = pokegentID
 	}
 
 	ss.mu.Lock()
@@ -1087,6 +1189,38 @@ func extractAssistantText(entry map[string]any) string {
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+func extractCodexPayloadText(payload map[string]any) string {
+	content := payload["content"]
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var texts []string
+		for _, block := range c {
+			m, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, ok := m["text"].(string); ok {
+				texts = append(texts, t)
+				continue
+			}
+			if t, ok := m["input_text"].(string); ok {
+				texts = append(texts, t)
+				continue
+			}
+			if t, ok := m["output_text"].(string); ok {
+				texts = append(texts, t)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	if t, ok := payload["text"].(string); ok {
+		return t
+	}
+	return ""
 }
 
 func truncate(s string, maxLen int) string {

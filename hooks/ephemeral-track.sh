@@ -30,7 +30,7 @@ fi
 POKEGENTS_PORT=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
 DASHBOARD_URL="${POKEGENTS_DASHBOARD_URL:-http://localhost:$POKEGENTS_PORT}"
 
-# Resolve parent session ID (prefer stable pokegent_id, then CCD session ID)
+# Resolve parent session ID (prefer stable pokegent_id)
 PARENT_SID="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-$SESSION_ID}}"
 
 # API helper with 2s timeout and silent failure

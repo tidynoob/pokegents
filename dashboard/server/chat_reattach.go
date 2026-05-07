@@ -245,41 +245,96 @@ func waitForOrphansGone(claudeSessionID string, timeout time.Duration) {
 // resolveModelEffort follows the same precedence pokegent.sh uses for
 // iterm2 launches: running-file (launch-time snapshot) wins, then role
 // config, then project config. Either field may end up empty if no
-// config in the chain provides one — caller passes the empty values to
-// the chat backend, which falls back to SDK defaults.
-const defaultChatModel = "claude-opus-4-6[1m]"
+// config in the chain provides one. UI display falls back to an explicit
+// provider-scoped unknown label instead of pretending a concrete model is known.
+const defaultClaudeModelLabel = "Claude [unknown model]"
+const defaultCodexModelLabel = "Codex [unknown model]"
 
 func (s *Server) resolveModelEffort(rsModel, rsEffort, role, project string) (model, effort string) {
-	model = rsModel
-	effort = rsEffort
-	if s.fileStore == nil {
-		if model == "" {
-			model = defaultChatModel
+	return s.resolveModelEffortForBackend(rsModel, rsEffort, role, project, "claude")
+}
+
+func isClaudeBackend(backend string) bool {
+	return backend == "" || backend == "claude" || backend == "claude-acp"
+}
+
+func isClaudeModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "claude")
+}
+
+func displayModelForBackend(model, backendKey, backendType string) string {
+	model = strings.TrimSpace(resolveModelAlias(model))
+	if isClaudeBackend(backendKey) || isClaudeBackend(backendType) {
+		if model != "" {
+			return model
 		}
-		return
+		return defaultClaudeModelLabel
 	}
-	if role != "" {
+	if strings.Contains(strings.ToLower(backendKey+" "+backendType), "codex") {
+		if model != "" {
+			if strings.HasPrefix(strings.ToLower(model), "codex [") {
+				return model
+			}
+			return "Codex [" + model + "]"
+		}
+		return defaultCodexModelLabel
+	}
+	if model != "" {
+		return model
+	}
+	return strings.TrimSpace(backendKey)
+}
+
+func (s *Server) resolveModelEffortForBackend(rsModel, rsEffort, role, project, backendKey string) (model, effort string) {
+	model = resolveModelAlias(rsModel)
+	effort = rsEffort
+	backendType := backendKey
+	backendModel := ""
+	backendEffort := ""
+	if s.backendStore != nil && backendKey != "" {
+		if bc, ok := s.backendStore.Get(backendKey); ok {
+			backendType = bc.Type
+			backendModel = resolveModelAlias(bc.ResolvedModel())
+			backendEffort = strings.TrimSpace(bc.ResolvedEffort())
+		}
+	}
+	nonClaude := !isClaudeBackend(backendKey) && !isClaudeBackend(backendType)
+	if nonClaude && isClaudeModel(model) {
+		model = ""
+	}
+	if s.fileStore != nil && role != "" {
 		if r, err := s.fileStore.Roles.Get(role); err == nil && r != nil {
 			if model == "" && r.Model != "" {
-				model = r.Model
+				roleModel := resolveModelAlias(r.Model)
+				if !nonClaude || !isClaudeModel(roleModel) {
+					model = roleModel
+				}
 			}
 			if effort == "" && r.Effort != "" {
 				effort = r.Effort
 			}
 		}
 	}
-	if project != "" {
+	if s.fileStore != nil && project != "" {
 		if p, err := s.fileStore.Projects.Get(project); err == nil && p != nil {
 			if model == "" && p.Model != "" {
-				model = p.Model
+				projectModel := resolveModelAlias(p.Model)
+				if !nonClaude || !isClaudeModel(projectModel) {
+					model = projectModel
+				}
 			}
 			if effort == "" && p.Effort != "" {
 				effort = p.Effort
 			}
 		}
 	}
-	if model == "" {
-		model = defaultChatModel
+	if model == "" && backendModel != "" {
+		if !nonClaude || !isClaudeModel(backendModel) {
+			model = backendModel
+		}
+	}
+	if effort == "" && backendEffort != "" {
+		effort = backendEffort
 	}
 	return
 }
@@ -289,13 +344,40 @@ func (s *Server) resolveModelEffort(rsModel, rsEffort, role, project string) (mo
 // the iterm2→chat path, minus the iTerm-tab teardown (there's no iTerm tab
 // to close — we're recovering a chat agent).
 func (s *Server) relaunchChatSession(rs store.RunningSession) error {
-	jsonlPath, err := findJSONLForSession(rs.SessionID)
-	if err != nil {
-		return err
+	var cwd string
+	backendKey := rs.AgentBackend
+	canonicalBackendKey := backendKey
+	agentBackend := backendKey
+	var backendEnv map[string]string
+	if backendKey != "" {
+		if bc, ok := s.backendStore.Get(backendKey); ok {
+			backendEnv = bc.Env
+			agentBackend = bc.Type
+		}
+		canonicalBackendKey = s.backendStore.CanonicalID(backendKey)
 	}
-	cwd, err := extractCwdFromJSONL(jsonlPath)
-	if err != nil {
-		return err
+	targetProvider := providerFromBackendType(backendKey, agentBackend)
+	isNonClaude := targetProvider != "claude"
+	if isNonClaude {
+		// Non-Claude backends (Codex, OpenCode) manage their own session
+		// storage. The ACP adapter resolves the session ID internally via
+		// session/load. We just need the cwd from the running file or identity.
+		cwd = rs.CWD
+	} else {
+		if rs.SessionID != "" {
+			jsonlPath, err := findJSONLForSession(rs.SessionID)
+			if err != nil {
+				return err
+			}
+			var cwdErr error
+			cwd, cwdErr = extractCwdFromJSONL(jsonlPath)
+			if cwdErr != nil {
+				return cwdErr
+			}
+		} else {
+			// Fresh Claude session from a cross-provider handoff.
+			cwd = rs.CWD
+		}
 	}
 	ident, _ := s.fileStore.Agents.Get(rs.PokegentID)
 	role, project := "", ""
@@ -304,17 +386,44 @@ func (s *Server) relaunchChatSession(rs store.RunningSession) error {
 		project = ident.Project
 	}
 	systemPrompt := s.composeSystemPrompt(LaunchRequest{Role: role, Project: project})
+	var handoffContext ProviderContext
+	migrationSourcePath := rs.SourceTranscriptPath
+	if migrationSourcePath == "" && rs.PokegentID != "" && isNonClaude {
+		// Compatibility for agents that were already switched before
+		// source_transcript_path existed. Claude transcripts are named by the
+		// stable pokegent id, so this recovers the pre-switch history.
+		if p := store.FindTranscriptPath(rs.PokegentID, s.state.claudeProjectDir); p != "" && !isNonClaudeTranscriptPath(p) {
+			migrationSourcePath = p
+		}
+	}
+	if migrationSourcePath != "" && migrationSourcePath != rs.TranscriptPath {
+		snapshot, err := s.readConversationSnapshot(rs.PokegentID)
+		if err != nil || snapshot.SourceTranscriptPath != migrationSourcePath {
+			snapshot, err = s.buildConversationSnapshotFromTranscript(rs.PokegentID, rs.AgentBackend, rs.SessionID, migrationSourcePath, cwd)
+			if err == nil {
+				_ = s.writeConversationSnapshot(snapshot)
+			}
+		}
+		if err == nil && snapshot.SourceProvider != targetProvider {
+			handoffContext = renderSnapshotContext(snapshot, TransitionPurposeMigration, targetProvider)
+			systemPrompt += "\n\n" + handoffContext.SystemPromptAppend
+			if cwd == "" && handoffContext.CWD != "" {
+				cwd = handoffContext.CWD
+			}
+		}
+	}
 
 	// Resolve model/effort from running-file → role config → project
 	// config (mirrors state.go's rebuildAgents enrichment) so the chat
 	// backend gets the same values pokegent.sh resolves for iterm2.
-	model, effort := s.resolveModelEffort(rs.Model, rs.Effort, role, project)
+	model, effort := s.resolveModelEffortForBackend(rs.Model, rs.Effort, role, project, rs.AgentBackend)
 
 	// Persist resolved model back to running file so the dashboard UI
 	// shows the correct context window (otherwise null → SDK default 200k).
-	if model != rs.Model || effort != rs.Effort {
+	if model != rs.Model || effort != rs.Effort || canonicalBackendKey != rs.AgentBackend {
 		rs.Model = model
 		rs.Effort = effort
+		rs.AgentBackend = canonicalBackendKey
 		runningGlob := filepath.Join(s.dataDir, "running", "*-"+rs.PokegentID+".json")
 		if rfMatches, _ := filepath.Glob(runningGlob); len(rfMatches) > 0 {
 			if out, err := json.MarshalIndent(rs, "", "  "); err == nil {
@@ -323,16 +432,53 @@ func (s *Server) relaunchChatSession(rs store.RunningSession) error {
 		}
 	}
 
+	resumeID := rs.SessionID
+	existingTranscriptPath := rs.TranscriptPath
+	if existingTranscriptPath == "" && rs.LastGoodTranscriptPath != "" {
+		if _, err := os.Stat(rs.LastGoodTranscriptPath); err == nil {
+			existingTranscriptPath = rs.LastGoodTranscriptPath
+			if rs.LastGoodSessionID != "" {
+				resumeID = rs.LastGoodSessionID
+			}
+		}
+	}
+	if isNonClaude && existingTranscriptPath != "" && resumeID != "" && store.FindTranscriptPath(resumeID, "") == "" {
+		if pathSessionID := sessionIDFromTranscriptPath(existingTranscriptPath); pathSessionID != "" {
+			log.Printf("chat-reattach[%s]: session %s has no transcript; using verified transcript session %s",
+				shortChat(rs.PokegentID), shortChat(resumeID), shortChat(pathSessionID))
+			resumeID = pathSessionID
+		}
+	}
+	if isNonClaude && rs.TranscriptPath != "" && !isNonClaudeTranscriptPath(rs.TranscriptPath) {
+		// A backend switch from Claude to Codex preserves the pokegent_id but
+		// must not ask Codex to load Claude's session_id. Start fresh; Launch
+		// will patch the running file with Codex's real session id.
+		resumeID = ""
+	}
+	if !isNonClaude && rs.SessionID == "" {
+		resumeID = ""
+	}
+	if migrationSourcePath != "" && rs.TranscriptPath != "" && !transcriptHasMigrationContext(rs.TranscriptPath) {
+		// The destination backend already has a session, but it was created
+		// before we injected migration context. Start one clean context-aware
+		// session instead of resuming the "I have no history" thread forever.
+		resumeID = ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	_, err = s.chatMgr.Launch(ctx, ChatLaunchOptions{
-		PokegentID:         rs.PokegentID,
-		Profile:            rs.Profile,
-		Cwd:                cwd,
-		SystemPromptAppend: systemPrompt,
-		Model:              model,
-		Effort:             effort,
-		ResumeSessionID:    rs.SessionID,
+	_, err := s.chatMgr.Launch(ctx, ChatLaunchOptions{
+		PokegentID:             rs.PokegentID,
+		Profile:                rs.Profile,
+		Cwd:                    cwd,
+		SystemPromptAppend:     systemPrompt,
+		InitialPromptContext:   handoffContext.InitialPromptContext,
+		Model:                  model,
+		Effort:                 effort,
+		ResumeSessionID:        resumeID,
+		ExistingTranscriptPath: existingTranscriptPath,
+		AgentBackend:           agentBackend,
+		BackendConfigKey:       canonicalBackendKey,
+		BackendEnv:             backendEnv,
 	})
 	return err
 }

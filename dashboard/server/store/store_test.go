@@ -1,8 +1,10 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,12 +17,12 @@ func TestFileRunningStore(t *testing.T) {
 
 	// Create
 	rs := RunningSession{
-		Profile:      "test",
-		SessionID:    "abc-123",
-		CCDSessionID: "def-456",
-		DisplayName:  "Test Agent",
-		PID:          1234,
-		TTY:          "/dev/ttys001",
+		Profile:     "test",
+		SessionID:   "abc-123",
+		PokegentID:  "def-456",
+		DisplayName: "Test Agent",
+		PID:         1234,
+		TTY:         "/dev/ttys001",
 	}
 	if err := s.Create(rs); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -35,10 +37,10 @@ func TestFileRunningStore(t *testing.T) {
 		t.Errorf("DisplayName = %q, want %q", got.DisplayName, "Test Agent")
 	}
 
-	// GetByCCDSessionID
-	got, err = s.GetByCCDSessionID("def-456")
+	// GetByPokegentID
+	got, err = s.GetByPokegentID("def-456")
 	if err != nil {
-		t.Fatalf("GetByCCDSessionID: %v", err)
+		t.Fatalf("GetByPokegentID: %v", err)
 	}
 	if got.SessionID != "abc-123" {
 		t.Errorf("SessionID = %q, want %q", got.SessionID, "abc-123")
@@ -179,5 +181,94 @@ func TestFileConfigStore(t *testing.T) {
 	// Unset fields keep defaults
 	if cfg.DefaultProfile != "personal" {
 		t.Errorf("DefaultProfile = %q, want %q", cfg.DefaultProfile, "personal")
+	}
+}
+
+func TestCodexTranscriptParserCustomToolCall(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.jsonl")
+	patch := "*** Begin Patch\n*** Update File: web/src/App.tsx\n@@\n-old\n+new\n*** End Patch\n"
+	line, err := json.Marshal(map[string]any{
+		"type":      "response_item",
+		"timestamp": "2026-05-05T12:00:00Z",
+		"payload": map[string]any{
+			"type":    "custom_tool_call",
+			"status":  "completed",
+			"call_id": "call_1",
+			"name":    "apply_patch",
+			"input":   patch,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	page := (&CodexTranscriptParser{}).Parse(path, 10, "")
+	if len(page.Entries) != 1 {
+		t.Fatalf("entries len = %d, want 1", len(page.Entries))
+	}
+	entry := page.Entries[0]
+	if entry.Type != "assistant" || len(entry.Blocks) != 1 {
+		t.Fatalf("entry = %#v, want one assistant tool_use block", entry)
+	}
+	block := entry.Blocks[0]
+	if block.Type != "tool_use" || block.Name != "apply_patch" || block.ID != "call_1" {
+		t.Fatalf("block = %#v, want apply_patch tool_use", block)
+	}
+	if !strings.Contains(block.Input, "*** Update File: web/src/App.tsx") || !strings.Contains(block.Input, "+new") {
+		t.Fatalf("block input did not preserve patch preview data: %q", block.Input)
+	}
+}
+
+func TestCodexTranscriptParserCompactedEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.jsonl")
+
+	userLine, err := json.Marshal(map[string]any{
+		"type":      "response_item",
+		"timestamp": "2026-05-05T12:00:00Z",
+		"payload": map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "/compact"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal user: %v", err)
+	}
+	compactLine, err := json.Marshal(map[string]any{
+		"type":      "compacted",
+		"timestamp": "2026-05-05T12:01:00Z",
+		"payload": map[string]any{
+			"message":             "Summary:\n- preserved key decision\n- next step",
+			"replacement_history": []any{map[string]any{"large": strings.Repeat("x", 1024)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal compacted: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(string(userLine)+"\n"+string(compactLine)+"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	page := (&CodexTranscriptParser{}).Parse(path, 10, "")
+	if len(page.Entries) != 2 {
+		t.Fatalf("entries len = %d, want 2", len(page.Entries))
+	}
+	entry := page.Entries[1]
+	if entry.Type != "user" {
+		t.Fatalf("compacted entry type = %q, want user", entry.Type)
+	}
+	if !strings.HasPrefix(entry.Content, "Context compacted.\n\nSummary:") ||
+		!strings.Contains(entry.Content, "preserved key decision") {
+		t.Fatalf("unexpected compacted content: %q", entry.Content)
+	}
+	if strings.Contains(entry.Content, "replacement_history") || strings.Contains(entry.Content, strings.Repeat("x", 32)) {
+		t.Fatalf("compacted entry leaked raw replacement_history: %q", entry.Content)
 	}
 }

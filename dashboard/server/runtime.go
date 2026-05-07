@@ -70,10 +70,8 @@ type RuntimeCapabilities struct {
 type runtimeRegistry map[string]Runtime
 
 func (r runtimeRegistry) For(iface string) (Runtime, error) {
-	if iface == "" {
-		iface = "iterm2"
-	}
-	rt, ok := r[iface]
+	runtimeName := runtimeNameForSurface(iface)
+	rt, ok := r[runtimeName]
 	if !ok {
 		return nil, fmt.Errorf("unknown runtime %q", iface)
 	}

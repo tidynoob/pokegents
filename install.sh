@@ -1,267 +1,170 @@
 #!/usr/bin/env bash
-# pokegents installer — sets up data dirs, hooks, profiles, and shell integration
+# pokegents installer — browser dashboard, no shell rc mutation.
 set -euo pipefail
 
-POKEGENTS_ROOT="$(cd "$(dirname "$0")" && pwd)"
+POKEGENTS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POKEGENTS_DATA="${POKEGENTS_DATA:-$HOME/.pokegents}"
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+INSTALL_CWD="${POKEGENTS_INSTALL_CWD:-$PWD}"
+SHIM_DIR="${POKEGENTS_SHIM_DIR:-$HOME/.local/bin}"
+SHIM_PATH="$SHIM_DIR/pokegents"
+COMPAT_SHIM_PATH="$SHIM_DIR/pokegent"
 
-echo "Installing pokegents from $POKEGENTS_ROOT"
-echo "Data directory: $POKEGENTS_DATA"
-echo ""
-
-# ── Dependency check ────────────────────────────────────────────────────
-_check_dep() {
-  local name="$1" required="$2" hint="$3"
-  if command -v "$name" &>/dev/null; then
-    return 0
-  fi
-  if [[ "$required" == "true" ]]; then
-    echo "✗ Missing required dependency: $name"
-    echo "  $hint"
-    return 1
-  else
-    echo "· Optional dependency missing: $name ($hint)"
-    return 1
-  fi
+log() { printf '%s\n' "$*"; }
+warn() { printf '⚠ %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
-MISSING_REQUIRED=false
-_check_dep jq true "brew install jq" || MISSING_REQUIRED=true
-_check_dep curl true "brew install curl" || true
-_check_dep python3 true "brew install python3" || MISSING_REQUIRED=true
+log "Installing pokegents from $POKEGENTS_ROOT"
+log "Data directory: $POKEGENTS_DATA"
+log "Default project cwd: $INSTALL_CWD"
+log ""
 
-HAS_NODE=true
-HAS_GO=true
-HAS_CLAUDE=true
-_check_dep node false "brew install node — needed for MCP messaging server" || HAS_NODE=false
-_check_dep npm false "comes with node — needed for MCP messaging server" || HAS_NODE=false
-_check_dep go false "brew install go — needed for dashboard server" || HAS_GO=false
-_check_dep claude false "see https://docs.anthropic.com/en/docs/claude-code — needed for MCP registration" || HAS_CLAUDE=false
-
-if [[ "$MISSING_REQUIRED" == "true" ]]; then
-  echo ""
-  echo "Install the required dependencies above and re-run."
+if ! have python3; then
+  echo "python3 is required for the installer" >&2
   exit 1
 fi
-echo "✓ Dependencies checked"
-echo ""
 
-# ── 1. Create data directories ──────────────────────────────────────────
-mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages,grid-profiles,activity,activity-lastread,ephemeral,ephemeral-pending,agents}
-echo "✓ Data directories ready"
+mkdir -p "$POKEGENTS_DATA"/{profiles,projects,roles,history,running,status,messages,logs,grid-profiles,activity,activity-lastread,ephemeral,ephemeral-pending,agents}
+log "✓ Data directories ready"
 
-# ── 2. Copy default config (if not present) ──────────────────────────────
-if [ ! -f "$POKEGENTS_DATA/config.json" ]; then
-  cp "$POKEGENTS_ROOT/defaults/config.json" "$POKEGENTS_DATA/config.json"
-  echo "✓ Default config installed at $POKEGENTS_DATA/config.json"
-  echo "  Edit to customize: port, default_profile, skip_permissions"
+if [[ ! -f "$POKEGENTS_DATA/config.json" ]]; then
+  cat > "$POKEGENTS_DATA/config.json" <<JSON
+{
+  "port": 7834,
+  "dashboard_open_mode": "browser",
+  "default_interface": "chat",
+  "default_backend": "claude",
+  "default_project": "current",
+  "default_role": "implementer",
+  "skip_permissions": true,
+  "iterm2_restore_profile": "Default",
+  "editor_open_command": "code {path}",
+  "browser_open_command": "open -a \"Google Chrome\" {url}"
+}
+JSON
+  log "✓ Default config installed"
 else
-  echo "· Config already exists, skipping"
+  log "· Config already exists; onboarding can repair preferences"
 fi
 
-POKEGENTS_PORT=$(jq -r '.port // 7834' "$POKEGENTS_DATA/config.json" 2>/dev/null || echo "7834")
+if [[ ! -f "$POKEGENTS_DATA/backends.json" ]]; then
+  cat > "$POKEGENTS_DATA/backends.json" <<JSON
+{
+  "version": 2,
+  "backends": {
+    "claude": {
+      "name": "Claude",
+      "type": "claude-acp",
+      "default": true,
+      "default_model": "sonnet",
+      "models": {
+        "sonnet": { "name": "Sonnet", "model": "sonnet" },
+        "opus": { "name": "Opus", "model": "opus" },
+        "haiku": { "name": "Haiku", "model": "haiku" }
+      }
+    },
+    "codex": {
+      "name": "Codex",
+      "type": "codex-acp",
+      "default_model": "default",
+      "models": {
+        "default": { "name": "Provider default", "model": "" }
+      },
+      "env": {}
+    }
+  }
+}
+JSON
+  log "✓ Default provider backends installed"
+fi
 
-# ── Copy default profiles (only if profiles dir is empty) ─────────────
-if [ -z "$(ls -A "$POKEGENTS_DATA/profiles" 2>/dev/null)" ]; then
-  cp "$POKEGENTS_ROOT"/defaults/profiles/personal.json "$POKEGENTS_DATA/profiles/"
-  echo "✓ Default personal profile installed"
+install_role() {
+  local name="$1" title="$2" emoji="$3" prompt="$4"
+  local path="$POKEGENTS_DATA/roles/$name.json"
+  [[ -f "$path" ]] && return 0
+  cat > "$path" <<JSON
+{
+  "title": $(json_escape "$title"),
+  "emoji": $(json_escape "$emoji"),
+  "system_prompt": $(json_escape "$prompt"),
+  "skip_permissions": null
+}
+JSON
+}
+
+install_role implementer "Implementer" "🛠️" "You are an implementer agent. Make focused code changes, follow existing patterns, validate your work, and report changed files plus validation commands. Coordinate before touching shared hotspots and do not revert others' edits."
+install_role reviewer "Reviewer" "👀" "You are a code reviewer agent. Review changes for correctness, edge cases, consistency, and spec adherence. Be specific and actionable."
+install_role researcher "Researcher" "🧪" "You are a research agent. Explore, investigate, and summarize findings with evidence before recommending changes."
+install_role pm "PM" "📋" "You are a product manager agent. Clarify requirements, sequence work, and coordinate agents. Do not write code unless explicitly asked."
+log "✓ Default roles ready"
+
+if [[ ! -f "$POKEGENTS_DATA/projects/current.json" ]]; then
+  cat > "$POKEGENTS_DATA/projects/current.json" <<JSON
+{
+  "title": $(json_escape "$(basename "$INSTALL_CWD")"),
+  "color": [100, 180, 255],
+  "iterm2_profile": "",
+  "cwd": $(json_escape "$INSTALL_CWD"),
+  "add_dirs": [],
+  "context_prompt": ""
+}
+JSON
+  log "✓ Default project installed: current → $INSTALL_CWD"
 else
-  echo "· Profiles already exist, skipping defaults"
+  log "· Default project already exists"
 fi
 
-# ── Copy default projects and roles (only missing files) ─────────────
-_installed_projects=0
-for f in "$POKEGENTS_ROOT"/defaults/projects/*.json; do
-  [ -f "$f" ] || continue
-  target="$POKEGENTS_DATA/projects/$(basename "$f")"
-  if [ ! -f "$target" ]; then
-    cp "$f" "$target"
-    _installed_projects=$((_installed_projects + 1))
-  fi
-done
-[ $_installed_projects -gt 0 ] && echo "✓ Installed $_installed_projects default project(s)" || echo "· Projects already exist, skipping defaults"
+chmod +x "$POKEGENTS_ROOT"/hooks/*.sh 2>/dev/null || true
 
-_installed_roles=0
-for f in "$POKEGENTS_ROOT"/defaults/roles/*.json; do
-  [ -f "$f" ] || continue
-  target="$POKEGENTS_DATA/roles/$(basename "$f")"
-  if [ ! -f "$target" ]; then
-    cp "$f" "$target"
-    _installed_roles=$((_installed_roles + 1))
-  fi
-done
-[ $_installed_roles -gt 0 ] && echo "✓ Installed $_installed_roles default role(s)" || echo "· Roles already exist, skipping defaults"
-echo "  Compose with: pokegent dev@personal, pokegent pm@<project>"
-
-# ── 3. Make hooks executable ─────────────────────────────────────────────
-chmod +x "$POKEGENTS_ROOT"/hooks/*.sh
-echo "✓ Hooks marked executable"
-
-# ── 4. Set up Claude Code hooks (MERGE, not replace) ────────────────────
-HOOK_CMD="$POKEGENTS_ROOT/hooks/status-update.sh"
-STATUSLINE_CMD="$POKEGENTS_ROOT/hooks/statusline.sh"
-
-if [ ! -f "$CLAUDE_SETTINGS" ]; then
-  mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
-  echo '{}' > "$CLAUDE_SETTINGS"
+mkdir -p "$SHIM_DIR"
+cat > "$SHIM_PATH" <<SHIM
+#!/usr/bin/env zsh
+set -e
+export POKEGENTS_ROOT=$(printf '%q' "$POKEGENTS_ROOT")
+export POKEGENTS_DATA=\${POKEGENTS_DATA:-$(printf '%q' "$POKEGENTS_DATA")}
+if [[ ! -f "\$POKEGENTS_ROOT/pokegent.sh" ]]; then
+  echo "pokegents install is missing pokegent.sh at \$POKEGENTS_ROOT" >&2
+  exit 1
 fi
+source "\$POKEGENTS_ROOT/pokegent.sh"
+if [[ \$# -eq 0 ]]; then
+  pokegent dashboard open
+elif [[ "\$1" == "launch" ]]; then
+  shift
+  pokegent "\$@"
+else
+  pokegent "\$@"
+fi
+SHIM
+chmod +x "$SHIM_PATH"
+ln -sf "$SHIM_PATH" "$COMPAT_SHIM_PATH"
+log "✓ CLI shim installed: $SHIM_PATH"
+log "✓ Compatibility alias installed: $COMPAT_SHIM_PATH"
 
-# Backup before modifying
-cp "$CLAUDE_SETTINGS" "${CLAUDE_SETTINGS}.bak"
-
-# Merge hooks: for each event, append our hook entry if not already present
-# This preserves any existing user hooks on the same events
-jq --arg hook "$HOOK_CMD" --arg sl "$STATUSLINE_CMD" '
-  # Our hook entry template
-  def ccd_entry(m): {"matcher": m, "hooks": [{"type": "command", "command": $hook, "timeout": 5}]};
-
-  # Events we need, with their matchers
-  {
-    "UserPromptSubmit": ccd_entry(""),
-    "PreToolUse": ccd_entry(""),
-    "PostToolUse": ccd_entry(""),
-    "PostToolUseFailure": ccd_entry(""),
-    "Stop": ccd_entry(""),
-    "StopFailure": ccd_entry(""),
-    "PermissionRequest": ccd_entry(""),
-    "Notification": ccd_entry("idle_prompt"),
-    "SessionStart": ccd_entry(""),
-    "SessionEnd": ccd_entry("")
-  } as $wanted |
-
-  # Ensure .hooks exists
-  .hooks //= {} |
-
-  # For each wanted event, merge into existing hooks
-  reduce ($wanted | keys[]) as $event (
-    .;
-    if (.hooks[$event] | type) == "array" then
-      # Event exists — append our entry if our hook command is not already there
-      if (.hooks[$event] | any(.hooks[]?.command == $hook)) then
-        .  # Already registered, skip
-      else
-        .hooks[$event] += [$wanted[$event]]
-      end
-    else
-      # Event does not exist — create it
-      .hooks[$event] = [$wanted[$event]]
-    end
-  ) |
-
-  # Set statusLine
-  .statusLine = {"type": "command", "command": $sl}
-' "$CLAUDE_SETTINGS" > "${CLAUDE_SETTINGS}.tmp" \
-  && mv "${CLAUDE_SETTINGS}.tmp" "$CLAUDE_SETTINGS"
-
-echo "✓ Claude Code hooks configured (merged with existing)"
-
-# Merge ephemeral-track.sh hooks (SubagentStart, SubagentStop, PreToolUse[Agent])
-EPH_CMD="$POKEGENTS_ROOT/hooks/ephemeral-track.sh"
-
-jq --arg eph "$EPH_CMD" '
-  # Entry builder
-  def eph_entry(m): {"matcher": m, "hooks": [{"type": "command", "command": $eph, "timeout": 5}]};
-
-  .hooks //= {} |
-
-  # SubagentStart — new event, create or append
-  (if (.hooks["SubagentStart"] | type) == "array" then
-    if (.hooks["SubagentStart"] | any(.hooks[]?.command == $eph)) then .
-    else .hooks["SubagentStart"] += [eph_entry("")]
-    end
-  else .hooks["SubagentStart"] = [eph_entry("")]
-  end) |
-
-  # SubagentStop — new event, create or append
-  (if (.hooks["SubagentStop"] | type) == "array" then
-    if (.hooks["SubagentStop"] | any(.hooks[]?.command == $eph)) then .
-    else .hooks["SubagentStop"] += [eph_entry("")]
-    end
-  else .hooks["SubagentStop"] = [eph_entry("")]
-  end) |
-
-  # PreToolUse[Agent] — event exists (status-update.sh uses matcher ""); append a
-  # separate entry with matcher "Agent" for ephemeral-track.sh if not already there
-  (if (.hooks["PreToolUse"] | type) == "array" then
-    if (.hooks["PreToolUse"] | any(.hooks[]?.command == $eph)) then .
-    else .hooks["PreToolUse"] += [eph_entry("Agent")]
-    end
-  else .hooks["PreToolUse"] = [eph_entry("Agent")]
-  end)
-' "$CLAUDE_SETTINGS" > "${CLAUDE_SETTINGS}.tmp" \
-  && mv "${CLAUDE_SETTINGS}.tmp" "$CLAUDE_SETTINGS"
-
-echo "✓ Ephemeral agent hooks configured (SubagentStart, SubagentStop, PreToolUse[Agent])"
-
-# ── 5. Install MCP messaging server ─────────────────────────────────────
-if [ -d "$POKEGENTS_ROOT/mcp" ] && [[ "$HAS_NODE" == "true" ]]; then
-  echo ""
-  echo "Installing MCP messaging server..."
-  (cd "$POKEGENTS_ROOT/mcp" && npm ci --silent)
-
-  if [[ "$HAS_CLAUDE" == "true" ]]; then
-    if claude mcp add -s user pokegents-messaging -- node "$POKEGENTS_ROOT/mcp/server.js" 2>/dev/null; then
-      echo "✓ MCP messaging server registered"
-    else
-      echo "· MCP registration failed. Register manually:"
-      echo "  claude mcp add -s user pokegents-messaging -- node \"$POKEGENTS_ROOT/mcp/server.js\""
-    fi
+# Developer/source fallback: build dashboard only when explicitly requested.
+if [[ ! -x "$POKEGENTS_ROOT/dashboard/pokegents-dashboard" || ! -d "$POKEGENTS_ROOT/dashboard/web/dist" || ! -d "$POKEGENTS_ROOT/dashboard/acp-fork/dist" ]]; then
+  if [[ "${POKEGENTS_DEV_BUILD:-}" == "1" ]] && have go && have npm; then
+    log ""
+    log "Building dashboard for source checkout..."
+    (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard .) && log "✓ Dashboard server built"
+    "$POKEGENTS_ROOT/scripts/fetch-pokesprite-assets.sh" && (cd "$POKEGENTS_ROOT/dashboard/web" && npm ci --silent && npm run build) && log "✓ Dashboard web built"
+    (cd "$POKEGENTS_ROOT/dashboard/acp-fork" && npm ci --silent && if [[ -f tsconfig.json ]]; then npm run build; else test -f dist/index.js; fi) && log "✓ ACP adapter ready"
   else
-    echo "· claude CLI not found. Register MCP manually when available:"
-    echo "  claude mcp add -s user pokegents-messaging -- node \"$POKEGENTS_ROOT/mcp/server.js\""
-  fi
-else
-  echo "· Skipping MCP server (requires node + npm)"
-fi
-
-# ── 6. Build dashboard (optional) ───────────────────────────────────────
-if [ -d "$POKEGENTS_ROOT/dashboard" ]; then
-  if [[ "$HAS_GO" == "true" && "$HAS_NODE" == "true" ]]; then
-    echo ""
-    echo "Building dashboard..."
-    (cd "$POKEGENTS_ROOT/dashboard" && CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o pokegents-dashboard . 2>&1) \
-      && echo "✓ Go server built" \
-      || echo "✗ Go server build failed"
-    (cd "$POKEGENTS_ROOT/dashboard/web" && npm ci --silent && npm run build 2>&1 | tail -1) \
-      && echo "✓ Frontend built" \
-      || echo "✗ Frontend build failed"
-
-    echo "  Start dashboard: pokegent dashboard start"
-    echo "  Open: http://localhost:$POKEGENTS_PORT"
-  else
-    local_missing=""
-    [[ "$HAS_GO" == "false" ]] && local_missing="go"
-    [[ "$HAS_NODE" == "false" ]] && local_missing="${local_missing:+$local_missing, }node/npm"
-    echo ""
-    echo "· Skipping dashboard build (missing: $local_missing)"
-    echo "  Install dependencies, then run: cd dashboard && make build"
+    warn "Dashboard binary/assets are missing. Install from a release artifact, or run with POKEGENTS_DEV_BUILD=1 for source builds."
   fi
 fi
 
-# ── 7. Update .zshrc ────────────────────────────────────────────────────
-ZSHRC="$HOME/.zshrc"
-SOURCE_LINE="source \"$POKEGENTS_ROOT/pokegent.sh\""
-
-if grep -qF 'pokegent.sh' "$ZSHRC" 2>/dev/null; then
-  echo "· pokegent already sourced in .zshrc"
-elif grep -qF 'pokegent()' "$ZSHRC" 2>/dev/null; then
-  echo ""
-  echo "⚠ Found inline pokegent() function in .zshrc."
-  echo "  Remove it manually, then add:  $SOURCE_LINE"
-else
-  echo "" >> "$ZSHRC"
-  echo "# pokegents — Claude Code session manager" >> "$ZSHRC"
-  echo "$SOURCE_LINE" >> "$ZSHRC"
-  echo "✓ Added source line to .zshrc"
+log ""
+log "Install complete. No shell rc files were modified."
+if [[ ":$PATH:" != *":$SHIM_DIR:"* ]]; then
+  log "Add $SHIM_DIR to PATH later if desired, or run directly:"
+  log "  $SHIM_PATH"
 fi
 
-echo ""
-echo "Done! Restart your shell or run:  source ~/.zshrc"
-echo ""
-echo "Quick start:"
-echo "  pokegent                   # launch personal profile"
-echo "  pokegent ls                # list profiles"
-echo "  pokegent edit my-project   # create a new profile"
-echo "  pokegent my-project        # launch it"
-echo "  pokegent doctor            # verify installation"
+log "Open the browser dashboard with:"
+log "  $SHIM_PATH dashboard open"
+log ""
+log "If the server is not already running, start it first with:"
+log "  $SHIM_PATH dashboard start"

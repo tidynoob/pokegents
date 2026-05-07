@@ -12,7 +12,6 @@ package server
 // process's first turn.
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,51 +24,28 @@ import (
 )
 
 // findJSONLForSession returns the path of a JSONL transcript matching
-// session_id under any project dir. Used by migration to verify the resume
-// target actually exists on disk before tearing down the running runtime.
+// session_id under any supported backend's project dir (Claude, Codex, etc.).
+// Used by migration to verify the resume target actually exists on disk
+// before tearing down the running runtime.
 func findJSONLForSession(sessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	pattern := filepath.Join(home, ".claude", "projects", "*", sessionID+".jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return "", err
-	}
-	if len(matches) == 0 {
+	claudeProjectDir := filepath.Join(home, ".claude", "projects")
+	path := store.FindTranscriptPath(sessionID, claudeProjectDir)
+	if path == "" {
 		return "", fmt.Errorf("no jsonl found for session %s", sessionID)
 	}
-	return matches[0], nil
+	return path, nil
 }
 
-// extractCwdFromJSONL reads the JSONL line by line and returns the first
-// non-null cwd field. Claude Code stores its JSONL under
-// ~/.claude/projects/{cwd-hash}/{session_id}.jsonl, where cwd-hash is the
-// session-creation cwd with `/` → `-` (irreversibly — paths with literal
-// dashes can't be decoded). The JSONL itself records the actual cwd in each
-// user/system entry, so reading it back is the only reliable way to recover
-// the cwd that `session/load` will look for the JSONL relative to.
+// extractCwdFromJSONL reads the JSONL and returns the working directory.
+// Auto-detects the format (Claude, Codex, etc.) and delegates to the
+// appropriate parser.
 func extractCwdFromJSONL(jsonlPath string) (string, error) {
-	f, err := os.Open(jsonlPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		var entry struct {
-			Cwd *string `json:"cwd"`
-		}
-		if err := json.Unmarshal(sc.Bytes(), &entry); err != nil {
-			continue
-		}
-		if entry.Cwd != nil && *entry.Cwd != "" {
-			return *entry.Cwd, nil
-		}
-	}
-	return "", fmt.Errorf("no cwd found in jsonl %s", jsonlPath)
+	parser := store.DetectParser(jsonlPath)
+	return parser.ExtractCwd(jsonlPath)
 }
 
 func (s *Server) handleMigrateInterface(w http.ResponseWriter, r *http.Request) {
@@ -102,8 +78,16 @@ func (s *Server) handleMigrateInterface(w http.ResponseWriter, r *http.Request) 
 	// `~/.claude/projects/{cwd-hash}/{session_id}.jsonl`. If the JSONL is
 	// missing, the SDK aborts silently and we lose the agent. Check up-front
 	// so we can refuse cleanly.
-	jsonlPath, err := findJSONLForSession(agent.SessionID)
-	if err != nil {
+	jsonlPath := s.state.FindTranscriptPath(pgid)
+	if jsonlPath == "" {
+		var err error
+		jsonlPath, err = findJSONLForSession(agent.SessionID)
+		if err != nil {
+			http.Error(w, "no transcript on disk for session_id "+agent.SessionID[:min(8, len(agent.SessionID))]+"… — agent's session is corrupted; try Revive from PC box and check ~/.claude/projects/", http.StatusConflict)
+			return
+		}
+	}
+	if jsonlPath == "" {
 		http.Error(w, "no transcript on disk for session_id "+agent.SessionID[:min(8, len(agent.SessionID))]+"… — agent's session is corrupted; try Revive from PC box and check ~/.claude/projects/", http.StatusConflict)
 		return
 	}
@@ -256,6 +240,77 @@ func (s *Server) migrateToITerm2(agent *AgentState) error {
 	pgid := agent.PokegentID
 	if pgid == "" {
 		pgid = agent.SessionID
+	}
+	if providerFromBackendKey(agent.AgentBackend) != "claude" {
+		sourcePath := s.state.FindTranscriptPath(pgid)
+		if sourcePath == "" {
+			return fmt.Errorf("cannot hand off non-Claude chat agent to iTerm: no source transcript found")
+		}
+		snapshot, err := s.buildConversationSnapshotFromTranscript(pgid, agent.AgentBackend, agent.SessionID, sourcePath, agent.CWD)
+		if err != nil {
+			return fmt.Errorf("build handoff snapshot: %w", err)
+		}
+		if err := s.writeConversationSnapshot(snapshot); err != nil {
+			return fmt.Errorf("write handoff snapshot: %w", err)
+		}
+		rendered := renderSnapshotContext(snapshot, TransitionPurposeMigration, "claude")
+		handoffPath, err := s.writeRenderedHandoffContext(pgid, TransitionPurposeMigration, rendered.SystemPromptAppend)
+		if err != nil {
+			return fmt.Errorf("write handoff context: %w", err)
+		}
+
+		runningGlob := filepath.Join(s.dataDir, "running", "*-"+pgid+".json")
+		matches, _ := filepath.Glob(runningGlob)
+		var oldPath string
+		var oldData []byte
+		if len(matches) > 0 {
+			oldPath = matches[0]
+			oldData, _ = os.ReadFile(oldPath)
+		}
+
+		_ = s.fileStore.Agents.Update(pgid, func(id *store.AgentIdentity) {
+			id.Interface = "iterm2"
+			id.AgentBackend = ""
+		})
+		rs := store.RunningSession{
+			Profile:              agent.ProfileName,
+			PokegentID:           pgid,
+			DisplayName:          agent.DisplayName,
+			Sprite:               agent.Sprite,
+			TaskGroup:            agent.TaskGroup,
+			Model:                agent.Model,
+			Effort:               agent.Effort,
+			Interface:            "iterm2",
+			CWD:                  snapshot.CWD,
+			SourceTranscriptPath: sourcePath,
+		}
+		newPath, err := writePlaceholderRunningFile(filepath.Join(s.dataDir, "running"), rs)
+		if err != nil {
+			return fmt.Errorf("rewrite running file: %w", err)
+		}
+		if err := s.terminal.LaunchProfile(LaunchOptions{
+			Profile:            agent.ProfileName,
+			TaskGroup:          agent.TaskGroup,
+			PokegentID:         pgid,
+			HandoffContextPath: handoffPath,
+		}); err != nil {
+			if oldData != nil && oldPath != "" {
+				_ = os.WriteFile(oldPath, oldData, 0o644)
+				if newPath != oldPath {
+					_ = os.Remove(newPath)
+				}
+			} else {
+				_ = os.Remove(newPath)
+			}
+			_ = s.fileStore.Agents.Update(pgid, func(id *store.AgentIdentity) {
+				id.Interface = "chat"
+				id.AgentBackend = agent.AgentBackend
+			})
+			return fmt.Errorf("launch fresh Claude iTerm handoff: %w", err)
+		}
+
+		s.chatMgr.Close(pgid)
+		return nil
 	}
 
 	// Tear down ACP subprocess. Its exit handler removes running + status

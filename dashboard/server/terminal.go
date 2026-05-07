@@ -5,10 +5,11 @@ package server
 // the running file before invoking the terminal adapter, so the dashboard
 // always has a record even if the spawned shell fails to start.
 type LaunchOptions struct {
-	Profile      string // role@project or legacy profile name
-	ITermProfile string // iTerm2 profile name for tab coloring (optional)
-	TaskGroup    string // organizational tag, passed via --group
-	PokegentID   string // pre-minted, passed via --pokegent-id (required for new launches)
+	Profile            string // role@project or legacy profile name
+	ITermProfile       string // iTerm2 profile name for tab coloring (optional)
+	TaskGroup          string // organizational tag, passed via --group
+	PokegentID         string // pre-minted, passed via --pokegent-id (required for new launches)
+	HandoffContextPath string // optional file appended to Claude's system prompt
 }
 
 // TerminalIntegration abstracts platform-specific terminal control

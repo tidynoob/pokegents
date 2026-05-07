@@ -21,8 +21,8 @@ func NewFileStore(dataDir string) *Store {
 		Config:   &FileConfigStore{path: filepath.Join(dataDir, "config.json")},
 		Messages: &FileMessageStore{dir: filepath.Join(dataDir, "messages"), dataDir: dataDir},
 		Activity: &FileActivityStore{
-			activityDir:  filepath.Join(dataDir, "activity"),
-			lastReadDir:  filepath.Join(dataDir, "activity-lastread"),
+			activityDir: filepath.Join(dataDir, "activity"),
+			lastReadDir: filepath.Join(dataDir, "activity-lastread"),
 		},
 		Metadata:  &FileMetadataStore{dir: dataDir},
 		Projects:  &FileProjectStore{dir: filepath.Join(dataDir, "projects")},
@@ -52,7 +52,7 @@ type FileRunningStore struct {
 	dir string
 }
 
-// findRunningFile finds a running file by any ID (pokegent_id, session_id, or ccd_session_id).
+// findRunningFile finds a running file by pokegent_id or session_id.
 // Tries filename glob first (fast), then falls back to content scan.
 func (s *FileRunningStore) findRunningFile(id string) (string, error) {
 	// Try filename pattern first (works for both old session_id and new pokegent_id naming)
@@ -61,7 +61,7 @@ func (s *FileRunningStore) findRunningFile(id string) (string, error) {
 	if len(matches) > 0 {
 		return matches[0], nil
 	}
-	// Fallback: scan file contents for pokegent_id, ccd_session_id, or session_id match
+	// Fallback: scan file contents for pokegent_id or session_id match
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return "", fmt.Errorf("running session %s not found", id)
@@ -76,14 +76,13 @@ func (s *FileRunningStore) findRunningFile(id string) (string, error) {
 			continue
 		}
 		var rf struct {
-			SessionID    string `json:"session_id"`
-			CCDSessionID string `json:"ccd_session_id"`
-			PokegentID   string `json:"pokegent_id"`
+			SessionID  string `json:"session_id"`
+			PokegentID string `json:"pokegent_id"`
 		}
 		if json.Unmarshal(data, &rf) != nil {
 			continue
 		}
-		if rf.PokegentID == id || rf.CCDSessionID == id || rf.SessionID == id {
+		if rf.PokegentID == id || rf.SessionID == id {
 			return path, nil
 		}
 	}
@@ -100,7 +99,7 @@ func (s *FileRunningStore) Get(sessionID string) (*RunningSession, error) {
 	return s.readFile(path)
 }
 
-func (s *FileRunningStore) GetByCCDSessionID(ccdSessionID string) (*RunningSession, error) {
+func (s *FileRunningStore) GetByPokegentID(pokegentID string) (*RunningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.dir)
@@ -115,12 +114,11 @@ func (s *FileRunningStore) GetByCCDSessionID(ccdSessionID string) (*RunningSessi
 		if err != nil {
 			continue
 		}
-		// Check both pokegent_id and ccd_session_id (pokegent_id is the new preferred ID)
-		if rs.PokegentID == ccdSessionID || rs.CCDSessionID == ccdSessionID {
+		if rs.PokegentID == pokegentID {
 			return rs, nil
 		}
 	}
-	return nil, fmt.Errorf("running session with ccd_session_id %s not found", ccdSessionID)
+	return nil, fmt.Errorf("running session with pokegent_id %s not found", pokegentID)
 }
 
 func (s *FileRunningStore) List() ([]RunningSession, error) {
@@ -184,7 +182,7 @@ func (s *FileRunningStore) Update(sessionID string, fn func(*RunningSession)) er
 func (s *FileRunningStore) Delete(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Try finding by any ID type (pokegent_id, session_id, ccd_session_id)
+	// Try finding by pokegent_id or session_id
 	path, err := s.findRunningFile(sessionID)
 	if err != nil {
 		// Also try the legacy filename pattern as last resort
@@ -247,7 +245,11 @@ func (s *FileStatusStore) Upsert(sf StatusFile) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, sf.SessionID+".json")
+	key := sf.FileKey
+	if key == "" {
+		key = sf.SessionID
+	}
+	path := filepath.Join(s.dir, key+".json")
 	return atomicWrite(path, data, 0644)
 }
 
@@ -275,6 +277,7 @@ func (s *FileStatusStore) List() ([]StatusFile, error) {
 		}
 		var sf StatusFile
 		if json.Unmarshal(data, &sf) == nil && sf.SessionID != "" {
+			sf.FileKey = strings.TrimSuffix(e.Name(), ".json")
 			result = append(result, sf)
 		}
 	}
@@ -561,9 +564,9 @@ func (s *FileMessageStore) readMailbox(sessionID string) ([]Message, error) {
 // ============================================================================
 
 type FileActivityStore struct {
-	mu           sync.Mutex
-	activityDir  string
-	lastReadDir  string
+	mu          sync.Mutex
+	activityDir string
+	lastReadDir string
 }
 
 func (s *FileActivityStore) Append(projectHash string, entry ActivityEntry) error {

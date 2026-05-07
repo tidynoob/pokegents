@@ -26,7 +26,7 @@ const STATUS_DOT: Record<BgShellStatus, string> = {
   running: 'bg-accent-yellow animate-pulse-soft',
   completed: 'bg-accent-green',
   failed: 'bg-accent-red',
-  killed: 'bg-white/40',
+  killed: 'theme-bg-panel-subtle',
 }
 
 const STATUS_LABEL: Record<BgShellStatus, string> = {
@@ -49,22 +49,15 @@ export function ChatStatusBar({ agent, shells, children }: ChatStatusBarProps) {
   const [r, g, b] = agent.project_color || agent.color || [100, 100, 100]
   const dotStyle = { background: `rgba(${r},${g},${b},0.85)` }
 
-  // Chat-mode is locked to bypass-permissions today (claude-agent-acp
-  // hardcodes --allow-dangerously-skip-permissions in its SDK invocation).
-  // When we add a permission-mode toggle we'll read it from agent state.
-  const permissionLabel = agent.interface === 'chat' ? 'bypass permissions on' : 'default permissions'
 
   return (
-    <div className="shrink-0 px-3 py-1.5 border-t border-black/30 text-[10px] font-mono text-white/60 select-none">
+    <div className="shrink-0 px-3 py-1.5 border-t theme-border-subtle text-m theme-font-mono theme-text-muted select-none">
       <div className="flex items-center gap-3">
-        <span className="text-accent-red/70" title="Chat mode runs through ACP which bypasses Claude Code's permission prompts; use right-click → Switch to iTerm2 for full permission flow.">
-          ▸▸ {permissionLabel}
-        </span>
         {agent.model && (
-          <span className="text-white/50">{agent.model}</span>
+          <span className="theme-text-muted">{agent.model}</span>
         )}
         {agent.effort && (
-          <span className="text-white/50">effort: {agent.effort}</span>
+          <span className="theme-text-muted">effort: {agent.effort}</span>
         )}
         {children && <span className="ml-auto">{children}</span>}
       </div>
@@ -104,21 +97,21 @@ function BgShellSummary({ shells }: { shells: BgShell[] }) {
     <div className="relative mt-1" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
       <div className="flex items-center gap-2 px-1.5 py-0.5 cursor-default">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${running.length > 0 ? 'bg-accent-yellow animate-pulse-soft' : 'bg-accent-green'}`} />
-        <span className="text-white/60 text-[10px] font-mono">{label}</span>
+        <span className="theme-text-muted text-m theme-font-mono">{label}</span>
       </div>
       {hover && (
-        <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface-1 border border-white/10 rounded-md shadow-lg p-2 space-y-1 z-50">
+        <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface-1 border theme-border-subtle rounded-md shadow-lg p-2 space-y-1 z-50">
           {shells.map(s => {
             const elapsed = s.status === 'running'
               ? formatElapsed(s.startedAt)
               : (s.endedAt && s.startedAt ? Math.max(0, Math.floor((s.endedAt - s.startedAt) / 1000)) + 's' : '')
             const typeLabel = s.type === 'agent' ? 'agent' : s.type === 'monitor' ? 'monitor' : 'shell'
             return (
-              <div key={s.taskId} className="flex items-center gap-2 text-[10px] font-mono">
+              <div key={s.taskId} className="flex items-center gap-2 text-m theme-font-mono">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[s.status]}`} />
-                <span className="text-white/30 text-[8px] shrink-0">{typeLabel}</span>
-                <span className="text-white/80 truncate flex-1">{truncateCommand(s.command, 45)}</span>
-                <span className="text-white/35 text-[9px] shrink-0 tabular-nums">{STATUS_LABEL[s.status]} {elapsed}</span>
+                <span className="theme-text-faint text-s shrink-0">{typeLabel}</span>
+                <span className="theme-text-secondary truncate flex-1">{truncateCommand(s.command, 45)}</span>
+                <span className="theme-text-faint text-m shrink-0 tabular-nums">{STATUS_LABEL[s.status]} {elapsed}</span>
               </div>
             )
           })}

@@ -197,7 +197,7 @@ func TestBudgetTracking(t *testing.T) {
 
 // ──── Test 5: Clone routing ──────────────────────────────────────────────────
 // Two agents share the same Claude session_id (one is a clone) but have
-// different ccd_session_id values. Messages sent to each ccd_session_id
+// different pokegent_id values. Messages sent to each pokegent_id
 // should land in separate mailboxes.
 
 func TestCloneRouting(t *testing.T) {
@@ -206,38 +206,38 @@ func TestCloneRouting(t *testing.T) {
 	runDir := filepath.Join(dir, "running")
 
 	sharedSessionID := "claude-shared-session"
-	ccdA := "ccd-original-uuid"
-	ccdB := "ccd-clone-uuid"
+	pokegentA := "pokegent-original-uuid"
+	pokegentB := "pokegent-clone-uuid"
 
-	// Create two running files with same session_id but different ccd_session_id
-	writeTestJSON(t, filepath.Join(runDir, "client-"+ccdA+".json"), RunningSession{
-		Profile:      "client",
-		SessionID:    sharedSessionID,
-		CCDSessionID: ccdA,
-		PID:          1001,
-		DisplayName:  "Original",
+	// Create two running files with same session_id but different pokegent_id
+	writeTestJSON(t, filepath.Join(runDir, "client-"+pokegentA+".json"), RunningSession{
+		Profile:     "client",
+		SessionID:   sharedSessionID,
+		PokegentID:  pokegentA,
+		PID:         1001,
+		DisplayName: "Original",
 	})
-	writeTestJSON(t, filepath.Join(runDir, "client-"+ccdB+".json"), RunningSession{
-		Profile:      "client",
-		SessionID:    sharedSessionID,
-		CCDSessionID: ccdB,
-		PID:          1002,
-		DisplayName:  "Clone",
+	writeTestJSON(t, filepath.Join(runDir, "client-"+pokegentB+".json"), RunningSession{
+		Profile:     "client",
+		SessionID:   sharedSessionID,
+		PokegentID:  pokegentB,
+		PID:         1002,
+		DisplayName: "Clone",
 	})
 
-	// Send messages to each ccd_session_id (messages are routed by the "to" field)
-	_, err := ms.Send("coordinator", "Coordinator", ccdA, "Original", "task A for original")
+	// Send messages to each pokegent_id (messages are routed by the "to" field)
+	_, err := ms.Send("coordinator", "Coordinator", pokegentA, "Original", "task A for original")
 	if err != nil {
 		t.Fatalf("Send to original failed: %v", err)
 	}
 
-	_, err = ms.Send("coordinator", "Coordinator", ccdB, "Clone", "task B for clone")
+	_, err = ms.Send("coordinator", "Coordinator", pokegentB, "Clone", "task B for clone")
 	if err != nil {
 		t.Fatalf("Send to clone failed: %v", err)
 	}
 
 	// Each agent's mailbox should only contain their own messages
-	originalMsgs := ms.ConsumePending(ccdA)
+	originalMsgs := ms.ConsumePending(pokegentA)
 	if len(originalMsgs) != 1 {
 		t.Fatalf("original mailbox has %d messages, want 1", len(originalMsgs))
 	}
@@ -245,7 +245,7 @@ func TestCloneRouting(t *testing.T) {
 		t.Errorf("original got %q, want %q", originalMsgs[0].Content, "task A for original")
 	}
 
-	cloneMsgs := ms.ConsumePending(ccdB)
+	cloneMsgs := ms.ConsumePending(pokegentB)
 	if len(cloneMsgs) != 1 {
 		t.Fatalf("clone mailbox has %d messages, want 1", len(cloneMsgs))
 	}
@@ -254,10 +254,10 @@ func TestCloneRouting(t *testing.T) {
 	}
 
 	// Verify no cross-contamination: both mailboxes are now empty
-	if msgs := ms.ConsumePending(ccdA); len(msgs) != 0 {
+	if msgs := ms.ConsumePending(pokegentA); len(msgs) != 0 {
 		t.Errorf("original mailbox should be empty after consume, got %d", len(msgs))
 	}
-	if msgs := ms.ConsumePending(ccdB); len(msgs) != 0 {
+	if msgs := ms.ConsumePending(pokegentB); len(msgs) != 0 {
 		t.Errorf("clone mailbox should be empty after consume, got %d", len(msgs))
 	}
 }

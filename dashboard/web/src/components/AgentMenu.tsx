@@ -3,7 +3,8 @@ import { AgentState } from '../types'
 import {
   focusAgent, checkAgentMessages, spawnClone, shutdownAgent,
   assignRole, assignProject, assignTaskGroup, migrateInterface,
-  RuntimeCapabilities, ProjectInfo, RoleInfo,
+  switchBackend, fetchBackends,
+  RuntimeCapabilities, ProjectInfo, RoleInfo, BackendInfo,
 } from '../api'
 
 // AgentMenu is the right-click / overflow menu for an agent. Used by both
@@ -32,9 +33,17 @@ export function AgentMenu({
   x, y, agent, capabilities, onClose, onRename, onChangeSprite, onCollapse,
   projects, roles, existingGroups, onAssignStatus,
 }: AgentMenuProps) {
-  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | null>(null)
+  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | 'backend' | null>(null)
   const [newGroupName, setNewGroupName] = useState('')
   const newGroupRef = useRef<HTMLInputElement>(null)
+  const [backends, setBackends] = useState<BackendInfo[]>([])
+
+  // Fetch backends when the backend submenu is opened
+  useEffect(() => {
+    if (submenu === 'backend') {
+      fetchBackends().then(setBackends)
+    }
+  }, [submenu])
 
   const showStatus = (res: { status: string }, label: string) => {
     if (!onAssignStatus) return
@@ -71,9 +80,9 @@ export function AgentMenu({
   }
   items.push({ label: 'Check messages', icon: '💬', action: () => { checkAgentMessages(agent.session_id); onClose() } })
   items.push({ label: 'Rename', icon: '✏️', action: onRename })
-  items.push({ label: 'Change pokemon', icon: '🔄', action: onChangeSprite })
+  items.push({ label: 'Change avatar', icon: '🔄', action: onChangeSprite })
   if (capabilities.can_clone) {
-    items.push({ label: 'Spawn clone', icon: '🧬', action: () => { spawnClone(agent.session_id); onClose() } })
+    items.push({ label: 'Spawn clone', icon: '🧬', action: () => { spawnClone(agent.pokegent_id || agent.session_id); onClose() } })
   }
   if (onCollapse) {
     items.push({ label: 'Collapse', icon: '📌', action: () => { onCollapse(); onClose() } })
@@ -93,7 +102,7 @@ export function AgentMenu({
           <button
             key={item.label}
             onClick={(e) => { e.stopPropagation(); item.action() }}
-            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
           >
             <span className="w-4 text-center">{item.icon}</span>
             {item.label}
@@ -103,23 +112,23 @@ export function AgentMenu({
         {/* Role/Project assignment */}
         {(roles && roles.length > 0 || projects && projects.length > 0) && (
           <>
-            <div className="border-t border-white/10 my-1" />
+            <div className="border-t theme-border-subtle my-1" />
             {roles && roles.length > 0 && (
               <div className="relative">
                 <button
                   onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'role' ? null : 'role') }}
-                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
                 >
                   <span className="w-4 text-center">🎭</span>
                   {agent.role ? `Role: ${agent.role}` : 'Assign role'}
-                  <span className="ml-auto text-white/30">▸</span>
+                  <span className="ml-auto theme-text-faint">▸</span>
                 </button>
                 {submenu === 'role' && (
                   <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
                     {agent.role && (
                       <button
                         onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, ''); showStatus(res, 'no role'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
                       >
                         None
                       </button>
@@ -128,7 +137,7 @@ export function AgentMenu({
                       <button
                         key={r.name}
                         onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, r.name); showStatus(res, r.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow' : 'text-white/90'}`}
+                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow' : 'theme-text-primary'}`}
                       >
                         <span>{r.emoji}</span>
                         <span>{r.title}</span>
@@ -142,18 +151,18 @@ export function AgentMenu({
               <div className="relative">
                 <button
                   onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'project' ? null : 'project') }}
-                  className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
                 >
                   <span className="w-4 text-center">📁</span>
                   {agent.project ? `Project: ${agent.project}` : 'Assign project'}
-                  <span className="ml-auto text-white/30">▸</span>
+                  <span className="ml-auto theme-text-faint">▸</span>
                 </button>
                 {submenu === 'project' && (
                   <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
                     {agent.project && (
                       <button
                         onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, ''); showStatus(res, 'no project'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
                       >
                         None
                       </button>
@@ -162,7 +171,7 @@ export function AgentMenu({
                       <button
                         key={p.name}
                         onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, p.name); showStatus(res, p.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow' : 'text-white/90'}`}
+                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow' : 'theme-text-primary'}`}
                       >
                         <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${p.color[0]},${p.color[1]},${p.color[2]})` }} />
                         <span>{p.title}</span>
@@ -179,18 +188,18 @@ export function AgentMenu({
         <div className="relative">
           <button
             onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'group' ? null : 'group') }}
-            className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white/90 hover:bg-white/10 hover:text-white flex items-center gap-2 transition-colors pixel-shadow"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
           >
             <span className="w-4 text-center">📦</span>
             {agent.task_group ? `Group: ${agent.task_group}` : 'Assign group'}
-            <span className="ml-auto text-white/30">▸</span>
+            <span className="ml-auto theme-text-faint">▸</span>
           </button>
           {submenu === 'group' && (
             <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
               {agent.task_group && (
                 <button
                   onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, ''); onAssignStatus?.('Removed from group'); onClose() }}
-                  className="w-full text-left px-3 py-1.5 text-[7px] font-pixel text-white/40 hover:bg-white/10 transition-colors pixel-shadow italic"
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
                 >
                   None
                 </button>
@@ -199,12 +208,12 @@ export function AgentMenu({
                 <button
                   key={g}
                   onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, g); onAssignStatus?.(`Group: ${g}`); onClose() }}
-                  className={`w-full text-left px-3 py-1.5 text-[7px] font-pixel hover:bg-white/10 transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow' : 'text-white/90'}`}
+                  className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow' : 'theme-text-primary'}`}
                 >
                   {g}
                 </button>
               ))}
-              <div className="border-t border-white/10 my-1" />
+              <div className="border-t theme-border-subtle my-1" />
               <form
                 className="px-2 py-1 flex gap-1"
                 onClick={(e) => e.stopPropagation()}
@@ -224,20 +233,61 @@ export function AgentMenu({
                   onChange={(e) => setNewGroupName(e.target.value)}
                   onKeyDown={(e) => e.stopPropagation()}
                   placeholder="New group..."
-                  className="flex-1 bg-black/30 border border-white/20 rounded px-1.5 py-0.5 text-[7px] font-pixel text-white outline-none focus:border-white/40"
+                  className="flex-1 theme-bg-panel-muted border theme-border-subtle rounded px-1.5 py-0.5 text-s theme-font-display theme-text-primary outline-none focus-theme-border-subtle"
                   style={{ minWidth: 0 }}
                   autoFocus
                 />
                 <button
                   type="submit"
-                  className="text-[7px] font-pixel text-white/60 hover:text-white px-1"
+                  className="text-s theme-font-display theme-text-muted theme-hover-text-primary px-1"
                 >+</button>
               </form>
             </div>
           )}
         </div>
 
-        <div className="border-t border-white/10 my-1" />
+        <div className="border-t theme-border-subtle my-1" />
+        {/* Switch backend — only for chat agents, relaunches with a different ACP backend. */}
+        {agent.interface === 'chat' && (
+          <div className="relative">
+            <button
+              onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'backend' ? null : 'backend') }}
+              className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
+            >
+              <span className="w-4 text-center">🔀</span>
+              Switch backend
+              <span className="ml-auto theme-text-faint">▸</span>
+            </button>
+            {submenu === 'backend' && (
+              <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
+                {backends.length === 0 && (
+                  <div className="px-3 py-1.5 text-s theme-font-display theme-text-faint">Loading...</div>
+                )}
+                {backends.map(b => (
+                  <button
+                    key={b.id}
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      try {
+                        await switchBackend(agent.pokegent_id || agent.session_id, b.id)
+                        onAssignStatus?.(`Switching to ${b.name}...`)
+                      } catch (err) {
+                        alert(`Switch backend failed: ${err instanceof Error ? err.message : String(err)}`)
+                      }
+                      onClose()
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow ${
+                      agent.agent_backend === b.id ? 'text-accent-yellow' : 'theme-text-primary'
+                    }`}
+                  >
+                    {b.name}
+                    {b.default && <span className="ml-1 theme-text-faint">(default)</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {/* Switch interface — preserves identity + Claude session_id, swaps the runtime. */}
         <button
           onClick={async (e) => {
@@ -255,16 +305,16 @@ export function AgentMenu({
             }
             onClose()
           }}
-          className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-white hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
           title="Same conversation, same identity — different runtime"
         >
           <span className="w-4 text-center">⇄</span>
           {agent.interface === 'chat' ? 'Switch to iTerm2' : 'Switch to Chat'}
         </button>
-        <div className="border-t border-white/10 my-1" />
+        <div className="border-t theme-border-subtle my-1" />
         <button
           onClick={(e) => { e.stopPropagation(); shutdownAgent(agent.session_id); onClose() }}
-          className="w-full text-left px-3 py-1.5 text-[8px] font-pixel text-accent-red hover:bg-white/10 flex items-center gap-2 transition-colors pixel-shadow"
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display text-accent-red theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
         >
           <span className="w-4 text-center">⏻</span>
           Release

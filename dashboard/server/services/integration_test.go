@@ -159,7 +159,7 @@ func TestActivityOverlapWorkflow(t *testing.T) {
 	}
 }
 
-// TestCloneIsolation tests that clones with different ccd_session_ids
+// TestCloneIsolation tests that clones with different pokegent_ids
 // have isolated mailboxes.
 func TestCloneIsolation(t *testing.T) {
 	dir := t.TempDir()
@@ -169,12 +169,12 @@ func TestCloneIsolation(t *testing.T) {
 	}, nil)
 
 	// Send to original and clone separately
-	svc.Send("boss-11111111", "Boss", "original-ccd-id", "Original", "task for original")
-	svc.Send("boss-11111111", "Boss", "clone-ccd-iddd", "Clone", "task for clone")
+	svc.Send("boss-11111111", "Boss", "original-pokegent-id", "Original", "task for original")
+	svc.Send("boss-11111111", "Boss", "clone-pokegent-iddd", "Clone", "task for clone")
 
 	// Each gets only their message
-	origMsgs, _ := svc.GetPending("original-ccd-id")
-	cloneMsgs, _ := svc.GetPending("clone-ccd-iddd")
+	origMsgs, _ := svc.GetPending("original-pokegent-id")
+	cloneMsgs, _ := svc.GetPending("clone-pokegent-iddd")
 
 	if len(origMsgs) != 1 || origMsgs[0].Content != "task for original" {
 		t.Errorf("original got wrong messages: %v", origMsgs)
@@ -184,8 +184,8 @@ func TestCloneIsolation(t *testing.T) {
 	}
 
 	// Consuming one doesn't affect the other
-	svc.Consume("original-ccd-id")
-	cloneMsgs, _ = svc.GetPending("clone-ccd-iddd")
+	svc.Consume("original-pokegent-id")
+	cloneMsgs, _ = svc.GetPending("clone-pokegent-iddd")
 	if len(cloneMsgs) != 1 {
 		t.Errorf("clone should still have message after original consumed, got %d", len(cloneMsgs))
 	}

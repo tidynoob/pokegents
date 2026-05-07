@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 
 // GBA-style status condition pills — solid bg + white text, like BRN/PSN/SLP in Pokemon
 const STATUS_CONFIG: Record<string, { label: string; bg: string; timeColor: string; pulse?: boolean }> = {
-  idle:        { label: 'SLP',  bg: '#788890',  timeColor: 'text-white/30' },
-  busy:        { label: 'ATK',  bg: '#e87848',  timeColor: 'text-white/50', pulse: true },
-  done:        { label: 'OK',   bg: '#58a868',  timeColor: 'text-white/40' },
-  needs_input: { label: 'WAIT', bg: '#d84848',  timeColor: 'text-white/50', pulse: true },
-  error:       { label: 'PSN',  bg: '#a858a8',  timeColor: 'text-white/50', pulse: true },
-  starting:    { label: 'NEW',  bg: '#5898c8',  timeColor: 'text-white/50', pulse: true },
+  idle:        { label: 'SLP',  bg: 'var(--theme-status-idle)',  timeColor: 'theme-text-faint' },
+  busy:        { label: 'ATK',  bg: 'var(--theme-status-busy)',  timeColor: 'theme-text-muted', pulse: true },
+  done:        { label: 'OK',   bg: 'var(--theme-status-done)',  timeColor: 'theme-text-faint' },
+  needs_input: { label: 'WAIT', bg: 'var(--theme-status-needs-input)',  timeColor: 'theme-text-muted', pulse: true },
+  error:       { label: 'PSN',  bg: 'var(--theme-status-error)',  timeColor: 'theme-text-muted', pulse: true },
+  starting:    { label: 'NEW',  bg: 'var(--theme-status-starting)',  timeColor: 'theme-text-muted', pulse: true },
 }
 
 function formatDuration(seconds: number): string {
@@ -52,11 +52,11 @@ export function StatusBadge({ status, lastUpdated, busySince }: StatusBadgeProps
   return (
     <div className="flex flex-col items-end gap-0.5 shrink-0">
       <span
-        className={`inline-flex items-center justify-center text-[7px] font-pixel text-white px-2 py-0.5 rounded-full leading-none ${config.pulse ? 'animate-pulse-soft' : ''}`}
+        className={`inline-flex items-center justify-center text-s theme-font-display theme-text-primary px-2 py-0.5 rounded-full leading-none ${config.pulse ? 'animate-pulse-soft' : ''}`}
         style={{
           backgroundColor: config.bg,
-          textShadow: '1px 1px 0 rgba(0,0,0,0.4)',
-          boxShadow: 'inset 1px 1px 0 rgba(255,255,255,0.2), inset -1px -1px 0 rgba(0,0,0,0.2)',
+          textShadow: 'var(--theme-text-shadow-pixel)',
+          boxShadow: 'var(--theme-shadow-panel)',
           minWidth: 28,
           textAlign: 'center',
         }}
@@ -64,7 +64,7 @@ export function StatusBadge({ status, lastUpdated, busySince }: StatusBadgeProps
         {config.label}
       </span>
       {timeLabel && (
-        <span className={`text-[7px] font-mono ${config.timeColor}`}>
+        <span className={`text-s theme-font-mono ${config.timeColor}`}>
           {timeLabel}
         </span>
       )}

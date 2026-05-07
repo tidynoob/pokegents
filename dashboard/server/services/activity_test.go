@@ -133,7 +133,7 @@ func TestGetProjectHash(t *testing.T) {
 	tests := []struct {
 		input, expected string
 	}{
-		{"/Users/me/Projects", "Users-me-Projects"},
+		{"/home/user/Projects", "home-user-Projects"},
 		{"", "default"},
 		{"/", ""},
 	}

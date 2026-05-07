@@ -93,8 +93,8 @@ type MetadataStore interface {
 type RunningStore interface {
 	// Get returns a single running session by Claude session ID.
 	Get(sessionID string) (*RunningSession, error)
-	// GetByCCDSessionID returns a running session by its stable CCD session ID.
-	GetByCCDSessionID(ccdSessionID string) (*RunningSession, error)
+	// GetByPokegentID returns a running session by stable pokegent ID.
+	GetByPokegentID(pokegentID string) (*RunningSession, error)
 	// List returns all running sessions.
 	List() ([]RunningSession, error)
 	// Create writes a new running session file.
