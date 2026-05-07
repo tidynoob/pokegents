@@ -3,16 +3,10 @@ import { AgentState } from '../types'
 import {
   focusAgent, checkAgentMessages, spawnClone, shutdownAgent,
   assignRole, assignProject, assignTaskGroup, migrateInterface,
-  switchBackend, fetchBackends,
+  switchBackend, fetchBackends, setRuntimeConfig,
   RuntimeCapabilities, ProjectInfo, RoleInfo, BackendInfo,
 } from '../api'
-
-// AgentMenu is the right-click / overflow menu for an agent. Used by both
-// AgentCard (right-click on the grid cell) and ChatPanel (header overflow
-// button). All actions are runtime-aware: the menu hides items the
-// runtime advertises it can't support (e.g. "Go to terminal" for chat,
-// "Spawn clone" for chat). Everything else — rename, sprite, role, project,
-// task-group, switch-interface, release — works for any runtime.
+import { GameModal } from './GameModal'
 
 interface AgentMenuProps {
   x: number
@@ -29,26 +23,197 @@ interface AgentMenuProps {
   existingGroups?: string[]
 }
 
+function SwitchDropdown({ label, value, options, onChange }: {
+  label: string
+  value: string
+  options: { key: string; label: string }[]
+  onChange: (key: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const selected = options.find(o => o.key === value)
+
+  return (
+    <div ref={ref} className="relative">
+      <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">{label}</label>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors"
+        style={{ background: 'var(--theme-dropdown-bg)', borderColor: 'var(--theme-dropdown-border)' }}
+      >
+        <span>{selected ? selected.label : 'None'}</span>
+        <span className="theme-text-faint text-l">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 right-0 mt-1 gba-dropdown-panel z-50 py-1 max-h-[220px] overflow-y-auto">
+          {options.map(o => (
+            <button
+              key={o.key}
+              onClick={() => { onChange(o.key); setOpen(false) }}
+              className={`w-full text-left px-3 py-2 text-l theme-font-mono transition-colors ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SwitchRuntimeModal({ agent, onClose, onAssignStatus }: {
+  agent: AgentState
+  onClose: () => void
+  onAssignStatus?: (msg: string) => void
+}) {
+  const agentId = agent.pokegent_id || agent.session_id
+  const [backends, setBackends] = useState<BackendInfo[]>([])
+  const [iface, setIface] = useState<'chat' | 'iterm2'>(agent.interface as 'chat' | 'iterm2' || 'chat')
+  const [backendId, setBackendId] = useState(agent.agent_backend || '')
+  const [modelId, setModelId] = useState('')
+  const [applying, setApplying] = useState(false)
+
+  useEffect(() => {
+    fetchBackends().then(list => {
+      setBackends(list)
+      if (!backendId && list.length > 0) {
+        const def = list.find(b => b.default) || list[0]
+        setBackendId(def.id)
+      }
+    })
+  }, [])
+
+  const selectedBackend = backends.find(b => b.id === backendId)
+  const models = selectedBackend?.models ? Object.entries(selectedBackend.models) : []
+  const currentModelKey = models.find(([, m]) => agent.model?.toLowerCase().includes(m.model.toLowerCase()))?.[0]
+
+  async function apply() {
+    setApplying(true)
+    try {
+      if (iface !== agent.interface) {
+        const result = await migrateInterface(agentId, iface)
+        if (iface === 'chat') {
+          window.dispatchEvent(new CustomEvent('open-chat-panel', {
+            detail: { pokegentId: result.pokegent_id },
+          }))
+        }
+        onAssignStatus?.(`Switched to ${iface}`)
+      }
+      if (backendId !== (agent.agent_backend || '') && iface === 'chat') {
+        await switchBackend(agentId, backendId)
+        onAssignStatus?.(`Switching backend to ${selectedBackend?.name}...`)
+      }
+      if (modelId && iface === 'chat') {
+        const modelEntry = models.find(([k]) => k === modelId)
+        if (modelEntry) {
+          await setRuntimeConfig(agentId, modelEntry[1].model, '')
+        }
+      }
+      onClose()
+    } catch (err) {
+      alert(`Switch failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  return (
+    <GameModal
+      title="Switch Runtime"
+      onClose={onClose}
+      width="min(380px, 96vw)"
+      height="auto"
+      maxHeight="92vh"
+      scanlines={false}
+      zIndex={10001}
+    >
+      <div
+        className="p-4 flex flex-col gap-3"
+        style={{
+          borderRadius: '0 0 8px 8px',
+          overflow: 'visible',
+          background: 'var(--theme-chat-panel-bg)',
+          border: '2px solid var(--theme-panel-border)',
+          color: 'var(--theme-panel-text)',
+          fontFamily: 'var(--theme-font-mono)',
+          boxShadow: 'var(--theme-shadow-panel)',
+        }}
+      >
+        <SwitchDropdown
+          label="Interface"
+          value={iface}
+          options={[
+            { key: 'chat', label: 'Pokegent Chat' },
+            { key: 'iterm2', label: 'Terminal (iTerm2)' },
+          ]}
+          onChange={key => setIface(key as 'chat' | 'iterm2')}
+        />
+
+        {iface === 'chat' && (
+          <SwitchDropdown
+            label="Agent backend"
+            value={backendId}
+            options={backends.map(b => ({ key: b.id, label: b.name + (b.default ? ' (default)' : '') }))}
+            onChange={key => { setBackendId(key); setModelId('') }}
+          />
+        )}
+
+        {iface === 'chat' && models.length > 0 && (
+          <SwitchDropdown
+            label="Model"
+            value={modelId || selectedBackend?.default_model || currentModelKey || ''}
+            options={models.map(([key, m]) => ({ key, label: m.name || m.model }))}
+            onChange={setModelId}
+          />
+        )}
+
+        <div className="text-m theme-font-mono theme-text-warning leading-snug">
+          This will restart the agent. Conversation history is preserved.
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={onClose}
+            disabled={applying}
+            className="gba-button text-m theme-font-display px-3 py-2.5 transition-colors opacity-80"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={apply}
+            disabled={applying}
+            className={`flex-1 gba-button text-m theme-font-display px-3 py-2.5 transition-colors ${applying ? 'opacity-30 cursor-not-allowed' : ''}`}
+          >
+            {applying ? 'Applying...' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </GameModal>
+  )
+}
+
 export function AgentMenu({
   x, y, agent, capabilities, onClose, onRename, onChangeSprite, onCollapse,
   projects, roles, existingGroups, onAssignStatus,
 }: AgentMenuProps) {
-  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | 'backend' | null>(null)
+  const [submenu, setSubmenu] = useState<'role' | 'project' | 'group' | null>(null)
   const [newGroupName, setNewGroupName] = useState('')
   const newGroupRef = useRef<HTMLInputElement>(null)
-  const [backends, setBackends] = useState<BackendInfo[]>([])
-
-  // Fetch backends when the backend submenu is opened
-  useEffect(() => {
-    if (submenu === 'backend') {
-      fetchBackends().then(setBackends)
-    }
-  }, [submenu])
+  const [showSwitchModal, setShowSwitchModal] = useState(false)
+  const agentId = agent.pokegent_id || agent.session_id
 
   const showStatus = (res: { status: string }, label: string) => {
     if (!onAssignStatus) return
-    if (res.status === 'relaunching') onAssignStatus(`Relaunching as ${label}...`)
-    else if (res.status === 'queued') onAssignStatus(`Queued — ${label} on idle`)
+    if (res.status === 'relaunching') onAssignStatus(`Saved — relaunching to load ${label}...`)
+    else if (res.status === 'queued') onAssignStatus(`Saved — will relaunch to load ${label} when idle`)
     else if (res.status === 'updated') onAssignStatus(`Set ${label}`)
   }
 
@@ -71,12 +236,10 @@ export function AgentMenu({
   }
   const subPos = flipSub ? 'right-full mr-1' : 'left-full ml-1'
 
-  // Top-level items, capability-gated. The order matches the legacy
-  // AgentCard menu so muscle memory carries.
   type MenuItem = { label: string; icon: string; action: () => void }
   const items: MenuItem[] = []
   if (capabilities.can_focus) {
-    items.push({ label: 'Go to terminal', icon: '⌨', action: () => { focusAgent(agent.session_id); onClose() } })
+    items.push({ label: 'Go to terminal', icon: '⌨', action: () => { focusAgent(agentId); onClose() } })
   }
   items.push({ label: 'Check messages', icon: '💬', action: () => { checkAgentMessages(agent.session_id); onClose() } })
   items.push({ label: 'Rename', icon: '✏️', action: onRename })
@@ -88,6 +251,10 @@ export function AgentMenu({
     items.push({ label: 'Collapse', icon: '📌', action: () => { onCollapse(); onClose() } })
   }
 
+  if (showSwitchModal) {
+    return <SwitchRuntimeModal agent={agent} onClose={() => { setShowSwitchModal(false); onClose() }} onAssignStatus={onAssignStatus} />
+  }
+
   return (
     <>
       <div
@@ -97,12 +264,12 @@ export function AgentMenu({
         onContextMenu={(e) => { e.preventDefault(); onClose() }}
       />
       <div style={menuStyle}>
-        <div className="gba-panel py-1 min-w-[190px]">
+        <div className="gba-dropdown-panel py-1 min-w-[190px]">
         {items.map((item) => (
           <button
             key={item.label}
             onClick={(e) => { e.stopPropagation(); item.action() }}
-            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
           >
             <span className="w-4 text-center">{item.icon}</span>
             {item.label}
@@ -113,22 +280,25 @@ export function AgentMenu({
         {(roles && roles.length > 0 || projects && projects.length > 0) && (
           <>
             <div className="border-t theme-border-subtle my-1" />
+            <div className="px-3 py-1.5 text-m theme-font-mono theme-text-warning leading-snug">
+              Role/project changes relaunch the agent to load the profile.
+            </div>
             {roles && roles.length > 0 && (
               <div className="relative">
                 <button
                   onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'role' ? null : 'role') }}
-                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
                 >
                   <span className="w-4 text-center">🎭</span>
                   {agent.role ? `Role: ${agent.role}` : 'Assign role'}
                   <span className="ml-auto theme-text-faint">▸</span>
                 </button>
                 {submenu === 'role' && (
-                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
+                  <div className={`absolute top-0 ${subPos} gba-dropdown-panel py-1 min-w-[140px]`}>
                     {agent.role && (
                       <button
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, ''); showStatus(res, 'no role'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agentId, ''); showStatus(res, 'no role'); onClose() }}
+                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-dropdown-hover transition-colors pixel-shadow italic"
                       >
                         None
                       </button>
@@ -136,8 +306,8 @@ export function AgentMenu({
                     {roles.map(r => (
                       <button
                         key={r.name}
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agent.session_id, r.name); showStatus(res, r.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow' : 'theme-text-primary'}`}
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignRole(agentId, r.name); showStatus(res, r.title); onClose() }}
+                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display transition-colors pixel-shadow flex items-center gap-1.5 ${agent.role === r.name ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
                       >
                         <span>{r.emoji}</span>
                         <span>{r.title}</span>
@@ -151,18 +321,18 @@ export function AgentMenu({
               <div className="relative">
                 <button
                   onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'project' ? null : 'project') }}
-                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
                 >
                   <span className="w-4 text-center">📁</span>
                   {agent.project ? `Project: ${agent.project}` : 'Assign project'}
                   <span className="ml-auto theme-text-faint">▸</span>
                 </button>
                 {submenu === 'project' && (
-                  <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
+                  <div className={`absolute top-0 ${subPos} gba-dropdown-panel py-1 min-w-[140px]`}>
                     {agent.project && (
                       <button
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, ''); showStatus(res, 'no project'); onClose() }}
-                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agentId, ''); showStatus(res, 'no project'); onClose() }}
+                        className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-dropdown-hover transition-colors pixel-shadow italic"
                       >
                         None
                       </button>
@@ -170,8 +340,8 @@ export function AgentMenu({
                     {projects.map(p => (
                       <button
                         key={p.name}
-                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agent.session_id, p.name); showStatus(res, p.title); onClose() }}
-                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow' : 'theme-text-primary'}`}
+                        onClick={async (e) => { e.stopPropagation(); const res = await assignProject(agentId, p.name); showStatus(res, p.title); onClose() }}
+                        className={`w-full text-left px-3 py-1.5 text-s theme-font-display transition-colors pixel-shadow flex items-center gap-1.5 ${agent.project === p.name ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
                       >
                         <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: `rgb(${p.color[0]},${p.color[1]},${p.color[2]})` }} />
                         <span>{p.title}</span>
@@ -188,18 +358,18 @@ export function AgentMenu({
         <div className="relative">
           <button
             onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'group' ? null : 'group') }}
-            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
           >
             <span className="w-4 text-center">📦</span>
             {agent.task_group ? `Group: ${agent.task_group}` : 'Assign group'}
             <span className="ml-auto theme-text-faint">▸</span>
           </button>
           {submenu === 'group' && (
-            <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
+            <div className={`absolute top-0 ${subPos} gba-dropdown-panel py-1 min-w-[140px]`}>
               {agent.task_group && (
                 <button
-                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, ''); onAssignStatus?.('Removed from group'); onClose() }}
-                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-panel-hover transition-colors pixel-shadow italic"
+                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agentId, ''); onAssignStatus?.('Removed from group'); onClose() }}
+                  className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-faint theme-bg-dropdown-hover transition-colors pixel-shadow italic"
                 >
                   None
                 </button>
@@ -207,8 +377,8 @@ export function AgentMenu({
               {(existingGroups || []).map(g => (
                 <button
                   key={g}
-                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agent.session_id, g); onAssignStatus?.(`Group: ${g}`); onClose() }}
-                  className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow' : 'theme-text-primary'}`}
+                  onClick={async (e) => { e.stopPropagation(); await assignTaskGroup(agentId, g); onAssignStatus?.(`Group: ${g}`); onClose() }}
+                  className={`w-full text-left px-3 py-1.5 text-s theme-font-display transition-colors pixel-shadow ${agent.task_group === g ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
                 >
                   {g}
                 </button>
@@ -222,7 +392,7 @@ export function AgentMenu({
                   e.stopPropagation()
                   const name = newGroupName.trim()
                   if (!name) return
-                  await assignTaskGroup(agent.session_id, name)
+                  await assignTaskGroup(agentId, name)
                   onAssignStatus?.(`Group: ${name}`)
                   onClose()
                 }}
@@ -247,74 +417,17 @@ export function AgentMenu({
         </div>
 
         <div className="border-t theme-border-subtle my-1" />
-        {/* Switch backend — only for chat agents, relaunches with a different ACP backend. */}
-        {agent.interface === 'chat' && (
-          <div className="relative">
-            <button
-              onClick={(e) => { e.stopPropagation(); setSubmenu(submenu === 'backend' ? null : 'backend') }}
-              className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover theme-hover-text-primary flex items-center gap-2 transition-colors pixel-shadow"
-            >
-              <span className="w-4 text-center">🔀</span>
-              Switch backend
-              <span className="ml-auto theme-text-faint">▸</span>
-            </button>
-            {submenu === 'backend' && (
-              <div className={`absolute top-0 ${subPos} gba-panel py-1 min-w-[140px]`}>
-                {backends.length === 0 && (
-                  <div className="px-3 py-1.5 text-s theme-font-display theme-text-faint">Loading...</div>
-                )}
-                {backends.map(b => (
-                  <button
-                    key={b.id}
-                    onClick={async (e) => {
-                      e.stopPropagation()
-                      try {
-                        await switchBackend(agent.pokegent_id || agent.session_id, b.id)
-                        onAssignStatus?.(`Switching to ${b.name}...`)
-                      } catch (err) {
-                        alert(`Switch backend failed: ${err instanceof Error ? err.message : String(err)}`)
-                      }
-                      onClose()
-                    }}
-                    className={`w-full text-left px-3 py-1.5 text-s theme-font-display theme-bg-panel-hover transition-colors pixel-shadow ${
-                      agent.agent_backend === b.id ? 'text-accent-yellow' : 'theme-text-primary'
-                    }`}
-                  >
-                    {b.name}
-                    {b.default && <span className="ml-1 theme-text-faint">(default)</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        {/* Switch interface — preserves identity + Claude session_id, swaps the runtime. */}
         <button
-          onClick={async (e) => {
-            e.stopPropagation()
-            const target = agent.interface === 'chat' ? 'iterm2' : 'chat'
-            try {
-              const result = await migrateInterface(agent.session_id, target)
-              if (target === 'chat') {
-                window.dispatchEvent(new CustomEvent('open-chat-panel', {
-                  detail: { pokegentId: result.pokegent_id },
-                }))
-              }
-            } catch (err) {
-              alert(`Switch failed: ${err instanceof Error ? err.message : String(err)}`)
-            }
-            onClose()
-          }}
-          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
-          title="Same conversation, same identity — different runtime"
+          onClick={(e) => { e.stopPropagation(); setShowSwitchModal(true) }}
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover flex items-center gap-2 transition-colors pixel-shadow"
         >
           <span className="w-4 text-center">⇄</span>
-          {agent.interface === 'chat' ? 'Switch to iTerm2' : 'Switch to Chat'}
+          Switch runtime
         </button>
         <div className="border-t theme-border-subtle my-1" />
         <button
-          onClick={(e) => { e.stopPropagation(); shutdownAgent(agent.session_id); onClose() }}
-          className="w-full text-left px-3 py-1.5 text-s theme-font-display text-accent-red theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
+          onClick={(e) => { e.stopPropagation(); shutdownAgent(agentId); onClose() }}
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display text-accent-red theme-bg-dropdown-hover flex items-center gap-2 transition-colors pixel-shadow"
         >
           <span className="w-4 text-center">⏻</span>
           Release

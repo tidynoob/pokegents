@@ -10,10 +10,15 @@ import (
 )
 
 // BackendModelConfig describes a model option within a provider backend.
+// Per-model Env entries merge on top of the backend-level Env when launching
+// an agent with this model — lets different models use different endpoints
+// or API keys within the same provider (e.g. GPT-5.5 on Azure East,
+// GPT-4o on Azure West).
 type BackendModelConfig struct {
-	Name   string `json:"name,omitempty"`
-	Model  string `json:"model"`
-	Effort string `json:"effort,omitempty"`
+	Name   string            `json:"name,omitempty"`
+	Model  string            `json:"model"`
+	Effort string            `json:"effort,omitempty"`
+	Env    map[string]string `json:"env,omitempty"`
 }
 
 // BackendConfig describes an ACP provider backend that can launch agents.
@@ -74,6 +79,29 @@ func (b BackendConfig) ResolvedModelLabel() string {
 	return strings.TrimSpace(b.DefaultModel)
 }
 
+// ResolvedEnvForModel returns the merged env for a model identified by its
+// model ID string (e.g. "gpt-5.5"): backend-level env as the base, with
+// per-model env overrides on top. Returns backend env unchanged if the model
+// has no env overrides or isn't found.
+func (b BackendConfig) ResolvedEnvForModel(modelID string) map[string]string {
+	if modelID == "" || b.Models == nil {
+		return b.Env
+	}
+	for _, m := range b.Models {
+		if m.Model == modelID && len(m.Env) > 0 {
+			merged := make(map[string]string, len(b.Env)+len(m.Env))
+			for k, v := range b.Env {
+				merged[k] = v
+			}
+			for k, v := range m.Env {
+				merged[k] = v
+			}
+			return merged
+		}
+	}
+	return b.Env
+}
+
 // backendsFile is the JSON shape of ~/.pokegents/backends.json.
 type backendsFile struct {
 	Version      int                      `json:"version,omitempty"`
@@ -101,11 +129,12 @@ func defaultBackends() map[string]BackendConfig {
 			Name:         "Claude",
 			Type:         "claude-acp",
 			Default:      true,
-			DefaultModel: "sonnet",
+			DefaultModel: "sonnet-4-6",
 			Models: map[string]BackendModelConfig{
-				"sonnet": {Name: "Sonnet", Model: "sonnet"},
-				"opus":   {Name: "Opus", Model: "opus"},
-				"haiku":  {Name: "Haiku", Model: "haiku"},
+				"sonnet-4-6": {Name: "Sonnet 4.6", Model: "claude-sonnet-4-6"},
+				"opus-4-7":   {Name: "Opus 4.7", Model: "claude-opus-4-7"},
+				"opus-4-6":   {Name: "Opus 4.6 (1M)", Model: "claude-opus-4-6[1m]"},
+				"haiku-4-5":  {Name: "Haiku 4.5", Model: "haiku"},
 			},
 		},
 		"codex": {

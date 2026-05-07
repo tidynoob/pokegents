@@ -27,18 +27,18 @@ export function FilePathMenu({ path, x, y, onClose }: {
         onContextMenu={(e) => { e.preventDefault(); onClose() }}
       />
       <div
-        className="fixed gba-panel py-1 min-w-[180px]"
+        className="fixed gba-dropdown-panel py-1 min-w-[180px]"
         style={{ left: Math.min(x, window.innerWidth - 200), top: Math.min(y, window.innerHeight - 120), zIndex: 9999 }}
       >
         <button
-          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover flex items-center gap-2 transition-colors pixel-shadow"
           onClick={(e) => { e.stopPropagation(); openFileInEditor(path); onClose() }}
         >
           <span className="w-4 text-center">↗</span>
           Open in editor
         </button>
         <button
-          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-panel-hover flex items-center gap-2 transition-colors pixel-shadow"
+          className="w-full text-left px-3 py-1.5 text-s theme-font-display theme-text-primary theme-bg-dropdown-hover flex items-center gap-2 transition-colors pixel-shadow"
           onClick={async (e) => { e.stopPropagation(); await navigator.clipboard.writeText(path); onClose() }}
         >
           <span className="w-4 text-center">⧉</span>

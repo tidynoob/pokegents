@@ -1233,11 +1233,21 @@ func (s *Server) handleFocusSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true, "focusable": false})
 		return
 	}
-	if err := rt.Focus(r.Context(), agent.PokegentID); err != nil {
+	if err := rt.Focus(r.Context(), runtimeAgentID(agent)); err != nil {
 		http.Error(w, fmt.Sprintf("failed to focus: %v", err), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func runtimeAgentID(agent *AgentState) string {
+	if agent == nil {
+		return ""
+	}
+	if agent.PokegentID != "" {
+		return agent.PokegentID
+	}
+	return agent.SessionID
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
@@ -2443,7 +2453,7 @@ func (s *Server) updateITermSprite(sessionID, sprite string) {
 }
 
 func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+	sessionID := s.resolveSessionID(r.PathValue("id"))
 	var body struct {
 		Role string `json:"role"`
 	}
@@ -2464,7 +2474,7 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetProject(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+	sessionID := s.resolveSessionID(r.PathValue("id"))
 	var body struct {
 		Project string `json:"project"`
 	}

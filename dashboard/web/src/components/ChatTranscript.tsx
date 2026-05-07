@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Entry, ToolCall, renderRawPayload } from '../types/chat'
 import { Markdown } from './Markdown'
 import { formatElapsed } from '../utils/elapsed'
-import { parseTool } from '../utils/toolAdapters'
+import { parseTool, normalizeToolHeader } from '../utils/toolAdapters'
 import { HighlightText } from './ChatSearch'
 import { TimestampRow } from './PanelViews'
 import { FilePathLink } from './FilePathMenu'
@@ -97,52 +97,6 @@ export function AnimatedDots() {
     return () => clearInterval(iv)
   }, [])
   return <span className="inline-block w-[1.5em] text-left">{'.'.repeat(count)}</span>
-}
-
-const TOOL_HEADER_LABELS = [
-  'Search',
-  'Read',
-  'List',
-  'Write',
-  'Update',
-  'Notebook',
-  'Bash',
-  'Run',
-  'Git',
-  'Agent',
-  'Fetch',
-  'Input',
-  'Output',
-] as const
-
-function joinUniqueHeaderDetails(...parts: string[]): string {
-  const out: string[] = []
-  for (const part of parts.map(p => p.trim()).filter(Boolean)) {
-    if (out.some(existing => existing === part || existing.includes(part) || part.includes(existing))) continue
-    out.push(part)
-  }
-  return out.join(' · ')
-}
-
-function normalizeToolHeader(label: string, detail: string): { label: string; detail: string } {
-  const raw = label.trim()
-  if (!raw) return { label: 'Tool', detail }
-
-  const colonIdx = raw.indexOf(':')
-  const beforeColon = colonIdx >= 0 ? raw.slice(0, colonIdx).trim() : raw
-  const afterColon = colonIdx >= 0 ? raw.slice(colonIdx + 1).trim() : ''
-
-  for (const known of TOOL_HEADER_LABELS) {
-    if (beforeColon === known) {
-      return { label: known, detail: detail || afterColon }
-    }
-    if (beforeColon.startsWith(`${known} `) || beforeColon.startsWith(`${known}\t`) || beforeColon.startsWith(`${known},`)) {
-      const rest = beforeColon.slice(known.length).replace(/^[\s,]+/, '').trim()
-      return { label: known, detail: joinUniqueHeaderDetails(rest, afterColon, detail) }
-    }
-  }
-
-  return { label: beforeColon, detail: joinUniqueHeaderDetails(detail, afterColon) }
 }
 
 // TypewriterMarkdown reveals text character-by-character when new chunks

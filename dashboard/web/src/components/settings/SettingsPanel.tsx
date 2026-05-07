@@ -209,7 +209,7 @@ export function SettingsPanel({ settings, defaults, setupStatus, onChange, onRes
             <>
               <Section title="Grid density">
                 <Slider
-                  label="Cards per row"
+                  label="Number of columns"
                   value={settings.cardsPerRow}
                   min={1} max={8} step={1}
                   onChange={v => onChange({ cardsPerRow: v })}
@@ -217,7 +217,7 @@ export function SettingsPanel({ settings, defaults, setupStatus, onChange, onRes
                   onDragEnd={() => onGridDragging?.(false)}
                 />
                 <Slider
-                  label="Cards per col"
+                  label="Number of rows"
                   value={settings.cardsPerCol}
                   min={1} max={6} step={1}
                   onChange={v => onChange({ cardsPerCol: v })}
@@ -338,7 +338,7 @@ export function SettingsPanel({ settings, defaults, setupStatus, onChange, onRes
                   </button>
                 </SettingRow>
                 <p className="text-l leading-relaxed theme-font-mono theme-text-faint">
-                  Prefer backends.json for Pokegents launch choices. Set model entries to aliases like sonnet/opus or a full provider model ID.
+                  Prefer backends.json for Pokegents launch choices. Set model entries to exact provider model IDs; legacy aliases are only accepted for old configs.
                 </p>
               </Section>
               <Section title="Setup">

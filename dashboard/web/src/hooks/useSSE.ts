@@ -29,6 +29,7 @@ function agentsEqual(a: AgentState[], b: AgentState[]): boolean {
         a[i].project !== b[i].project ||
         a[i].busy_since !== b[i].busy_since ||
         a[i].context_tokens !== b[i].context_tokens ||
+        a[i].context_window !== b[i].context_window ||
         stringListSignature(a[i].recent_actions) !== stringListSignature(b[i].recent_actions) ||
         activitySignature(a[i].activity_feed) !== activitySignature(b[i].activity_feed)) {
       return false
@@ -105,6 +106,8 @@ export function useSSE() {
             activity_feed: patch.activity_feed ?? updated[idx].activity_feed,
             card_preview: patch.card_preview ?? updated[idx].card_preview,
             background_tasks: patch.background_tasks,
+            context_tokens: patch.context_tokens ?? updated[idx].context_tokens,
+            context_window: patch.context_window ?? updated[idx].context_window,
           }
           return updated
         })

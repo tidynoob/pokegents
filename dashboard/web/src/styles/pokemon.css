@@ -45,6 +45,10 @@ html, body, #root {
   --theme-chat-message-system-bg: rgba(88,152,200,0.12);
   --theme-chat-tool-bg: rgba(0, 0, 0, 0.45);
   --theme-chat-input-bg: rgba(0,0,0,0.24);
+  --theme-dropdown-bg: var(--theme-card-bg-scanline);
+  --theme-dropdown-border: var(--theme-card-border);
+  --theme-dropdown-hover-bg: rgba(255,255,255,0.10);
+  --theme-dropdown-active-bg: rgba(248,216,48,0.16);
   --theme-dialog-bg: #f8f8f0;
   --theme-dialog-border: #484848;
   --theme-dialog-text: #383838;
@@ -227,6 +231,14 @@ body::before {
   color: var(--theme-panel-text);
 }
 
+.gba-dropdown-panel {
+  background: var(--theme-dropdown-bg);
+  border: 2px solid var(--theme-dropdown-border);
+  border-radius: var(--theme-radius-panel);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55), var(--theme-shadow-card);
+  color: var(--theme-panel-text);
+}
+
 /* Pixel text shadow (retro style) */
 .pixel-shadow {
   text-shadow: var(--theme-text-shadow-pixel);
@@ -397,12 +409,11 @@ body::before {
 /* Transit hop: quick bouncy walk cycle for sprites moving between zones */
 @keyframes sprite-transit-hop-kf {
   0%, 100% { transform: translateY(0); }
-  40% { transform: translateY(-5px); }
-  60% { transform: translateY(-5px) scaleY(1.03); }
-  80% { transform: translateY(0); }
+  45% { transform: translateY(-4px); }
+  65% { transform: translateY(-4px) scaleY(1.02); }
 }
 .sprite-transit-hop {
-  animation: sprite-transit-hop-kf 0.28s ease-out infinite;
+  animation: sprite-transit-hop-kf 0.34s ease-in-out infinite;
 }
 
 /* Legacy aliases — kept for any stray references */
@@ -565,6 +576,8 @@ body.no-scanlines .pc-box-local-scanlines { display: none; }
 .theme-bg-panel-subtle { background: var(--theme-panel-subtle-bg); }
 .theme-bg-panel-muted { background: var(--theme-panel-muted-bg); }
 .theme-bg-panel-hover:hover { background: var(--theme-panel-hover-bg); }
+.theme-bg-dropdown-hover:hover { background: var(--theme-dropdown-hover-bg); }
+.theme-bg-dropdown-active { background: var(--theme-dropdown-active-bg); }
 .theme-bg-chat { background: var(--theme-chat-bg); }
 .theme-bg-chat-user { background: var(--theme-chat-message-user-bg); }
 .theme-bg-chat-assistant { background: var(--theme-chat-message-assistant-bg); }
@@ -658,4 +671,29 @@ html[data-theme="vscode-light"] {
   --theme-type-m: 11px;
   --theme-type-l: 13px;
   --theme-type-xl: 15px;
+}
+
+
+.activity-feed-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 0.45rem;
+  align-items: start;
+}
+
+.activity-feed-time {
+  grid-column: 1;
+  white-space: nowrap;
+}
+
+/* Agent card activity rows: wrap useful long command/text previews, then clamp. */
+.activity-feed-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }

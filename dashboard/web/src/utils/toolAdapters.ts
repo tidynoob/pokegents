@@ -247,6 +247,40 @@ function uniquePaths(paths: string[]): string[] {
   return out
 }
 
+type PatchStat = { op: 'Add' | 'Update' | 'Delete'; added: number; removed: number }
+
+function summarizePatchStat(stat: PatchStat | undefined): string {
+  if (!stat) return ''
+  const parts: string[] = []
+  if (stat.added) parts.push(`+${stat.added}`)
+  if (stat.removed) parts.push(`-${stat.removed}`)
+  if (parts.length > 0) return `${parts.join(' ')} lines`
+  if (stat.op === 'Add') return 'created'
+  if (stat.op === 'Delete') return 'deleted'
+  return 'edited'
+}
+
+function patchStatsByPath(patch: string, workdir: string): Map<string, PatchStat> {
+  const stats = new Map<string, PatchStat>()
+  let current: string | null = null
+
+  for (const line of patch.split('\n')) {
+    const header = line.match(/^\*\*\* (Add|Update|Delete) File:\s+(.+?)\s*$/)
+    if (header) {
+      current = resolvePath(header[2].trim(), workdir)
+      stats.set(current, { op: header[1] as PatchStat['op'], added: 0, removed: 0 })
+      continue
+    }
+    if (!current) continue
+    const stat = stats.get(current)
+    if (!stat) continue
+    if (line.startsWith('+') && !line.startsWith('+++')) stat.added++
+    if (line.startsWith('-') && !line.startsWith('---')) stat.removed++
+  }
+
+  return stats
+}
+
 function pathsWrittenByCommand(cmd: string, workdir: string): string[] {
   const paths: string[] = []
   const add = (raw: string | undefined) => {
@@ -261,14 +295,20 @@ function pathsWrittenByCommand(cmd: string, workdir: string): string[] {
   for (const m of cmd.matchAll(/(?:open|Path)\(\s*["']([^"']+)["']\s*,\s*["'](?:w|a|x|w\+|a\+)/g)) add(m[1])
   for (const m of cmd.matchAll(/Path\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)\s*\(/g)) add(m[1])
   for (const m of cmd.matchAll(/(?:write_text|write_bytes)\s*\([^)]*?path\s*=\s*["']([^"']+)["']/g)) add(m[1])
+  for (const path of patchStatsByPath(cmd, workdir).keys()) add(path)
   const pathVars = new Map<string, string>()
   for (const m of cmd.matchAll(/(?:^|\n)\s*([A-Za-z_]\w*)\s*=\s*Path\(\s*["']([^"']+)["']\s*\)/g)) {
     pathVars.set(m[1], m[2])
   }
+  for (const m of cmd.matchAll(/(?:^|\n)\s*([A-Za-z_]\w*)\s*=\s*["']([^"']+\.(?:ipynb|mdx|tsx|jsx|jsonl|yaml|astro|java|cpp|hpp|bash|zsh|scss|html|toml|json|yml|py|md|ts|js|go|rs|sh|sql|css|txt|c|h))["']/g)) {
+    pathVars.set(m[1], m[2])
+  }
   for (const [name, path] of pathVars) {
     if (new RegExp(`\\b${name}\\.write_(?:text|bytes)\\s*\\(`).test(cmd)) add(path)
+    if (new RegExp(`open\\s*\\(\\s*${name}\\s*,\\s*["'](?:w|a|x|w\\+|a\\+)`).test(cmd)) add(path)
   }
   for (const m of cmd.matchAll(/nbformat\.write\s*\([^,]+,\s*["']([^"']+\.ipynb)["']/g)) add(m[1])
+  for (const m of cmd.matchAll(/nbformat\.write\s*\([^,]+,\s*([A-Za-z_]\w*)\s*\)/g)) add(pathVars.get(m[1]))
   for (const m of cmd.matchAll(/["']([^"']+\.ipynb)["']/g)) {
     if (/nbformat|json\.dump|write|cells|notebook/i.test(cmd)) add(m[1])
   }
@@ -308,6 +348,7 @@ const codexExecAdapter: ToolAdapter = {
     const desc = inputString(i, 'description', 'justification') || rawInputFieldString(tc, 'description', 'justification')
     const notebookPath = notebookPathFromCommand(cmd, workdir)
     const writtenPaths = pathsWrittenByCommand(cmd, workdir)
+    const patchStats = patchStatsByPath(cmd, workdir)
     const filePath = firstReadablePath(cmd, workdir)
     const classified = classifyCodexCommand(cmd)
 
@@ -326,7 +367,14 @@ const codexExecAdapter: ToolAdapter = {
       const first = writtenPaths[0]
       return {
         header: { label: 'Update', detail: writtenPaths.length > 1 ? `${shortPath(first)} +${writtenPaths.length - 1}` : shortPath(first), filePath: first, description: desc || 'file write command' },
-        fileOps: writtenPaths.map(path => ({ path, verb: 'edited', diffSummary: 'via command' })),
+        fileOps: writtenPaths.map(path => {
+          const stat = patchStats.get(path)
+          return {
+            path,
+            verb: stat?.op === 'Add' ? 'created' : 'edited',
+            diffSummary: summarizePatchStat(stat) || 'unknown',
+          }
+        }),
         effect: 'write',
         bashCommand: cmd,
         bashDescription: desc || 'file write command',
@@ -358,22 +406,18 @@ const codexApplyPatchAdapter: ToolAdapter = {
   parse(_, tc) {
     const i = inp(tc)
     const patch = inputString(i, 'patch', 'input') || rawInputString(tc)
-    const ops = Array.from(patch.matchAll(/^\*\*\* (Update|Add|Delete) File: (.+)$/gm)).map(m => ({
-      op: m[1],
-      path: m[2].trim(),
-    }))
+    const workdir = inputString(i, 'workdir')
+    const stats = patchStatsByPath(patch, workdir)
+    const ops = Array.from(stats.entries()).map(([path, stat]) => ({ op: stat.op, path }))
     const first = ops[0]?.path || ''
     const label = ops.length > 0 && ops.every(op => op.op === 'Add') ? 'Write' : 'Update'
-    const added = (patch.match(/^\+(?!\+\+)/gm) || []).length
-    const removed = (patch.match(/^-(?!--)/gm) || []).length
-    const summary = [added ? `+${added}` : '', removed ? `-${removed}` : ''].filter(Boolean).join(' ')
 
     return {
       header: { label, detail: first ? shortPath(first) : 'patch', filePath: first.startsWith('/') ? first : undefined },
-      fileOps: ops.map(({ op, path }) => ({ path, verb: op === 'Add' ? 'created' : 'edited', diffSummary: summary })),
+      fileOps: ops.map(({ op, path }) => ({ path, verb: op === 'Add' ? 'created' : 'edited', diffSummary: summarizePatchStat(stats.get(path)) })),
       effect: 'write',
       patch,
-      summaryOverride: summary ? `${summary} lines` : undefined,
+      summaryOverride: ops.length > 1 ? `updated ${ops.length} files` : summarizePatchStat(stats.get(first)),
     }
   },
 }
@@ -632,6 +676,63 @@ export function parseTool(tc: RawToolCall): ParsedTool {
     }
   }
   return defaultAdapter.parse(toolName, tc)
+}
+
+export const TOOL_HEADER_LABELS = [
+  'Tool',
+  'Read',
+  'Search',
+  'List',
+  'Write',
+  'Update',
+  'Notebook',
+  'Bash',
+  'Run',
+  'Git',
+  'Agent',
+  'Fetch',
+  'Input',
+  'Output',
+] as const
+
+function joinUniqueHeaderDetails(...parts: string[]): string {
+  const out: string[] = []
+  for (const part of parts.map(p => p.trim()).filter(Boolean)) {
+    if (out.some(existing => existing === part || existing.includes(part) || part.includes(existing))) continue
+    out.push(part)
+  }
+  return out.join(' · ')
+}
+
+export function normalizeToolHeader(label: string, detail: string): { label: string; detail: string } {
+  const raw = label.trim()
+  if (!raw) return { label: 'Tool', detail }
+
+  const colonIdx = raw.indexOf(':')
+  const beforeColon = colonIdx >= 0 ? raw.slice(0, colonIdx).trim() : raw
+  const afterColon = colonIdx >= 0 ? raw.slice(colonIdx + 1).trim() : ''
+
+  for (const known of TOOL_HEADER_LABELS) {
+    if (beforeColon === known) {
+      return { label: known, detail: detail || afterColon }
+    }
+    if (beforeColon.startsWith(`${known} `) || beforeColon.startsWith(`${known}\t`) || beforeColon.startsWith(`${known},`)) {
+      const rest = beforeColon.slice(known.length).replace(/^[\s,]+/, '').trim()
+      return { label: known, detail: joinUniqueHeaderDetails(rest, afterColon, detail) }
+    }
+  }
+
+  return { label: beforeColon, detail: joinUniqueHeaderDetails(detail, afterColon) }
+}
+
+export function formatToolActivityText(tc: RawToolCall, maxDetail = 80): string {
+  const parsed = parseTool(tc)
+  const { label, detail } = normalizeToolHeader(parsed.header.label, parsed.header.detail)
+  const fallback = parsed.summaryOverride || parsed.header.description || parsed.bashDescription || parsed.agentDescription || ''
+  const chosen = detail || fallback
+  if (!chosen) return label
+  const trimmed = chosen.length > maxDetail ? `${chosen.slice(0, Math.max(0, maxDetail - 1))}…` : chosen
+  return `${label}: ${trimmed}`
 }
 
 export function extractFileOpsFromEntries(entries: { kind: string; data?: any; ts?: number }[]): FileOp[] {

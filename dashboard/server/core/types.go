@@ -91,7 +91,7 @@ type RunningSession struct {
 	Role           string `json:"role,omitempty"`            // role name (empty for legacy/bare project)
 	Project        string `json:"project,omitempty"`         // project name (empty for legacy profiles)
 	TaskGroup      string `json:"task_group,omitempty"`      // organizational grouping (e.g. "proxy", "auth-migration")
-	Model          string `json:"model,omitempty"`           // claude model alias or full name (e.g. "sonnet", "haiku")
+	Model          string `json:"model,omitempty"`           // provider model id (legacy aliases accepted on migration)
 	Effort         string `json:"effort,omitempty"`          // reasoning effort level (low, medium, high, max)
 	Sprite         string `json:"sprite,omitempty"`          // avatar sprite name (single source of truth)
 	Interface      string `json:"interface,omitempty"`       // "" / "iterm2" or "chat" — runtime backend

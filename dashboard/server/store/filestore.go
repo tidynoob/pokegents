@@ -36,7 +36,7 @@ func NewFileStore(dataDir string) *Store {
 
 // atomicWrite writes data to a temp file then renames for crash safety.
 func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
+	tmp := path + ".srv-tmp"
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err
 	}

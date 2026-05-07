@@ -31,24 +31,26 @@ type runtimeConfigBody struct {
 	Effort string `json:"effort"`
 }
 
-var modelAliases = map[string]string{
+// legacyModelAliases exists only so old role/project/running files and manual /model shortcuts keep working.
+// New backends.json defaults use exact provider model IDs.
+var legacyModelAliases = map[string]string{
 	"opus":       "claude-opus-4-6[1m]",
 	"opus4":      "claude-opus-4-6[1m]",
 	"sonnet":     "claude-sonnet-4-6",
 	"sonnet4":    "claude-sonnet-4-6",
-	"haiku":      "claude-haiku-4-5-20251001",
-	"haiku4":     "claude-haiku-4-5-20251001",
+	"haiku":      "haiku",
+	"haiku4":     "haiku",
 	"opus-4-7":   "claude-opus-4-7",
 	"opus-4-6":   "claude-opus-4-6[1m]",
 	"sonnet-4-6": "claude-sonnet-4-6",
-	"haiku-4-5":  "claude-haiku-4-5-20251001",
+	"haiku-4-5":  "haiku",
 }
 
 func resolveModelAlias(name string) string {
 	if name == "" {
 		return ""
 	}
-	if resolved, ok := modelAliases[name]; ok {
+	if resolved, ok := legacyModelAliases[name]; ok {
 		return resolved
 	}
 	return name

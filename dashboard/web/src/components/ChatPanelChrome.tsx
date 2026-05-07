@@ -61,16 +61,11 @@ export function ChatPanelDropdown({
       >⋯</button>
       {open && (
         <div
-          className="absolute right-0 top-full mt-1 z-30 rounded-md overflow-hidden min-w-[140px]"
-          style={{
-            background: 'var(--theme-panel-bg)',
-            border: '1px solid var(--theme-panel-divider)',
-            boxShadow: 'var(--theme-shadow-strong)',
-          }}
+          className="absolute right-0 top-full mt-1 z-30 overflow-hidden min-w-[140px] gba-dropdown-panel"
         >
           <button
             onClick={() => { onSearch(); setOpen(false) }}
-            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-panel-hover flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-dropdown-hover flex items-center gap-2"
           >
             <span className="theme-text-faint">⌘F</span>
             <span>{searchOpen ? 'CLOSE SEARCH' : 'SEARCH'}</span>
@@ -78,7 +73,7 @@ export function ChatPanelDropdown({
           {onCancel && (
             <button
               onClick={() => { onCancel(); setOpen(false) }}
-              className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow text-accent-red/80 theme-bg-panel-hover flex items-center gap-2"
+              className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow text-accent-red/80 theme-bg-dropdown-hover flex items-center gap-2"
             >
               <span className="theme-text-faint">⌃C</span>
               <span>CANCEL</span>
@@ -86,12 +81,12 @@ export function ChatPanelDropdown({
           )}
           <button
             onClick={(e) => { onMenu(e); setOpen(false) }}
-            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-panel-hover"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-dropdown-hover"
           >AGENT MENU…</button>
           <div className="border-t theme-border-subtle" />
           <button
             onClick={() => { onClose(); setOpen(false) }}
-            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-muted theme-bg-panel-hover flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-muted theme-bg-dropdown-hover flex items-center gap-2"
           >
             <span className="theme-text-faint">Esc</span>
             <span>CLOSE PANEL</span>
@@ -99,7 +94,7 @@ export function ChatPanelDropdown({
           {onToggleTimestamps && (
             <button
               onClick={() => { onToggleTimestamps(); setOpen(false) }}
-              className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-panel-hover flex items-center gap-2"
+              className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-secondary theme-bg-dropdown-hover flex items-center gap-2"
             >
               <span className={`text-m ${showTimestamps ? 'text-accent-green' : 'theme-text-faint'}`}>{showTimestamps ? '●' : '○'}</span>
               <span>TIMESTAMPS</span>
@@ -110,7 +105,7 @@ export function ChatPanelDropdown({
               <div className="border-t theme-border-subtle" />
               <button
                 onClick={() => { onDebug(); setOpen(false) }}
-                className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-warning theme-bg-panel-hover"
+                className="w-full text-left px-3 py-1.5 text-s theme-font-display uppercase pixel-shadow theme-text-warning theme-bg-dropdown-hover"
               >DEBUG PANEL</button>
             </>
           )}

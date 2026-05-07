@@ -45,10 +45,17 @@ func TestBuildCardPreviewIdleUsesSummary(t *testing.T) {
 	}
 }
 
-func TestDisplayModelForCodexUsesBackendModelName(t *testing.T) {
-	got := displayModelForBackend("GPT 5.5 (Azure)", "codex", "codex-acp")
-	if got != "Codex [GPT 5.5 (Azure)]" {
-		t.Fatalf("displayModelForBackend = %q", got)
+func TestDisplayModelForBackendUsesBackendColonModel(t *testing.T) {
+	cases := []struct{ model, backend, backendType, want string }{
+		{"GPT 5.4 (Azure)", "codex", "codex-acp", "Codex: GPT 5.4 (Azure)"},
+		{"haiku", "claude", "claude-acp", "Claude: Haiku"},
+		{"claude-opus-4-6[1m]", "claude", "claude-acp", "Claude: Opus 1M"},
+		{"Codex [unknown model]", "codex", "codex-acp", "Codex: unknown model"},
+	}
+	for _, c := range cases {
+		if got := displayModelForBackend(c.model, c.backend, c.backendType); got != c.want {
+			t.Fatalf("displayModelForBackend(%q, %q, %q) = %q, want %q", c.model, c.backend, c.backendType, got, c.want)
+		}
 	}
 }
 

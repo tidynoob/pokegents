@@ -4,7 +4,7 @@ import { useSSE } from './hooks/useSSE'
 import { useGridEngine } from './hooks/useGridEngine'
 import { fetchSessions, focusAgent, fetchProfiles, fetchProjectList, fetchRoleList, shutdownAgent, dismissEphemeral, assignTaskGroup, fetchSetupStatus, completeOnboarding, renameAgent, setSprite, ProfileInfo, ProjectInfo, RoleInfo, SetupStatus } from './api'
 import { AgentState, AgentMessage, stableId } from './types'
-import type { Entry, ToolCall } from './types/chat'
+import type { Entry } from './types/chat'
 import { AgentCard, GROUP_COLORS } from './components/AgentCard'
 import { GridContainer } from './components/GridContainer'
 import { GroupContainer } from './components/GroupContainer'
@@ -23,6 +23,7 @@ import { AgentMenu } from './components/AgentMenu'
 import { PixelSprite } from './components/PixelSprite'
 import { SpritePicker } from './components/SpritePicker'
 import { capsFor, useRuntimeCapabilities } from './utils/runtimes'
+import { formatToolActivityText } from './utils/toolAdapters'
 
 export class DashboardErrorBoundary extends Component<{children: ReactNode}, {error: Error | null}> {
   state = { error: null as Error | null }
@@ -52,15 +53,6 @@ function entryTime(ts?: number): string {
   return new Date(ts || Date.now()).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-function toolLabel(tc: ToolCall): string {
-  const raw = tc.rawInput as Record<string, unknown> | undefined
-  const arg = raw && typeof raw === 'object'
-    ? String(raw.command || raw.cmd || raw.file_path || raw.pattern || raw.query || raw.description || '')
-    : ''
-  const base = tc.title || tc.kind || 'Tool'
-  return arg ? `${base}: ${arg.length > 80 ? `${arg.slice(0, 77)}…` : arg}` : base
-}
-
 function livePreviewFromChat(agent: AgentState, entries: Entry[], wsBusy?: boolean, busySince?: string | null): AgentState {
   if (!wsBusy) return agent
   let lastUserIdx = -1
@@ -72,7 +64,7 @@ function livePreviewFromChat(agent: AgentState, entries: Entry[], wsBusy?: boole
     ? (entries[lastUserIdx] as Extract<Entry, { kind: 'user' }>).text
     : agent.user_prompt
   const feed = currentTurn.flatMap(e => {
-    if (e.kind === 'tool') return [{ time: entryTime(e.ts), type: 'tool', text: toolLabel(e.data) }]
+    if (e.kind === 'tool') return [{ time: entryTime(e.ts), type: 'tool', text: formatToolActivityText(e.data) }]
     if (e.kind === 'assistant') {
       const out: { time: string; type: string; text: string }[] = []
       if (e.thoughts?.trim()) out.push({ time: entryTime(e.ts), type: 'thinking', text: e.thoughts.trim().slice(-280) })
@@ -400,7 +392,6 @@ export default function App() {
       // The shortcut-number overlay is only useful for navigation; showing it
       // on Cmd/Cmd+C can clear the browser selection in the chat transcript.
       if (hasSelection) return
-      if (e.key === 'Meta' || e.metaKey) setShortcutOverlay(true)
 
       // CMD+1..5 → open agent at that visual grid position.
       if (e.metaKey && e.key >= '1' && e.key <= '5') {

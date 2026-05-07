@@ -521,7 +521,7 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
               detail: { pokegentId: agent.pokegent_id || agent.session_id },
             }))
           } else {
-            focusAgent(agent.session_id)
+            focusAgent(agent.pokegent_id || agent.session_id)
           }
         }}
       >
@@ -539,19 +539,21 @@ function ActivityBox({ agent, isBusy, isDone, isError, isCompacting, outputText,
         </div>
       ) : isBusy && feed && feed.length > 0 ? (
         <div className="flex flex-col gap-0.5">
-          {feed.map((item, i) => (
-            <div key={i} className={`theme-font-mono leading-snug truncate ${
-              i === feed.length - 1 ? (
-                item.type === 'tool' ? 'text-accent-yellow' : 'theme-text-primary'
-              ) : (
-                item.type === 'tool' ? 'theme-text-faint' : 'theme-text-faint'
-              )
-            }`}>
-              <span className="theme-text-faint mr-1 select-none">{item.time}</span>
-              {item.type === 'tool' && <span className="theme-text-faint mr-0.5">▸</span>}
-              {item.type === 'thinking' ? <span className="italic">{item.text}</span> : item.text}
-            </div>
-          ))}
+          {feed.map((item, i) => {
+            const isLatest = i === feed.length - 1
+            const textClass = item.type === 'tool'
+              ? (isLatest ? 'text-accent-yellow' : 'theme-text-faint')
+              : (isLatest ? 'theme-text-secondary' : 'theme-text-muted')
+            return (
+              <div key={i} className="theme-font-mono leading-snug activity-feed-row">
+                <span className="theme-text-faint select-none activity-feed-time">{item.time}</span>
+                <span className={`min-w-0 ${item.type === 'tool' ? 'truncate' : 'activity-feed-clamp'} ${textClass}`}>
+                  {item.type === 'tool' && <span className="theme-text-faint mr-0.5 select-none">▸</span>}
+                  {item.type === 'thinking' ? <span className="italic">{item.text}</span> : item.text}
+                </span>
+              </div>
+            )
+          })}
         </div>
       ) : outputText ? (
         <div

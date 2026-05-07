@@ -289,11 +289,15 @@ case "$EVENT" in
     ;;
   "SessionEnd")
     # Clean up status + running files. Try pokegent_id first (new system), fall back to session_id.
+    # Guard: subagent SessionEnd events inherit POKEGENT_ID but have a different
+    # SESSION_ID. Only clean the pokegent-keyed status if the session matches.
     _PGID_END="${POKEGENT_ID:-${POKEGENTS_SESSION_ID:-}}"
     if [ -n "$_PGID_END" ]; then
-      rm -f "$STATUS_DIR/${_PGID_END}.json"
+      _STATUS_SID=$(jq -r '.session_id // empty' "$STATUS_DIR/${_PGID_END}.json" 2>/dev/null)
+      if [ "$_STATUS_SID" = "$SESSION_ID" ] || [ -z "$_STATUS_SID" ]; then
+        rm -f "$STATUS_DIR/${_PGID_END}.json"
+      fi
     fi
-    # Also try session_id-keyed status file (legacy or status written with SESSION_ID)
     rm -f "$STATUS_DIR/${SESSION_ID}.json"
     RUNNING_DIR="$POKEGENTS_DATA/running"
     # Clean running files — but ONLY if WE still own them. If a dashboard
@@ -308,10 +312,15 @@ case "$EVENT" in
         if [ "$_RF_PG" = "$_PGID_END" ]; then
           _RF_IFACE=$(jq -r '.interface // empty' "$rf" 2>/dev/null)
           if [ "$_RF_IFACE" = "chat" ]; then
-            # Migrated to chat — chat backend owns this file now. Leave it.
             break
           fi
-          rm -f "$rf"
+          # Only delete if the ending session matches the running file's session.
+          # Subagent SessionEnd events inherit POKEGENT_ID but have a different
+          # SESSION_ID — deleting on those would kill the parent agent's card.
+          _RF_SID=$(jq -r '.session_id // empty' "$rf" 2>/dev/null)
+          if [ "$_RF_SID" = "$SESSION_ID" ]; then
+            rm -f "$rf"
+          fi
           break
         fi
       done

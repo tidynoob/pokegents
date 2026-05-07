@@ -343,7 +343,7 @@ type ChatSession struct {
 	// ids are allowed to mark the turn done; other unmatched responses can be
 	// ACP housekeeping and must not clear the busy indicator.
 	browserPromptMu  sync.Mutex
-	browserPromptIDs map[int64]struct{}
+	browserPromptIDs map[int64]string
 }
 
 type pendingPermission struct {
@@ -383,18 +383,23 @@ func (s *ChatSession) broadcastWSRaw(line []byte) {
 	}
 }
 
-func (s *ChatSession) trackBrowserPrompt(id int64) {
+func (s *ChatSession) trackBrowserPrompt(id int64, prompt string) {
 	s.browserPromptMu.Lock()
 	if s.browserPromptIDs == nil {
-		s.browserPromptIDs = make(map[int64]struct{})
+		s.browserPromptIDs = make(map[int64]string)
 	}
-	s.browserPromptIDs[id] = struct{}{}
+	s.browserPromptIDs[id] = prompt
 	s.browserPromptMu.Unlock()
+}
+
+func isCompactPrompt(text string) bool {
+	fields := strings.Fields(strings.TrimSpace(text))
+	return len(fields) > 0 && fields[0] == "/compact"
 }
 
 func (s *ChatSession) completeBrowserPrompt(id int64, errResp *chatJSONRPCError) bool {
 	s.browserPromptMu.Lock()
-	_, ok := s.browserPromptIDs[id]
+	prompt, ok := s.browserPromptIDs[id]
 	if ok {
 		delete(s.browserPromptIDs, id)
 	}
@@ -415,7 +420,14 @@ func (s *ChatSession) completeBrowserPrompt(id int64, errResp *chatJSONRPCError)
 	busySince := s.smBusySince
 	s.smMu.Unlock()
 	s.stateMu.Lock()
-	if s.lastSummaryStaging != "" {
+	if errResp == nil && isCompactPrompt(prompt) {
+		// A successful context compaction should make the CTX/HP bar read as
+		// full again. Keep the last known context window, but reset used tokens
+		// to zero until the backend reports fresh usage on the next turn.
+		s.contextTokens = 0
+		s.lastSummary = "Compacted"
+		s.currentDetail = "finished"
+	} else if s.lastSummaryStaging != "" {
 		s.lastSummary = s.lastSummaryStaging
 	}
 	s.lastSummaryStaging = ""
@@ -710,8 +722,8 @@ func (s *ChatSession) translateUpdate(params json.RawMessage) {
 		if verb == "" {
 			verb = u.Title
 		}
-		// Normalize Codex's generic exec_command to descriptive name
-		if verb == "exec_command" || verb == "" {
+		// Normalize Codex's generic exec_command to descriptive names that match the chat panel.
+		if verb == "exec_command" || verb == "Exec_command" || verb == "" {
 			var ri struct {
 				Cmd string `json:"cmd"`
 			}
@@ -809,6 +821,8 @@ func (s *ChatSession) publishAgentStatePatchWith(state string, busySince time.Ti
 		Interface:       "chat",
 		AgentBackend:    s.AgentBackend,
 		BackgroundTasks: taskCount,
+		ContextTokens:   s.contextTokens,
+		ContextWindow:   s.contextWindow,
 	}
 	s.stateMu.Unlock()
 	previewAgent.BusySince = busySinceStr
@@ -826,6 +840,8 @@ func (s *ChatSession) publishAgentStatePatchWith(state string, busySince time.Ti
 		"activity_feed":    previewAgent.ActivityFeed,
 		"card_preview":     previewAgent.CardPreview,
 		"background_tasks": taskCount,
+		"context_tokens":   previewAgent.ContextTokens,
+		"context_window":   previewAgent.ContextWindow,
 	})
 }
 
@@ -1388,7 +1404,7 @@ func (m *ChatManager) Launch(ctx context.Context, opts ChatLaunchOptions) (*Chat
 		dashboardBus:         m.dashboardBus,
 		usageLog:             m.usageLog,
 		wsClients:            make(map[*wsClient]struct{}),
-		browserPromptIDs:     make(map[int64]struct{}),
+		browserPromptIDs:     make(map[int64]string),
 	}
 	sess.lastUpdated.Store(time.Now().UnixMilli())
 
@@ -1755,7 +1771,11 @@ func (m *ChatManager) Close(pokegentID string) {
 
 const (
 	chatMaxForwardFrameBytes = 32 * 1024
-	chatMaxForwardCmdBytes   = 2000
+	// Keep enough inline script/patch text for the browser to recover all
+	// touched files from Codex exec_command calls. Transcript backfill already
+	// preserves 12KB; use the same cap for streaming so live UI and refresh UI
+	// don't disagree.
+	chatMaxForwardCmdBytes = 12000
 )
 
 // compactSessionUpdateFrame keeps tool-call metadata but removes bulky Codex
@@ -1834,23 +1854,28 @@ func omittedExecOutputContent() []any {
 func classifyCommand(cmd string) string {
 	cmd = strings.TrimSpace(cmd)
 	switch {
-	case strings.HasPrefix(cmd, "cat ") || strings.HasPrefix(cmd, "head ") ||
-		strings.HasPrefix(cmd, "tail ") || strings.HasPrefix(cmd, "nl "):
+	case hasShellPrefix(cmd, "cat", "head", "tail", "less", "nl", "sed", "awk"):
 		return "Read"
-	case strings.HasPrefix(cmd, "rg ") || strings.HasPrefix(cmd, "grep ") ||
-		strings.HasPrefix(cmd, "find ") || strings.HasPrefix(cmd, "ag "):
-		return "Grep"
-	case strings.HasPrefix(cmd, "sed ") || strings.HasPrefix(cmd, "awk "):
-		return "Edit"
-	case strings.HasPrefix(cmd, "ls ") || strings.HasPrefix(cmd, "tree "):
+	case hasShellPrefix(cmd, "rg", "grep", "find", "ag"):
+		return "Search"
+	case hasShellPrefix(cmd, "ls", "tree"):
 		return "List"
-	case strings.HasPrefix(cmd, "git "):
+	case hasShellPrefix(cmd, "git"):
 		return "Git"
-	case strings.HasPrefix(cmd, "cd "):
-		return "Bash"
+	case hasShellPrefix(cmd, "python", "python3", "node", "npm", "pnpm", "yarn", "go", "cargo", "make", "pytest", "uv"):
+		return "Run"
 	default:
 		return "Bash"
 	}
+}
+
+func hasShellPrefix(cmd string, names ...string) bool {
+	for _, name := range names {
+		if cmd == name || strings.HasPrefix(cmd, name+" ") || strings.HasPrefix(cmd, name+"\t") {
+			return true
+		}
+	}
+	return false
 }
 
 // patchRunningFileChat updates the placeholder running file with the actual
@@ -2028,9 +2053,8 @@ func appendCappedChat(slice []string, s string, cap int) []string {
 	return slice
 }
 
-// chatVerbLabel maps an ACP tool kind onto the same verb the bash hooks
-// emit (e.g. "Bash", "Read", "Edit"), so recent_actions reads identically
-// across runtimes.
+// chatVerbLabel maps an ACP tool kind onto the same compact label the chat
+// transcript's frontend parser uses, so card previews and chat rows agree.
 func chatVerbLabel(kind string) string {
 	switch kind {
 	case "execute":
@@ -2038,13 +2062,13 @@ func chatVerbLabel(kind string) string {
 	case "read":
 		return "Read"
 	case "edit":
-		return "Edit"
+		return "Update"
 	case "search":
-		return "Grep"
+		return "Search"
 	case "fetch":
-		return "WebFetch"
+		return "Fetch"
 	case "think":
-		return "Think"
+		return "Agent"
 	case "other":
 		return "Tool"
 	}

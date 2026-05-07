@@ -154,17 +154,16 @@ func TestExtractCwdFromJSONL_AllNull(t *testing.T) {
 	}
 }
 
-// TestChatVerbLabel — known kinds map to title-case English verbs that
-// match the iterm2 hooks' format. Regression here would break the
-// recent_actions display in the agent card.
+// TestChatVerbLabel — known kinds map to the same compact labels the chat
+// transcript parser uses. Regression here would break card/chat consistency.
 func TestChatVerbLabel(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"execute", "Bash"},
 		{"read", "Read"},
-		{"edit", "Edit"},
-		{"search", "Grep"},
-		{"fetch", "WebFetch"},
-		{"think", "Think"},
+		{"edit", "Update"},
+		{"search", "Search"},
+		{"fetch", "Fetch"},
+		{"think", "Agent"},
 		{"other", "Tool"},
 		{"", ""},
 		{"weirdkind", "Weirdkind"},
@@ -257,14 +256,14 @@ func TestPatchRunningFileChatPreservesVerifiedTranscriptAsLastGood(t *testing.T)
 		"session_id":      "019dffbd-c486-7910-a997-1248f16b1f59",
 		"transcript_path": transcript,
 		"interface":       "chat",
-		"agent_backend":   "gpt-55",
+		"agent_backend":   "custom-codex-model",
 	}
 	b, _ := json.Marshal(initial)
 	if err := os.WriteFile(runningPath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	patchRunningFileChat(dataDir, "pg-1", "engineer@general", 1234, "019e0092-fba6-72f3-969a-29b3b7117292", "/tmp/project", "", "gpt-55")
+	patchRunningFileChat(dataDir, "pg-1", "engineer@general", 1234, "019e0092-fba6-72f3-969a-29b3b7117292", "/tmp/project", "", "custom-codex-model")
 
 	var got map[string]any
 	raw, err := os.ReadFile(runningPath)
@@ -289,7 +288,7 @@ func TestPatchRunningFileChatPreservesVerifiedTranscriptAsLastGood(t *testing.T)
 }
 
 func TestSessionIDFromTranscriptPath(t *testing.T) {
-	path := "/home/user/.pokegents/codex-homes/gpt-55/sessions/2026/05/06/rollout-2026-05-06T17-01-59-019dffbd-c486-7910-a997-1248f16b1f59.jsonl"
+	path := "/home/user/.pokegents/codex-homes/custom-codex-model/sessions/2026/05/06/rollout-2026-05-06T17-01-59-019dffbd-c486-7910-a997-1248f16b1f59.jsonl"
 	want := "019dffbd-c486-7910-a997-1248f16b1f59"
 	if got := sessionIDFromTranscriptPath(path); got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -299,7 +298,7 @@ func TestSessionIDFromTranscriptPath(t *testing.T) {
 func TestCompleteBrowserPrompt_IgnoresUntrackedResponses(t *testing.T) {
 	sess := &ChatSession{
 		smState:          "busy",
-		browserPromptIDs: make(map[int64]struct{}),
+		browserPromptIDs: make(map[int64]string),
 		wsClients:        make(map[*wsClient]struct{}),
 	}
 
@@ -310,7 +309,7 @@ func TestCompleteBrowserPrompt_IgnoresUntrackedResponses(t *testing.T) {
 		t.Fatalf("smState = %q, want busy", sess.smState)
 	}
 
-	sess.trackBrowserPrompt(42)
+	sess.trackBrowserPrompt(42, "hello")
 	if !sess.completeBrowserPrompt(42, nil) {
 		t.Fatal("tracked prompt response should complete a turn")
 	}
@@ -326,13 +325,13 @@ func TestCompleteBrowserPrompt_ErrorMarksError(t *testing.T) {
 		ACPID:              "session-1",
 		dataDir:            dir,
 		smState:            "busy",
-		browserPromptIDs:   make(map[int64]struct{}),
+		browserPromptIDs:   make(map[int64]string),
 		wsClients:          make(map[*wsClient]struct{}),
 		currentDetail:      "thinking…",
 		lastSummaryStaging: "partial text",
 	}
 	sess.stderrTail = []string{`ERROR codex_acp::thread: stream disconnected before completion: response.failed event received`}
-	sess.trackBrowserPrompt(7)
+	sess.trackBrowserPrompt(7, "hello")
 	if !sess.completeBrowserPrompt(7, &chatJSONRPCError{Code: -32603, Message: "Internal error"}) {
 		t.Fatal("tracked prompt response should complete a turn")
 	}
@@ -415,4 +414,22 @@ func writeTempPNG(t *testing.T, data []byte) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestClassifyCommandMatchesChatPreviewLabels(t *testing.T) {
+	cases := []struct{ cmd, want string }{
+		{"sed -n '1,20p' dashboard/server/chat_acp.go", "Read"},
+		{"awk '{print $1}' file.txt", "Read"},
+		{"rg \"foo\" dashboard", "Search"},
+		{"python3 scripts/check.py", "Run"},
+		{"npm test", "Run"},
+		{"git status", "Git"},
+		{"ls -la", "List"},
+		{"echo hi", "Bash"},
+	}
+	for _, c := range cases {
+		if got := classifyCommand(c.cmd); got != c.want {
+			t.Errorf("classifyCommand(%q) = %q, want %q", c.cmd, got, c.want)
+		}
+	}
 }

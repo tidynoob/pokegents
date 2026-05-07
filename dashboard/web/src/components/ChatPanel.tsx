@@ -17,7 +17,7 @@ import { useAgentRename } from '../hooks/useAgentRename'
 import { DebugModal } from './ChatDebugModal'
 import { SearchBar, countSearchMatches } from './ChatSearch'
 import { ChatPanelSprite, ChatPanelDropdown } from './ChatPanelChrome'
-import { EntryRow, ThinkingIndicator, lastEntryIsCurrentAssistantMessage, inflightThoughts, PromptNav, ToolCallSummaryBlock } from './ChatTranscript'
+import { EntryRow, ThinkingIndicator, lastEntryIsCurrentAssistantMessage, inflightThoughts, PromptNav, ToolCallSummaryBlock, isLocalCommandArtifact } from './ChatTranscript'
 import { FilesView, CommandsView } from './PanelViews'
 import { ChatConnectionState, ChatConnectionActions } from '../hooks/useChatWebSocket'
 
@@ -211,15 +211,29 @@ export function ChatPanel({ agent, onClose, connection }: ChatPanelProps) {
   const cancel = connection?.cancel ?? (async () => {})
   const decidePermission = connection?.decidePermission ?? (async () => {})
   const retryMessage = connection?.retryMessage ?? (async () => {})
+  const activeBusyPromptIndex = useMemo(() => {
+    if (!isBusy) return -1
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]
+      if (entry.kind !== 'user') continue
+      if (isLocalCommandArtifact(entry.text)) continue
+      return i
+    }
+    return -1
+  }, [entries, isBusy])
+
   const transcriptRows = useMemo(() => {
     const rows: ReactNode[] = []
-    const collapseCompletedTools = !isBusy
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
-      if (entry.kind === 'tool' && collapseCompletedTools) {
+      const shouldCollapseTool = entry.kind === 'tool' && (!isBusy || activeBusyPromptIndex < 0 || i < activeBusyPromptIndex)
+      if (shouldCollapseTool) {
         const group: Extract<Entry, { kind: 'tool' }>[] = [entry]
-        while (i + 1 < entries.length && entries[i + 1].kind === 'tool') {
-          group.push(entries[i + 1] as Extract<Entry, { kind: 'tool' }>)
+        while (i + 1 < entries.length) {
+          const next = entries[i + 1]
+          const nextShouldCollapse = next.kind === 'tool' && (!isBusy || activeBusyPromptIndex < 0 || (i + 1) < activeBusyPromptIndex)
+          if (!nextShouldCollapse) break
+          group.push(next as Extract<Entry, { kind: 'tool' }>)
           i++
         }
         rows.push(
@@ -230,22 +244,22 @@ export function ChatPanel({ agent, onClose, connection }: ChatPanelProps) {
             showTimestamps={showTimestamps}
           />,
         )
-      } else {
-        rows.push(
-          <EntryRow
-            key={entry.id}
-            entry={entry}
-            onDecidePermission={decidePermission}
-            onRetry={retryMessage}
-            searchQuery={searchQuery}
-            backgroundedToolIds={bgToolIds}
-            showTimestamps={showTimestamps}
-          />,
-        )
+        continue
       }
+      rows.push(
+        <EntryRow
+          key={entry.id}
+          entry={entry}
+          onDecidePermission={decidePermission}
+          onRetry={retryMessage}
+          searchQuery={searchQuery}
+          backgroundedToolIds={bgToolIds}
+          showTimestamps={showTimestamps}
+        />,
+      )
     }
     return rows
-  }, [entries, isBusy, decidePermission, retryMessage, searchQuery, bgToolIds, showTimestamps])
+  }, [entries, isBusy, activeBusyPromptIndex, decidePermission, retryMessage, searchQuery, bgToolIds, showTimestamps])
 
   return (
     <div

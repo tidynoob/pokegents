@@ -12,7 +12,7 @@ const SLASH_COMMANDS: { cmd: string; desc: string }[] = [
   { cmd: '/clear', desc: 'Clear the visible transcript (does not erase JSONL)' },
   { cmd: '/compact', desc: 'Compact Codex conversation history' },
   { cmd: '/exit', desc: 'Shut down this chat session' },
-  { cmd: '/model', desc: 'Switch model: opus, sonnet, haiku (or full ID)' },
+  { cmd: '/model', desc: 'Switch model by exact ID' },
   { cmd: '/effort', desc: 'Set thinking effort: low / medium / high / max' },
   { cmd: '/help', desc: 'Show available chat-mode commands' },
 ]
@@ -47,6 +47,8 @@ export interface PromptInputProps {
    *  matches the GBA-card look in the agent grid. Chat panel passes its own. */
   variant?: 'card' | 'chat'
   maxHeight?: number
+  /** Minimum visible lines for the textarea. */
+  minLines?: number
   /** Maximum visible lines before the textarea scrolls. */
   maxLines?: number
   isBusy?: boolean
@@ -63,6 +65,7 @@ export function PromptInput({
   showSendButton,
   variant = 'card',
   maxHeight = 120,
+  minLines = variant === 'chat' ? 2 : 1,
   maxLines = 8,
   isBusy,
   enableSlashCommands,
@@ -113,9 +116,10 @@ export function PromptInput({
     const lineHeight = Number.parseFloat(styles.lineHeight) || 14
     const padding = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom)
     const border = Number.parseFloat(styles.borderTopWidth) + Number.parseFloat(styles.borderBottomWidth)
+    const minHeight = Math.ceil(lineHeight * minLines + padding + border)
     const lineCap = Math.ceil(lineHeight * maxLines + padding + border)
     const cap = Math.max(1, Math.min(maxHeight, lineCap))
-    const nextHeight = Math.min(t.scrollHeight, cap)
+    const nextHeight = Math.max(minHeight, Math.min(t.scrollHeight, cap))
 
     t.style.height = `${nextHeight}px`
     t.style.overflowY = t.scrollHeight > cap ? 'auto' : 'hidden'
@@ -123,7 +127,7 @@ export function PromptInput({
 
   useLayoutEffect(() => {
     resizeTextarea()
-  }, [value, maxHeight, maxLines])
+  }, [value, maxHeight, minLines, maxLines])
 
   async function submit() {
     if (!value.trim() || sending || disabled) return
@@ -192,11 +196,8 @@ export function PromptInput({
 
   const completionMenu = showCompletions && (
     <div
-      className="absolute bottom-full left-0 right-0 mb-1 rounded-md overflow-hidden z-30"
+      className="absolute bottom-full left-0 right-0 mb-1 overflow-hidden z-30 gba-dropdown-panel"
       style={{
-        background: 'var(--theme-panel-bg)',
-        border: '1px solid var(--theme-panel-divider)',
-        boxShadow: 'var(--theme-shadow-strong)',
         maxHeight: 220,
         overflowY: 'auto',
       }}
@@ -212,11 +213,10 @@ export function PromptInput({
             ref.current?.focus()
           }}
           onMouseEnter={() => setSelectedIdx(i)}
-          className="w-full text-left px-3 py-1.5 flex items-baseline gap-2 transition-colors"
-          style={{ background: i === selectedIdx ? 'var(--theme-panel-hover-bg)' : 'transparent' }}
+          className={`w-full text-left px-3 py-1.5 flex items-baseline gap-2 transition-colors ${i === selectedIdx ? 'theme-bg-dropdown-active' : 'theme-bg-dropdown-hover'}`}
         >
-          <span className="text-m theme-font-mono text-accent-blue font-semibold shrink-0">{c.cmd}</span>
-          <span className="text-m theme-font-body theme-text-muted truncate">{c.desc}</span>
+          <span className="text-m theme-font-mono theme-text-warning font-semibold shrink-0">{c.cmd}</span>
+          <span className="text-m theme-font-body theme-text-primary truncate">{c.desc}</span>
         </button>
       ))}
     </div>
@@ -239,11 +239,11 @@ export function PromptInput({
           onPaste={handlePaste}
           onKeyDown={handleKey}
           onInput={handleInput}
-          rows={1}
+          rows={minLines}
           placeholder={placeholder ?? 'What will you do?'}
           disabled={disabled}
           className="w-full gba-dialog-dark text-m leading-snug theme-font-mono rounded-md px-2.5 py-1 theme-placeholder-input outline-none focus:border-accent-blue transition-colors resize-none box-border disabled:opacity-70"
-          style={{ minHeight: 22, maxHeight }}
+          style={{ minHeight: 22, maxHeight, fontSize: 'var(--agent-card-output-font-size, 10px)' }}
         />
       </form>
     )
@@ -254,12 +254,12 @@ export function PromptInput({
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); submit() }}
-      className="relative flex items-end gap-1.5 p-2 border-t theme-border-subtle shrink-0"
+      className="relative flex items-center gap-1.5 p-2 border-t theme-border-subtle shrink-0"
     >
       {completionMenu}
       <textarea
         ref={ref}
-        rows={1}
+        rows={minLines}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onPaste={handlePaste}
@@ -268,13 +268,13 @@ export function PromptInput({
         placeholder={isBusy ? 'Agent is busy. Messages will be added to queue.' : (placeholder ?? 'What will you do?')}
         disabled={disabled}
         className={`flex-1 min-w-0 gba-dialog-dark text-m leading-snug theme-font-mono rounded-md px-2.5 py-1 theme-placeholder-input outline-none transition-colors resize-none box-border disabled:opacity-70 ${isBusy ? 'border-accent-red/50 focus:border-accent-red/70' : 'focus:border-accent-blue'}`}
-        style={{ minHeight: 28, maxHeight }}
+        style={{ maxHeight }}
       />
       {showSendButton && (
         <button
           type="submit"
           disabled={disabled || !value.trim()}
-          className={`text-s theme-font-display px-3 py-1.5 transition-colors disabled:opacity-50 ${isBusy ? 'gba-button-red opacity-100' : 'gba-button'}`}
+          className={`self-center text-s theme-font-display px-3 py-1.5 transition-colors disabled:opacity-50 ${isBusy ? 'gba-button-red opacity-100' : 'gba-button'}`}
         >{isBusy ? 'QUEUE' : 'SEND'}</button>
       )}
     </form>

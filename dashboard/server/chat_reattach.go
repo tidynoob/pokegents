@@ -247,8 +247,8 @@ func waitForOrphansGone(claudeSessionID string, timeout time.Duration) {
 // config, then project config. Either field may end up empty if no
 // config in the chain provides one. UI display falls back to an explicit
 // provider-scoped unknown label instead of pretending a concrete model is known.
-const defaultClaudeModelLabel = "Claude [unknown model]"
-const defaultCodexModelLabel = "Codex [unknown model]"
+const defaultClaudeModelLabel = "Claude: unknown model"
+const defaultCodexModelLabel = "Codex: unknown model"
 
 func (s *Server) resolveModelEffort(rsModel, rsEffort, role, project string) (model, effort string) {
 	return s.resolveModelEffortForBackend(rsModel, rsEffort, role, project, "claude")
@@ -266,23 +266,71 @@ func displayModelForBackend(model, backendKey, backendType string) string {
 	model = strings.TrimSpace(resolveModelAlias(model))
 	if isClaudeBackend(backendKey) || isClaudeBackend(backendType) {
 		if model != "" {
-			return model
+			return "Claude: " + friendlyModelName(model)
 		}
 		return defaultClaudeModelLabel
 	}
 	if strings.Contains(strings.ToLower(backendKey+" "+backendType), "codex") {
 		if model != "" {
-			if strings.HasPrefix(strings.ToLower(model), "codex [") {
-				return model
-			}
-			return "Codex [" + model + "]"
+			return "Codex: " + friendlyModelName(model)
 		}
 		return defaultCodexModelLabel
 	}
 	if model != "" {
-		return model
+		return strings.TrimSpace(backendKey) + ": " + friendlyModelName(model)
 	}
 	return strings.TrimSpace(backendKey)
+}
+
+func friendlyModelName(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return "unknown model"
+	}
+	lower := strings.ToLower(m)
+	if strings.HasPrefix(lower, "claude: ") || strings.HasPrefix(lower, "codex: ") {
+		if idx := strings.Index(m, ":"); idx >= 0 {
+			m = strings.TrimSpace(m[idx+1:])
+			lower = strings.ToLower(m)
+		}
+	}
+	if strings.HasPrefix(lower, "codex [") && strings.HasSuffix(m, "]") {
+		m = strings.TrimSpace(m[len("Codex [") : len(m)-1])
+		lower = strings.ToLower(m)
+	}
+	if strings.HasPrefix(lower, "gpt-") {
+		return "GPT " + strings.TrimSpace(m[len("gpt-"):])
+	}
+	if strings.HasPrefix(lower, "gpt ") {
+		return "GPT " + strings.TrimSpace(m[len("gpt "):])
+	}
+	if strings.HasPrefix(lower, "openai") {
+		return m
+	}
+	switch lower {
+	case "haiku":
+		return "Haiku"
+	case "sonnet":
+		return "Sonnet"
+	case "opus":
+		return "Opus"
+	}
+	if strings.Contains(lower, "haiku") {
+		return "Haiku"
+	}
+	if strings.Contains(lower, "sonnet") {
+		return "Sonnet"
+	}
+	if strings.Contains(lower, "opus") {
+		if strings.Contains(lower, "1m") || strings.Contains(lower, "[1m]") {
+			return "Opus 1M"
+		}
+		return "Opus"
+	}
+	if strings.HasPrefix(lower, "gpt") {
+		return "GPT" + strings.TrimSpace(m[len("gpt"):])
+	}
+	return m
 }
 
 func (s *Server) resolveModelEffortForBackend(rsModel, rsEffort, role, project, backendKey string) (model, effort string) {
@@ -356,6 +404,7 @@ func (s *Server) relaunchChatSession(rs store.RunningSession) error {
 		}
 		canonicalBackendKey = s.backendStore.CanonicalID(backendKey)
 	}
+	// Defer per-model env merge until after model resolution (below).
 	targetProvider := providerFromBackendType(backendKey, agentBackend)
 	isNonClaude := targetProvider != "claude"
 	if isNonClaude {
@@ -417,6 +466,13 @@ func (s *Server) relaunchChatSession(rs store.RunningSession) error {
 	// config (mirrors state.go's rebuildAgents enrichment) so the chat
 	// backend gets the same values pokegent.sh resolves for iterm2.
 	model, effort := s.resolveModelEffortForBackend(rs.Model, rs.Effort, role, project, rs.AgentBackend)
+
+	// Merge per-model env overrides now that the model is resolved.
+	if backendKey != "" {
+		if bc, ok := s.backendStore.Get(backendKey); ok {
+			backendEnv = bc.ResolvedEnvForModel(model)
+		}
+	}
 
 	// Persist resolved model back to running file so the dashboard UI
 	// shows the correct context window (otherwise null → SDK default 200k).

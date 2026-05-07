@@ -41,7 +41,7 @@ func TestMigrateNonClaudeChatToITermUsesRealStateHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	transcriptPath := filepath.Join(dataDir, "codex-homes", "gpt-55", "sessions", "2026", "05", "06", "codex-session-handoff.jsonl")
+	transcriptPath := filepath.Join(dataDir, "codex-homes", "custom-codex-model", "sessions", "2026", "05", "06", "codex-session-handoff.jsonl")
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestMigrateNonClaudeChatToITermUsesRealStateHandoff(t *testing.T) {
 		DisplayName:  "Codex Agent",
 		Profile:      "reviewer",
 		Interface:    "chat",
-		AgentBackend: "gpt-55",
+		AgentBackend: "custom-codex-model",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestMigrateNonClaudeChatToITermUsesRealStateHandoff(t *testing.T) {
 		SessionID:      codexSessionID,
 		DisplayName:    "Codex Agent",
 		Interface:      "chat",
-		AgentBackend:   "gpt-55",
+		AgentBackend:   "custom-codex-model",
 		CWD:            cwd,
 		TranscriptPath: transcriptPath,
 		PID:            os.Getpid(), // real pid so StateManager treats it as alive.

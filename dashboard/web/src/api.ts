@@ -221,6 +221,19 @@ export async function switchBackend(sessionId: string, backend: string): Promise
   return res.json()
 }
 
+export async function setRuntimeConfig(sessionId: string, model: string, effort: string): Promise<{ ok: boolean }> {
+  const body: Record<string, string> = {}
+  if (model) body.model = model
+  if (effort) body.effort = effort
+  const res = await fetch(`${BASE}/sessions/${sessionId}/runtime-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function sendMessage(from: string, to: string, content: string): Promise<AgentMessage | null> {
   const res = await fetch(`${BASE}/messages`, {
     method: 'POST',

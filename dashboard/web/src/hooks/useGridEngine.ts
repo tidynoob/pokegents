@@ -187,7 +187,12 @@ export function useGridEngine(
       const cellW = Math.max(MIN_CELL_PX, (usableW - (effectiveCardsPerRow - 1) * gap) / effectiveCardsPerRow)
       // cardsPerCol determines visible rows: shrink cells so exactly N rows
       // fit. Extra cards wrap below the fold and the container scrolls.
-      const cellH = Math.max(MIN_CELL_PX, (h - (cardsPerCol - 1) * gap) / cardsPerCol)
+      // GridContainer adds vertical padding to leave room for card glows. That
+      // padding participates in the scroll height, so include it in the row
+      // math; otherwise "3 rows" becomes 3 rows + padding and a tiny scrollbar
+      // clips the bottom row.
+      const verticalPadding = Math.min(gap, 8) * 2
+      const cellH = Math.max(MIN_CELL_PX, (h - verticalPadding - (cardsPerCol - 1) * gap) / cardsPerCol)
       setDims(prev => (
         Math.abs(prev.cellW - cellW) < 1 &&
         Math.abs(prev.cellH - cellH) < 1 &&

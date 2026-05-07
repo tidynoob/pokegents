@@ -14,12 +14,13 @@ interface LaunchModalProps {
   onClose: () => void
 }
 
-function GbaDropdown<T extends { key: string; label: string; color?: [number, number, number]; sprite?: string }>({ label, value, options, onChange, allowNone }: {
+function GbaDropdown<T extends { key: string; label: string; color?: [number, number, number]; sprite?: string }>({ label, value, options, onChange, allowNone, disabled }: {
   label: string
   value: string
   options: T[]
   onChange: (key: string) => void
   allowNone?: boolean
+  disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -37,8 +38,10 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
     <div ref={ref} className="relative">
       <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">{label}</label>
       <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors"
+        onClick={() => !disabled && setOpen(v => !v)}
+        disabled={disabled}
+        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors disabled:opacity-50"
+        style={{ background: 'var(--theme-dropdown-bg)', borderColor: 'var(--theme-dropdown-border)' }}
       >
         <span className="flex items-center gap-2">
           {selected?.sprite && (
@@ -52,11 +55,13 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
         <span className="theme-text-faint text-l">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 gba-dialog-dark z-50 py-1 max-h-[220px] overflow-y-auto">
+        <div
+          className="absolute top-full left-0 right-0 mt-1 gba-dropdown-panel z-50 py-1 max-h-[220px] overflow-y-auto"
+        >
           {allowNone !== false && (
             <button
               onClick={() => { onChange(''); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-panel-hover transition-colors ${!value ? 'text-accent-yellow' : 'theme-text-muted'}`}
+              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-dropdown-hover transition-colors ${!value ? 'text-accent-yellow' : 'theme-text-muted'}`}
             >
               None
             </button>
@@ -65,7 +70,7 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
             <button
               key={o.key}
               onClick={() => { onChange(o.key); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-panel-hover transition-colors flex items-center gap-2 ${value === o.key ? 'text-accent-yellow' : 'theme-text-primary'}`}
+              className={`w-full text-left px-3 py-2 text-l theme-font-mono transition-colors flex items-center gap-2 ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
             >
               {o.sprite && (
                 <div className="w-4 h-4 flex items-center justify-center overflow-visible"><PixelSprite sprite={o.sprite} scale={0.5} alt="" /></div>
@@ -96,10 +101,41 @@ function backendKindForBackend(backend?: BackendInfo): 'claude' | 'codex' {
   return haystack.includes('codex') || haystack.includes('gpt') || haystack.includes('openai') ? 'codex' : 'claude'
 }
 
+function backendForKind(backends: BackendInfo[], kind: 'claude' | 'codex'): BackendInfo | undefined {
+  return backends.find(b => b.default && backendKindForBackend(b) === kind)
+    || backends.find(b => backendKindForBackend(b) === kind)
+}
+
 function backendIdForKind(backends: BackendInfo[], kind: 'claude' | 'codex'): string | undefined {
-  const match = backends.find(b => backendKindForBackend(b) === kind)
-  if (match) return match.id
-  return kind === 'claude' ? 'claude' : 'codex'
+  return backendForKind(backends, kind)?.id || (kind === 'claude' ? 'claude' : 'codex')
+}
+
+function modelOptionsForBackend(backend?: BackendInfo): { key: string; label: string; model?: string; effort?: string }[] {
+  const models = backend?.models || {}
+  const entries = Object.entries(models)
+  const options = entries.length > 0
+    ? entries.map(([key, cfg]) => ({
+      key,
+      label: cfg.name || cfg.model || key,
+      model: cfg.model,
+      effort: cfg.effort,
+    }))
+    : backendKindForBackend(backend) === 'claude'
+      ? [
+        { key: 'sonnet-4-6', label: 'Sonnet 4.6', model: 'claude-sonnet-4-6' },
+        { key: 'opus-4-7', label: 'Opus 4.7', model: 'claude-opus-4-7' },
+        { key: 'opus-4-6', label: 'Opus 4.6 (1M)', model: 'claude-opus-4-6[1m]' },
+        { key: 'haiku-4-5', label: 'Haiku 4.5', model: 'haiku' },
+      ]
+      : [
+        { key: 'default', label: 'Provider default', model: '' },
+      ]
+
+  return options.sort((a, b) => {
+    if (a.key === backend?.default_model) return -1
+    if (b.key === backend?.default_model) return 1
+    return a.label.localeCompare(b.label)
+  })
 }
 
 export function LaunchModal({ projects, roles, agents: _agents, onClose }: LaunchModalProps) {
@@ -112,6 +148,7 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
   const [launching, setLaunching] = useState(false)
   const [backends, setBackends] = useState<BackendInfo[]>([])
   const [backendKind, setBackendKind] = useState<'claude' | 'codex'>('claude')
+  const [selectedModel, setSelectedModel] = useState('')
   const [iface, setIface] = useState<'terminal' | 'chat'>(() => {
     try {
       const stored = localStorage.getItem('pokegents-launch-interface')
@@ -133,7 +170,10 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
     fetchBackends().then(list => {
       setBackends(list)
       const def = list.find(b => b.default)
-      if (def) setBackendKind(backendKindForBackend(def))
+      if (def) {
+        setBackendKind(backendKindForBackend(def))
+        setSelectedModel(def.default_model || Object.keys(def.models || {})[0] || '')
+      }
     })
   }, [])
 
@@ -154,6 +194,21 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
 
   const roleOptions = roles.map(r => ({ key: r.name, label: r.title }))
   const projectOptions = projects.map(p => ({ key: p.name, label: p.title, color: p.color }))
+  const selectedBackend = backendForKind(backends, backendKind)
+  const modelOptions = modelOptionsForBackend(selectedBackend)
+  const selectedModelConfig = modelOptions.find(m => m.key === selectedModel)
+
+  useEffect(() => {
+    const backend = backendForKind(backends, backendKind)
+    const options = modelOptionsForBackend(backend)
+    if (options.length === 0) {
+      if (selectedModel) setSelectedModel('')
+      return
+    }
+    if (!selectedModel || !options.some(o => o.key === selectedModel)) {
+      setSelectedModel(backend?.default_model || options[0].key)
+    }
+  }, [backends, backendKind, selectedModel])
 
   const displaySprite = sprite || randomSprite
 
@@ -177,6 +232,8 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
         task_group: undefined,
         interface: iface,
         agent_backend: backendIdForKind(backends, backendKind),
+        model: selectedModelConfig?.model || undefined,
+        effort: selectedModelConfig?.effort || undefined,
       })
     } catch (err) {
       console.error('launch failed', err)
@@ -246,8 +303,17 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
             { key: 'claude', label: 'Claude' },
             { key: 'codex', label: 'Codex' },
           ]}
-          onChange={key => setBackendKind(key as 'claude' | 'codex')}
+          onChange={key => { setBackendKind(key as 'claude' | 'codex'); setSelectedModel('') }}
           allowNone={false}
+        />
+
+        <GbaDropdown
+          label="Model"
+          value={selectedModel}
+          options={modelOptions.length > 0 ? modelOptions : [{ key: '', label: selectedBackend?.name ? `${selectedBackend.name} default` : 'Provider default' }]}
+          onChange={setSelectedModel}
+          allowNone={false}
+          disabled={modelOptions.length === 0}
         />
 
         {/* Name & Pokemon */}

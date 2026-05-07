@@ -103,10 +103,10 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 		// metadata for AgentCard/status parity with REST-submitted prompts.
 		isPrompt := peek.Method == "session/prompt"
 		if isPrompt {
-			if peek.ID != nil {
-				sess.trackBrowserPrompt(*peek.ID)
-			}
 			promptPreview := extractPromptPreview(peek.Params)
+			if peek.ID != nil {
+				sess.trackBrowserPrompt(*peek.ID, promptPreview)
+			}
 			if s.state != nil {
 				s.state.BeginPrompt(id, promptPreview)
 			}
@@ -120,7 +120,11 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 			sess.recentActions = nil
 			sess.activityFeed = nil
 			sess.currentPrompt = promptPreview
-			sess.currentDetail = "thinking…"
+			if isCompactPrompt(promptPreview) {
+				sess.currentDetail = "compacting"
+			} else {
+				sess.currentDetail = "thinking…"
+			}
 			sess.stateMu.Unlock()
 
 			sess.smMu.Lock()

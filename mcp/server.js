@@ -502,7 +502,7 @@ server.tool(
     agent_backend: z
       .string()
       .optional()
-      .describe("Optional backend override. Defaults to the caller's agent_backend, e.g. gpt-55/codex/claude."),
+      .describe("Optional backend override. Defaults to the caller's agent_backend, e.g. codex/claude."),
     model: z
       .string()
       .optional()

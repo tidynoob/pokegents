@@ -97,7 +97,7 @@ func TestBuildConversationSnapshotFromClaudeTranscript(t *testing.T) {
 
 func TestBuildConversationSnapshotFromCodexTranscript(t *testing.T) {
 	dataDir := t.TempDir()
-	codexDir := filepath.Join(dataDir, ".pokegents", "codex-homes", "gpt-55", "sessions", "2026", "05", "06")
+	codexDir := filepath.Join(dataDir, ".pokegents", "codex-homes", "custom-codex-model", "sessions", "2026", "05", "06")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildConversationSnapshotFromCodexTranscript(t *testing.T) {
 		dataDir: dataDir,
 		state:   NewStateManager(dataDir, filepath.Join(dataDir, ".claude", "projects")),
 	}
-	got, err := s.buildConversationSnapshotFromTranscript("pg-codex", "gpt-55", "codex-session", transcriptPath, "")
+	got, err := s.buildConversationSnapshotFromTranscript("pg-codex", "custom-codex-model", "codex-session", transcriptPath, "")
 	if err != nil {
 		t.Fatalf("buildConversationSnapshotFromTranscript: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestBuildConversationSnapshotFromCodexTranscript(t *testing.T) {
 	if got.SourceProvider != "codex" {
 		t.Fatalf("source_provider = %q, want codex", got.SourceProvider)
 	}
-	if got.SourceBackendKey != "gpt-55" || got.SourceSessionID != "codex-session" {
+	if got.SourceBackendKey != "custom-codex-model" || got.SourceSessionID != "codex-session" {
 		t.Fatalf("source identity mismatch: %+v", got)
 	}
 	if got.CWD != "/tmp/codex-work" {

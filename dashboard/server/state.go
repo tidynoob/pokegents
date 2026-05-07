@@ -700,6 +700,8 @@ func (sm *StateManager) CleanStale() bool {
 		}
 
 		if !alive {
+			log.Printf("CleanStale: %.8s (%s) iface=%s — NOT alive (claude_pid=%d, pid=%d, tty=%q)",
+				pgid, rs.DisplayName, rs.Interface, rs.ClaudePID, rs.PID, rs.TTY)
 			if rs.Interface == "chat" {
 				// Chat-backed agents can be recovered by respawning their ACP backend.
 				// Keep the running file so the card remains visible and the UI can offer
@@ -720,6 +722,7 @@ func (sm *StateManager) CleanStale() bool {
 				}
 				continue
 			}
+			log.Printf("CleanStale: REMOVING iterm2 running file for %.8s (%s)", pgid, rs.DisplayName)
 			pattern := filepath.Join(runningDir, "*-"+pgid+".json")
 			matches, _ := filepath.Glob(pattern)
 			for _, f := range matches {

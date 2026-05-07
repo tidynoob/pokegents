@@ -138,6 +138,11 @@ func (s *Server) handleUnifiedLaunch(w http.ResponseWriter, r *http.Request) {
 		// (same precedence pokegent.sh uses for iterm2 launches). Non-Claude
 		// ACP backends should not inherit Claude's default model label.
 		model, effort := s.resolveModelEffortForBackend(body.Model, body.Effort, body.Role, body.Project, backendKey)
+		// Merge per-model env overrides (e.g. different API keys/endpoints
+		// for different models within the same provider).
+		if bc, ok := s.backendStore.Get(backendKey); ok {
+			backendEnv = bc.ResolvedEnvForModel(model)
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
 		if _, err := s.chatMgr.Launch(ctx, ChatLaunchOptions{

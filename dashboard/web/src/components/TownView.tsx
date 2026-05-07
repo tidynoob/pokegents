@@ -129,7 +129,7 @@ const TINY_SPRITE_MAX_PX = 18
 // Wide sprites (reuniclus 46×27) look tiny with objectFit:contain in a square
 // box because height shrinks to preserve aspect ratio. We detect wide sprites
 // and scale their container so they render at the same visual prominence.
-const spriteSizeCache: Record<string, { w: number; h: number }> = {}
+const spriteSizeCache: Record<string, { w: number; h: number; bounds?: { minX: number; minY: number; maxX: number; maxY: number } }> = {}
 function spriteRenderSize(sprite: string): { w: number; h: number } {
   const cached = spriteSizeCache[sprite]
   if (cached && Math.max(cached.w, cached.h) <= TINY_SPRITE_MAX_PX) {
@@ -146,10 +146,35 @@ function preloadSpriteSize(sprite: string, onLoad?: () => void) {
   if (spriteSizeCache[sprite]) return
   const img = new window.Image()
   img.onload = () => {
-    spriteSizeCache[sprite] = { w: img.naturalWidth, h: img.naturalHeight }
+    spriteSizeCache[sprite] = { w: img.naturalWidth, h: img.naturalHeight, bounds: computeAlphaBounds(img) }
     onLoad?.()
   }
   img.src = `/sprites/${sprite}.png`
+}
+
+function computeAlphaBounds(img: HTMLImageElement): { minX: number; minY: number; maxX: number; maxY: number } | undefined {
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  if (!w || !h) return undefined
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return undefined
+  ctx.drawImage(img, 0, 0)
+  const data = ctx.getImageData(0, 0, w, h).data
+  let minX = w, minY = h, maxX = -1, maxY = -1
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3] > 8) {
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    }
+  }
+  return maxX >= 0 ? { minX, minY, maxX, maxY } : undefined
 }
 
 // Default mask: everything walkable. The crop already removes the
@@ -313,6 +338,7 @@ function nearestVisibleWalkableNonBusy(c: Cell | null | undefined): Cell | null 
 type Cell = { col: number; row: number }
 
 function cellKey(c: Cell): string { return `${c.col},${c.row}` }
+function manhattan(a: Cell, b: Cell): number { return Math.abs(a.col - b.col) + Math.abs(a.row - b.row) }
 
 function neighbours(c: Cell): Cell[] {
   return [
@@ -473,17 +499,17 @@ function TownEditorSlider({ label, value, min, max, step, unit, onChange }: {
 // Per-state step durations. Idle pokes amble (slower step + longer wander
 // cooldowns); during state transitions and once at a busy station they move
 // fast so the trip between zones reads as a sprint, not a saunter.
-const STEP_MS_IDLE = 900       // each idle-wander step within the idle area
-const STEP_MS_TRANSIT = 120    // cross-zone travel: idle→busy or busy→idle
+const STEP_MS_IDLE = 225       // each idle-wander step within the idle area
+const STEP_MS_TRANSIT = 30    // cross-zone travel: idle→busy or busy→idle
 const TRANSIT_STEPS_PER_TICK = 1 // keep transit to one cell per CSS transition; multi-cell updates read as teleporting
-const IDLE_COOLDOWN_MIN = 5000
-const IDLE_COOLDOWN_MAX = 12000
+const IDLE_COOLDOWN_MIN = 850
+const IDLE_COOLDOWN_MAX = 1400
 
 // Movement tick rate. Must be ≤ the smallest STEP_MS we ever schedule —
 // otherwise the loop becomes the floor and a sprite that "should" step every
 // Keep the town card cheap. 30ms was effectively a 33fps React setState loop
 // over every agent and made typing/clicking laggy in Chrome.
-const TICK_MS = 250
+const TICK_MS = 30
 
 export function TownView({ agents, onSelect, selectedId, debug = false, newMessage, geometry, editorOpen = false, onCloseEditor, onSaveGeometry, projects, roles, existingGroups }: TownViewProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -661,6 +687,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
 
         if (existing) {
           let target = existing.target
+          let resetIdleCooldown = false
           // Re-target on busy/idle transition. Random pick (not [0]) so
           // multiple agents flipping busy at once spread across painted tiles
           // rather than all converging on the same first-listed cell. The
@@ -672,16 +699,30 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
               ? busyCells[Math.floor(Math.random() * busyCells.length)]
               : fallbackCell()
           } else if (!nowBusy && wasBusy) {
-            target = randomWalkableCell({ avoidBusy: true })
+            target = isBusyCell(existing.pos) ? nearestVisibleWalkableNonBusy(existing.pos) : null
           }
           // If existing pos is on a wall (e.g. mask just got repainted),
           // re-spawn the sprite somewhere walkable.
           let pos = keepVisibleWalkable(existing.pos) || randomWalkableCell()
-          target = nowDone
-            ? null
-            : nowBusy
-              ? keepVisibleWalkable(target)
-              : keepVisibleWalkableNonBusy(target)
+          if (nowDone) {
+            target = null
+          } else if (nowBusy) {
+            target = keepVisibleWalkable(target)
+          } else {
+            target = target ? keepVisibleWalkableNonBusy(target) : null
+            // Idle agents should only amble locally. Clear stale/random
+            // long-distance targets from older logic or geometry changes so
+            // they don't glide across the entire town like they're busy.
+            if (target && !isBusyCell(pos) && manhattan(pos, target) > 3) {
+              target = null
+              resetIdleCooldown = true
+            }
+          }
+          const nextMoveAt = stateFlipped
+            ? (target ? now : now + randomCooldown())
+            : resetIdleCooldown
+              ? now + randomCooldown()
+              : existing.nextMoveAt
           next[id] = {
             ...existing,
             pos,
@@ -695,7 +736,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
             // mid-amble could be sitting on a 7s wander cooldown when its
             // state changed — making the entire transition feel laggy even
             // though the per-step speed was fast.
-            nextMoveAt: stateFlipped ? now : existing.nextMoveAt,
+            nextMoveAt,
           }
         } else {
           const spawn = nowBusy ? randomWalkableCell() : randomWalkableCell({ avoidBusy: true })
@@ -712,9 +753,9 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
             agentState: newState,
             taskGroup,
             pos: spawn,
-            target: nowDone ? null : (nowBusy ? initialBusyTarget : randomWalkableCell({ avoidBusy: true })),
+            target: nowDone ? null : (nowBusy ? initialBusyTarget : null),
             facing: 'right',
-            nextMoveAt: now + 300 + Math.random() * 600, // stagger first moves
+            nextMoveAt: nowBusy ? now + 300 + Math.random() * 600 : now + randomCooldown(),
             stepMs: nowBusy ? STEP_MS_TRANSIT : STEP_MS_IDLE,
           }
         }
@@ -826,16 +867,10 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
                 changed = true
                 continue
               }
-              // Idle cooldown then pick a new wander target
-              if (now >= s.nextMoveAt) {
-                const next_ = pickIdleStep(s.pos)
-                if (next_) {
-                  next[id] = { ...s, target: next_, nextMoveAt: now + stepDelay, stepMs: stepDelay }
-                  changed = true
-                } else {
-                  next[id] = { ...s, nextMoveAt: now + 800 }
-                }
-              }
+              // Idle wander complete. Pause for a few seconds before picking
+              // another one/two-step amble so idle agents don't look busy.
+              next[id] = { ...s, target: null, nextMoveAt: now + randomCooldown(), stepMs: STEP_MS_IDLE }
+              changed = true
             }
             // Busy + arrived at station: stay put (no pacing).
             continue
@@ -874,7 +909,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
               changed = true
               continue
             }
-            const next_ = pickIdleStep(s.pos)
+            const next_ = pickIdleWanderTarget(s.pos)
             if (next_) {
               next[id] = {
                 ...s,
@@ -1132,7 +1167,7 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
                 width: CELL,
                 height: CELL,
                 transform: `translate(${px}px, ${py}px)`,
-                transition: `transform ${s.stepMs ?? (isBusy(s.agentState) ? STEP_MS_TRANSIT : STEP_MS_IDLE)}ms ease-in-out`,
+                transition: `transform ${s.stepMs ?? (isBusy(s.agentState) ? STEP_MS_TRANSIT : STEP_MS_IDLE)}ms linear`,
                 cursor: 'pointer',
                 zIndex: Math.floor(py),
                 padding: 0,
@@ -1152,13 +1187,6 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
                   }}
                 />
               )}
-              {/* Busy/done bubble — reuses the same cycling emoji bubbles from AgentCard */}
-              <div style={{ position: 'absolute', bottom: SPRITE_PX + 2, left: '50%', transform: 'translateX(-50%) scale(0.85)', transformOrigin: 'bottom center', zIndex: 1 }}>
-                <div className="relative" style={{ width: 0, height: 0 }}>
-                  <BusyBubble isBusy={isBusy(s.agentState)} />
-                  <DoneBubble isDone={isDone} />
-                </div>
-              </div>
               <TownSpritePoke
                 sprite={s.sprite}
                 state={s.agentState}
@@ -1166,6 +1194,8 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
                 inTransit={inTransit}
                 attention={isDone}
                 glow={glow}
+                busyBubble={isBusy(s.agentState)}
+                doneBubble={isDone}
               />
             </button>
           )
@@ -1221,13 +1251,15 @@ export function TownView({ agents, onSelect, selectedId, debug = false, newMessa
 // own useSpriteAnimation cycle (the hook holds setTimeout state — sharing it
 // would mean every sprite hops on the same beat). Reuses the same animation
 // registry as the agent-card preview, so card-busy and town-busy match.
-function TownSpritePoke({ sprite, state, facing, inTransit, attention, glow }: {
+function TownSpritePoke({ sprite, state, facing, inTransit, attention, glow, busyBubble, doneBubble }: {
   sprite: string
   state: AgentState['state']
   facing: 'left' | 'right'
   inTransit: boolean
   attention: boolean
   glow: 'busy' | 'done' | null
+  busyBubble: boolean
+  doneBubble: boolean
 }) {
   const animClass = useSpriteAnimation(state, !inTransit)
   const cls = inTransit ? 'sprite-transit-hop' : attention ? 'sprite-hop-loop' : animClass
@@ -1236,6 +1268,17 @@ function TownSpritePoke({ sprite, state, facing, inTransit, attention, glow }: {
   const natural = spriteSizeCache[sprite]
   const centerScaleX = natural ? sz.w / natural.w : 1
   const centerScaleY = natural ? sz.h / natural.h : 1
+  const visualBounds = natural?.bounds
+  // Town sprites are positioned by their feet. PixelSprite's default vertical
+  // alpha-centering is great for cards/PC boxes, but it makes the minimap art
+  // appear about a tile above its collision cell for sprites with uneven
+  // transparent padding. Keep horizontal alpha-centering, and instead shift the
+  // transparent canvas down just enough that the visible feet sit on the cell
+  // bottom.
+  const footShiftY = visualBounds ? Math.round((natural!.h - visualBounds.maxY - 1) * centerScaleY) : 0
+  const visualTop = visualBounds
+    ? Math.max(-8, Math.min(sz.h - 8, Math.round(visualBounds.minY * centerScaleY + footShiftY)))
+    : 0
   useEffect(() => { preloadSpriteSize(sprite, () => setSizeVersion(v => v + 1)) }, [sprite])
   return (
     <div
@@ -1250,11 +1293,30 @@ function TownSpritePoke({ sprite, state, facing, inTransit, attention, glow }: {
         pointerEvents: 'none',
       }}
     >
+      {(busyBubble || doneBubble) && (
+        <div
+          style={{
+            position: 'absolute',
+            top: visualTop,
+            left: 0,
+            right: 0,
+            height: 0,
+            transform: 'scale(0.85)',
+            transformOrigin: 'top center',
+            zIndex: 2,
+            pointerEvents: 'none',
+          }}
+        >
+          <BusyBubble isBusy={busyBubble} />
+          <DoneBubble isDone={doneBubble} />
+        </div>
+      )}
       <PixelSprite
         sprite={sprite}
         alt=""
         centerScaleX={centerScaleX}
-        centerScaleY={centerScaleY}
+        centerScaleY={0}
+        shiftY={footShiftY}
         flipX={facing === 'right'}
         shadow="panel"
         style={{
@@ -1281,6 +1343,29 @@ function pickIdleStep(from: Cell): Cell | null {
   const ns = idleNeighbours(from)
   if (ns.length === 0) return null
   return ns[Math.floor(Math.random() * ns.length)]
+}
+
+function pickIdleWanderTarget(from: Cell): Cell | null {
+  const dirs = [
+    { col: 1, row: 0 },
+    { col: -1, row: 0 },
+    { col: 0, row: 1 },
+    { col: 0, row: -1 },
+  ].sort(() => Math.random() - 0.5)
+  const r = Math.random()
+  const steps = r < 0.5 ? 1 : r < 0.85 ? 2 : 3
+  for (const d of dirs) {
+    let cur = from
+    let target: Cell | null = null
+    for (let i = 0; i < steps; i++) {
+      const next = { col: cur.col + d.col, row: cur.row + d.row }
+      if (!visibleWalkable(next.col, next.row) || isBusyCell(next)) break
+      target = next
+      cur = next
+    }
+    if (target) return target
+  }
+  return pickIdleStep(from)
 }
 
 function randomCooldown(): number {

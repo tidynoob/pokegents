@@ -58,11 +58,12 @@ if [[ ! -f "$POKEGENTS_DATA/backends.json" ]]; then
       "name": "Claude",
       "type": "claude-acp",
       "default": true,
-      "default_model": "sonnet",
+      "default_model": "sonnet-4-6",
       "models": {
-        "sonnet": { "name": "Sonnet", "model": "sonnet" },
-        "opus": { "name": "Opus", "model": "opus" },
-        "haiku": { "name": "Haiku", "model": "haiku" }
+        "sonnet-4-6": { "name": "Sonnet 4.6", "model": "claude-sonnet-4-6" },
+        "opus-4-7": { "name": "Opus 4.7", "model": "claude-opus-4-7" },
+        "opus-4-6": { "name": "Opus 4.6 (1M)", "model": "claude-opus-4-6[1m]" },
+        "haiku-4-5": { "name": "Haiku 4.5", "model": "haiku" }
       }
     },
     "codex": {
