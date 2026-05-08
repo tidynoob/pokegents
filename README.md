@@ -1,6 +1,6 @@
 # Pokegents
 
-Pokegents is a local dashboard for running and coordinating multiple coding-agent sessions at once.
+Pokegents is a local, Pokémon-inspired dashboard that turns Claude Code and Codex sessions into a local team dashboard, where agents have persistent names, roles, chat history, status, messaging, and reusable context.
 
 ![Pokegents dashboard with agent cards, town map, and chat panel](docs/images/dashboard.png)
 
@@ -15,6 +15,8 @@ Pokegents is built around one core workflow: **make it easy to manage many agent
 - **Session history and resume** — browse, search, and resume any previous session from the PC Box.
 - **Notifications** — get notified when an agent finishes, needs input, or changes state.
 - **Two interfaces** — browser-based chat (default) with full streaming, or terminal-backed Claude Code in iTerm2 with tab colors and focus management. Switch between them on any running agent.
+
+![Pokegents dashboard alongside an iTerm2 terminal session](docs/images/dashboard-iterm2.png)
 
 ## Install
 
@@ -52,7 +54,7 @@ The first-run onboarding flow will guide you through configuring your agent back
 3. **Create a project** — point it at your codebase's working directory.
 4. **Launch an agent** — click "New Agent", pick a role + project + backend, and start chatting.
 
-![New agent modal with name, sprite, role, project, and backend selectors](docs/images/new-agent-modal.png)
+<p align="center"><img src="docs/images/new-agent-modal.png" width="180" alt="New agent modal with name, sprite, role, project, and backend selectors" /></p>
 
 You can also launch from the CLI:
 
@@ -153,24 +155,33 @@ Right-click any agent card and choose **Switch runtime** to change the interface
 
 Each agent gets a card showing its name, role, project, status, model, context usage, and recent output. Click a card to open the full chat panel with streaming conversation, tool calls, diffs, and inline permission prompts.
 
-![Dashboard with agent cards alongside an iTerm2 terminal session](docs/images/dashboard-chat-panel.png)
+<p><img src="docs/images/full-chat-panel.png" width="50%" alt="Full chat panel with streaming conversation and tool calls" /></p>
 
 ### Agent-to-agent messaging
 
 Agents coordinate via an MCP messaging server. One agent can send results to another, request a review, or ask for help — without you manually relaying messages.
 
-![Agent cards showing cross-agent message delivery](docs/images/messaging-cards.png)
+<p><img src="docs/images/messaging-small.gif" width="50%" alt="Pokegents message animation between agents" /></p>
 
 ### PC Box
 
 Browse all historical sessions — active and inactive. Search by name, role, project, or content. Resume any previous session with full conversation history.
 
-![PC Box session browser showing previous agents with sprites and session details](docs/images/pc-box.png)
+<p><img src="docs/images/pc-box.png" width="50%" alt="PC Box session browser showing previous agents with sprites and session details" /></p>
 
 ### Other features
 
-- **Town view** — a pixel-art map where agent sprites walk around, glow with status colors, and animate message deliveries between each other.
+- **Town view** — a pixel-art map where agent sprites walk around, glow with status colors, and animate message deliveries.
+
+<p><img src="docs/images/timeline.gif" width="30%" alt="Town timeline showing agent activity" /></p>
+
 - **Task groups** — organize agents by workstream (e.g. "auth-migration", "proxy"). Groups are collapsible and can be released together.
+- **Files and commands** — track every file an agent touched and every command it ran, searchable and copyable.
+
+<p>
+<img src="docs/images/qol-files.png" width="48%" alt="Files tab showing modified files" />
+<img src="docs/images/qol-commands.png" width="48%" alt="Commands tab showing executed commands" />
+</p>
 
 ## Architecture
 

@@ -334,6 +334,7 @@ type ChatSession struct {
 	dashboardBus *EventBus
 
 	usageLog *UsageLogger
+	notifyFn func(pgid, state, name, summary string)
 
 	// WebSocket relay — forwards raw ACP stdio frames to/from browser.
 	wsMu      sync.RWMutex
@@ -828,6 +829,10 @@ func (s *ChatSession) publishAgentStatePatchWith(state string, busySince time.Ti
 	previewAgent.BusySince = busySinceStr
 	previewAgent.CardPreview = buildCardPreview(previewAgent)
 
+	if s.notifyFn != nil && (state == "done" || state == "idle") {
+		s.notifyFn(s.PokegentID, state, "", summary)
+	}
+
 	s.dashboardBus.Publish("agent_state_patch", map[string]any{
 		"pokegent_id":      s.PokegentID,
 		"state":            state,
@@ -1166,6 +1171,7 @@ type ChatManager struct {
 	onChange     func()
 	dashboardBus *EventBus // Phase 1: direct SSE broadcast
 	usageLog     *UsageLogger
+	notifyFn     func(pgid, state, agentName, summary string)
 }
 
 func NewChatManager(dataDir string, onChange func(), dashboardBus *EventBus, usageLog *UsageLogger) *ChatManager {
@@ -1403,6 +1409,7 @@ func (m *ChatManager) Launch(ctx context.Context, opts ChatLaunchOptions) (*Chat
 		smState:              "idle",
 		dashboardBus:         m.dashboardBus,
 		usageLog:             m.usageLog,
+		notifyFn:             m.notifyFn,
 		wsClients:            make(map[*wsClient]struct{}),
 		browserPromptIDs:     make(map[int64]string),
 	}

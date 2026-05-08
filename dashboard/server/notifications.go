@@ -146,11 +146,22 @@ func (n *Notifier) MaybeNotify(evt HookEvent, agent *AgentState) {
 	n.lastSent[evt.SessionID] = time.Now()
 	n.mu.Unlock()
 
-	spriteIDs := []string{evt.SessionID}
-	if agent.PokegentID != "" {
-		spriteIDs = []string{agent.PokegentID, evt.SessionID}
+	// Use the agent's actual sprite if available (single source of truth),
+	// fall back to hash-based lookup for legacy agents without a sprite field.
+	spritePath := ""
+	if agent.Sprite != "" {
+		p := filepath.Join(n.spriteDir, agent.Sprite+".png")
+		if _, err := os.Stat(p); err == nil {
+			spritePath = p
+		}
 	}
-	spritePath := n.spritePathForSession(spriteIDs...)
+	if spritePath == "" {
+		spriteIDs := []string{evt.SessionID}
+		if agent.PokegentID != "" {
+			spriteIDs = []string{agent.PokegentID, evt.SessionID}
+		}
+		spritePath = n.spritePathForSession(spriteIDs...)
+	}
 	go n.sink.Send(title, body, spritePath)
 }
 
@@ -159,7 +170,8 @@ func (MacNotificationSink) Send(title, body, iconPath string) {
 	if tn, err := exec.LookPath("terminal-notifier"); err == nil {
 		args := []string{"-title", title, "-message", body, "-group", "pokegents"}
 		if iconPath != "" {
-			args = append(args, "-appIcon", iconPath, "-contentImage", iconPath)
+			scaled := scaleSprite(iconPath)
+			args = append(args, "-appIcon", scaled, "-contentImage", scaled)
 		}
 		exec.Command(tn, args...).Run()
 		return
@@ -169,4 +181,21 @@ func (MacNotificationSink) Send(title, body, iconPath string) {
 		body, title,
 	)
 	exec.Command("osascript", "-e", script).Run()
+}
+
+func scaleSprite(path string) string {
+	tmp := filepath.Join(os.TempDir(), "pokegents-notif-sprite.png")
+	err := exec.Command("python3", "-c", fmt.Sprintf(`
+from PIL import Image
+img = Image.open(%q).convert("RGBA")
+bbox = img.getbbox()
+if bbox:
+    img = img.crop(bbox)
+img = img.resize((img.width * 4, img.height * 4), Image.NEAREST)
+img.save(%q)
+`, path, tmp)).Run()
+	if err != nil {
+		return path
+	}
+	return tmp
 }

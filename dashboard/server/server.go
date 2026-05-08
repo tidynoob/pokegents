@@ -156,6 +156,27 @@ func NewServer(cfg Config) (*Server, error) {
 	s.chatMgr = NewChatManager(cfg.DataDir, func() {
 		eventBus.Publish("state_update", state.GetAgents())
 	}, eventBus, s.usageLog)
+	s.chatMgr.notifyFn = func(pgid, agentState, name, summary string) {
+		agent := s.state.GetAgent(pgid)
+		if agent == nil {
+			return
+		}
+		agentName := name
+		if agentName == "" {
+			agentName = agent.DisplayName
+		}
+		if agentName == "" {
+			agentName = agent.ProfileName
+		}
+		evt := HookEvent{
+			SessionID: agent.SessionID,
+		}
+		if agentState == "done" || agentState == "idle" {
+			evt.HookEventName = "Stop"
+			evt.LastAssistantMessage = summary
+		}
+		s.notifier.MaybeNotify(evt, agent)
+	}
 
 	// Runtime registry — every backend implements the same interface; HTTP
 	// handlers dispatch through this map keyed by `agent.interface`.
