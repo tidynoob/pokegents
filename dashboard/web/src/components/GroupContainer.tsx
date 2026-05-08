@@ -67,7 +67,7 @@ function getSprite(agent: AgentState): string {
   return agent.sprite || 'pokeball'
 }
 
-const HEADER_H = 32
+const HEADER_H = 24
 
 /** Compact 1-row member entry: sprite + name + status pill + time */
 function MemberRow({ agent, sprite, isActive, onClick }: {
@@ -130,7 +130,7 @@ export function GroupContainer({
   const cardRows = Math.ceil(members.length / subCols)
   const innerCardH = cardRows > 0 ? Math.floor((contentH - PAD - (cardRows - 1) * INNER_GAP) / cardRows) : 180
 
-  const renderCard = (agent: AgentState) => (
+  const renderCard = (agent: AgentState, hideGroupTag = false) => (
     <AgentCard
       key={stableId(agent)}
       agent={agent}
@@ -138,6 +138,7 @@ export function GroupContainer({
       mode={cardMode}
       spriteOverride={agent.sprite}
       isReading={readingAgents.has(stableId(agent)) || readingAgents.has(agent.session_id)}
+      hideGroupTag={hideGroupTag}
       projects={projects}
       roles={roles}
       existingGroups={existingGroups}
@@ -159,49 +160,36 @@ export function GroupContainer({
       onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }) }}
     >
       {/* Header bar */}
-      <div className="flex items-center gap-2 px-2.5 select-none shrink-0" style={{ height: HEADER_H, background: `rgba(${r}, ${g}, ${b}, 0.15)` }}>
+      <div className="flex items-center gap-1.5 px-2 select-none shrink-0" style={{ height: HEADER_H, background: `rgba(${r}, ${g}, ${b}, 0.15)` }}>
         <button
-          className="text-m theme-text-muted theme-hover-text-primary transition-colors px-0.5"
+          className="text-[10px] theme-text-muted theme-hover-text-primary transition-colors px-0.5"
           onClick={(e) => { e.stopPropagation(); onSetViewMode(viewMode === 'single' ? 'expanded' : 'single') }}
           title={viewMode === 'single' ? 'Expand all' : 'Single view'}
         >{viewMode === 'single' ? '▶' : '▼'}</button>
 
         <span
-          className="text-s theme-font-display pixel-shadow uppercase truncate theme-text-primary"
+          className="text-s theme-font-display uppercase truncate theme-text-primary"
         >{name}</span>
         <span className="text-s theme-font-display theme-text-faint shrink-0">{members.length}</span>
 
         <div className="flex items-center gap-1 ml-auto" onClick={e => e.stopPropagation()}>
-          {/* Single mode: pagination arrows */}
           {viewMode === 'single' && (
             <>
               <button
-                className="text-m theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
+                className="text-[10px] theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
                 onClick={() => onSetPageIndex(Math.max(0, safePageIndex - 1))}
                 disabled={safePageIndex === 0}
               >◀</button>
               <button
-                className="text-m theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
+                className="text-[10px] theme-text-faint theme-hover-text-primary transition-colors disabled:theme-text-faint px-0.5"
                 onClick={() => onSetPageIndex(Math.min(members.length - 1, safePageIndex + 1))}
                 disabled={safePageIndex >= members.length - 1}
               >▶</button>
             </>
           )}
 
-          {/* Release group (shutdown all agents) */}
           <button
-            className={`h-3.5 rounded-full transition-colors flex items-center justify-center text-s theme-font-display uppercase pixel-shadow theme-text-primary leading-none ml-1 px-1 ${
-              confirmRelease
-                ? 'bg-accent-red hover:bg-accent-red/80 min-w-[52px]'
-                : 'w-3.5 theme-bg-panel-subtle hover:bg-accent-red/60'
-            }`}
-            style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
-            onClick={(e) => { e.stopPropagation(); handleRelease() }}
-            title={confirmRelease ? 'Click again to release all agents' : 'Release group'}
-          >{confirmRelease ? 'RELEASE?' : '×'}</button>
-
-          <button
-            className="w-3 h-3 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-s theme-font-display theme-text-primary leading-none ml-1"
+            className="w-3 h-3 rounded-full bg-accent-red/60 hover:bg-accent-red/80 transition-colors flex items-center justify-center text-[9px] theme-font-display theme-text-primary leading-none"
             style={{ boxShadow: 'var(--theme-text-shadow-pixel)' }}
             onClick={onMinimize}
             title="Minimize"
@@ -238,27 +226,38 @@ export function GroupContainer({
         </div>
       )}
 
-      {/* Expanded mode: sub-grid of all cards */}
-      {viewMode === 'expanded' && contentH > 0 && (() => {
-        const minColW = Math.min(Math.max(200, (singleCardPixelW || 280) - 16), pixelW - 16)
-        const expandedCols = Math.max(1, Math.floor((pixelW - PAD) / (minColW + INNER_GAP)))
+      {/* Expanded mode: sub-grid using the parent grid's column count */}
+      {(() => {
+        const isExpanded = viewMode === 'expanded'
+        const expandedCols = Math.max(1, cols)
+        const innerGap = 4
+        const cardH = pixelH || 200
         const expandedRows = Math.ceil(members.length / expandedCols)
-        const expandedCardH = expandedRows > 0 ? Math.floor((contentH - PAD - (expandedRows - 1) * INNER_GAP) / expandedRows) : 180
+        const targetH = expandedRows * cardH + (expandedRows - 1) * innerGap + 8
         return (
           <div
-            className="flex-1 min-h-0 min-w-0 overflow-hidden px-1 pb-1"
+            className="min-w-0 overflow-hidden"
             style={{
-              display: 'grid',
-              gridTemplateColumns: `repeat(${expandedCols}, 1fr)`,
-              gridTemplateRows: `repeat(${expandedRows}, 1fr)`,
-              gap: 8,
+              maxHeight: isExpanded ? targetH : 0,
+              opacity: isExpanded ? 1 : 0,
+              transition: 'max-height 300ms ease-out, opacity 200ms ease-out',
             }}
           >
-            {members.map(agent => (
-              <div key={stableId(agent)} className="min-w-0 min-h-0">
-                {renderCard(agent)}
-              </div>
-            ))}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${expandedCols}, 1fr)`,
+                gridAutoRows: cardH,
+                gap: innerGap,
+                padding: '4px 4px 4px',
+              }}
+            >
+              {members.map(agent => (
+                <div key={stableId(agent)} className="min-w-0 min-h-0 overflow-hidden">
+                  {renderCard(agent, true)}
+                </div>
+              ))}
+            </div>
           </div>
         )
       })()}

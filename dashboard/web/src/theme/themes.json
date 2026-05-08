@@ -84,7 +84,8 @@
         "pcBox.action.primary.border": "#6090e0",
         "pcBox.action.secondary.bg": "linear-gradient(180deg, #d09030 0%, #a06820 100%)",
         "pcBox.action.secondary.border": "#d09030",
-        "table.header.bg": "rgba(0, 0, 0, 0.45)"
+        "table.header.bg": "rgba(0, 0, 0, 0.45)",
+        "chat.header.bg": "#1f3858"
       },
       "radii": {
         "panel": "8px",
@@ -184,7 +185,8 @@
         "pcBox.action.primary.border": "#71717a",
         "pcBox.action.secondary.bg": "#18181b",
         "pcBox.action.secondary.border": "#71717a",
-        "table.header.bg": "rgba(0, 0, 0, 0.45)"
+        "table.header.bg": "rgba(0, 0, 0, 0.45)",
+        "chat.header.bg": "#1e1e2e"
       },
       "radii": {
         "panel": "8px",
@@ -284,7 +286,8 @@
         "pcBox.action.primary.border": "#007acc",
         "pcBox.action.secondary.bg": "#3a3d41",
         "pcBox.action.secondary.border": "#5a5d61",
-        "table.header.bg": "#1e1e1e"
+        "table.header.bg": "#1e1e1e",
+        "chat.header.bg": "#1e1e1e"
       },
       "radii": {
         "panel": "4px",
@@ -330,8 +333,8 @@
         "chat.message.user.bg": "rgba(0,122,204,0.10)",
         "chat.message.assistant.bg": "rgba(0,0,0,0.04)",
         "chat.message.system.bg": "rgba(0,122,204,0.08)",
-        "chat.tool.bg": "#ffffff",
-        "chat.input.bg": "#ffffff",
+        "chat.tool.bg": "#f0f0f0",
+        "chat.input.bg": "#f0f0f0",
         "dialog.bg": "#ffffff",
         "dialog.border": "#c8c8c8",
         "dialog.text": "#1f1f1f",
@@ -384,7 +387,9 @@
         "pcBox.action.primary.border": "#006ab1",
         "pcBox.action.secondary.bg": "#e5e5e5",
         "pcBox.action.secondary.border": "#c8c8c8",
-        "table.header.bg": "#eeeeee"
+        "table.header.bg": "#eeeeee",
+        "dropdown.bg": "#f0f0f0",
+        "chat.header.bg": "#e8e8e8"
       },
       "radii": {
         "panel": "4px",

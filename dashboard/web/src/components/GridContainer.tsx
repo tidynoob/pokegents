@@ -21,9 +21,10 @@ interface GridContainerProps {
   showHeader: boolean
   showGridLines?: boolean
   onDropOnGroup?: (agentId: string, groupName: string) => void
+  expandedGroups?: Set<string>
 }
 
-export function GridContainer({ engine, children, agentIds: _agentIds, showHeader: _showHeader, showGridLines, onDropOnGroup }: GridContainerProps) {
+export function GridContainer({ engine, children, agentIds: _agentIds, showHeader: _showHeader, showGridLines, onDropOnGroup, expandedGroups }: GridContainerProps) {
   const { effectiveOrder, layouts, settings, cellH, gap, getCardMode, dragState, gridRef } = engine
   const isDragging = !!dragState
 
@@ -93,27 +94,33 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
     }
   }, [dragState, engine.cellW, engine.cellH])
 
+  // Separate expanded groups from regular grid items. Regular items (including
+  // collapsed groups) flow in a single CSS grid so they fill all columns.
+  // Expanded groups render as full-width blocks below the grid.
+  const gridIds = effectiveOrder.filter(id => !(id.startsWith('group:') && expandedGroups?.has(id.slice(6))))
+  const expandedIds = effectiveOrder.filter(id => id.startsWith('group:') && expandedGroups?.has(id.slice(6)))
+
+  const gridStyle = {
+    gridTemplateColumns: `repeat(${settings.cardsPerRow}, minmax(0, 1fr))`,
+    gridAutoRows: cellH,
+    gap,
+    paddingLeft: gap,
+    paddingRight: gap,
+    position: 'relative' as const,
+  }
+
   return (
     <div className="flex-1 min-h-0" style={{ overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}>
+      {/* Main grid — all items except expanded groups */}
       <div
         ref={gridRef}
         className="grid content-start items-start"
         style={{
-          gridTemplateColumns: `repeat(${settings.cardsPerRow}, minmax(0, 1fr))`,
-          gridAutoRows: cellH,
-          gap,
-          // Match outer bleed to the inter-card gap so first/last-column glow
-          // has the same breathing room as glow between neighboring cards.
-          paddingLeft: gap,
-          paddingRight: gap,
+          ...gridStyle,
           paddingTop: Math.min(gap, 8),
-          paddingBottom: Math.min(gap, 8),
-          position: 'relative',
+          paddingBottom: expandedIds.length > 0 ? 0 : Math.min(gap, 8),
         }}
       >
-        {/* Vertical guides between columns — only during drag/settings drag.
-            Horizontal lines are unnecessary in flow mode (rows wrap; there's
-            no fixed row count to draw against). */}
         {(isDragging || showGridLines) && (
           <div className="pointer-events-none" style={{
             position: 'absolute', inset: 0, zIndex: 1,
@@ -136,10 +143,7 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
             })}
           </div>
         )}
-
-        {/* Cards — rendered in effectiveOrder so DOM order matches array
-            order. CSS grid auto-flow handles the row wrap. */}
-        {effectiveOrder.map(id => {
+        {gridIds.map(id => {
           const rect = layouts[id]
           if (!rect) return null
           const mode = getCardMode(id)
@@ -161,6 +165,18 @@ export function GridContainer({ engine, children, agentIds: _agentIds, showHeade
           )
         })}
       </div>
+
+      {/* Expanded groups — full-width blocks below the main grid */}
+      {expandedIds.map(id => {
+        const rect = layouts[id]
+        if (!rect) return null
+        const mode = getCardMode(id)
+        return (
+          <div key={`expanded-${id}`} style={{ paddingLeft: gap, paddingRight: gap, paddingTop: gap / 2, paddingBottom: gap / 2 }}>
+            {children(id, rect, mode)}
+          </div>
+        )
+      })}
 
       {/* Drag ghost — floating element under the cursor while reordering. */}
       {isDragging && dragState && ghostPos && (
@@ -198,6 +214,7 @@ interface GridCellProps {
   isDragging: boolean
   engine: GridEngine
   isDropTarget?: boolean
+  fullRow?: boolean
   children: React.ReactNode
 }
 
@@ -210,6 +227,7 @@ function GridCell({
   isDragging,
   engine,
   isDropTarget,
+  fullRow,
   children,
 }: GridCellProps) {
   const cellRef = useRef<HTMLDivElement>(null)

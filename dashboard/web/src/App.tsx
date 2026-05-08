@@ -459,15 +459,12 @@ export default function App() {
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
   const collapsedInitialized = useRef(false)
-  // 'expanded' was supported when groups could span multiple grid cells. In
-  // flow mode every cell is 1×1, so expanded is gone — any persisted value of
-  // 'expanded' is silently treated as 'single'.
-  const [groupViewModes, setGroupViewModes] = useState<Record<string, 'collapsed' | 'single'>>(() => {
+  const [groupViewModes, setGroupViewModes] = useState<Record<string, 'collapsed' | 'single' | 'expanded'>>(() => {
     try {
       const raw = JSON.parse(localStorage.getItem('pokegents-group-view-modes') || '{}')
-      const out: Record<string, 'collapsed' | 'single'> = {}
+      const out: Record<string, 'collapsed' | 'single' | 'expanded'> = {}
       for (const [k, v] of Object.entries(raw)) {
-        out[k] = v === 'collapsed' ? 'collapsed' : 'single'
+        out[k] = v === 'collapsed' ? 'collapsed' : v === 'expanded' ? 'expanded' : v === 'single' ? 'single' : 'expanded'
       }
       return out
     } catch { return {} }
@@ -518,7 +515,7 @@ export default function App() {
     for (const g of currentGroups) {
       if (!knownGroupsRef.current.has(g)) {
         knownGroupsRef.current.add(g)
-        setGroupViewModes(prev => ({ ...prev, [g]: 'collapsed' }))
+        setGroupViewModes(prev => ({ ...prev, [g]: 'expanded' }))
       }
     }
   }, [agents])
@@ -877,6 +874,7 @@ export default function App() {
           agentIds={gridIds}
           showHeader={showHeader}
           showGridLines={gridSliderDragging}
+          expandedGroups={new Set(Object.entries(groupViewModes).filter(([, v]) => v === 'expanded').map(([k]) => k))}
           onDropOnGroup={async (agentId, groupName) => {
             await assignTaskGroup(agentId, groupName)
           }}
@@ -932,18 +930,23 @@ export default function App() {
               const groupName = id.slice(6)
               const members = grouped[groupName]
               if (!members) return null
-              // All cells are 1×1 in flow mode, so the group's pixel size is
-              // just one cell. Expanded view-mode is gone — groups always
-              // render in single mode (active card + compact member list).
-              const pixelW = gridEngine.cellW
-              const pixelH = gridEngine.cellH
+              const gvm = groupViewModes[groupName] || 'expanded'
+              const isExpanded = gvm === 'expanded'
+              const pixelW = isExpanded ? gridEngine.cellW * settings.cardsPerRow + gridEngine.gap * (settings.cardsPerRow - 1) : gridEngine.cellW
+              const pixelH = isExpanded ? 0 : gridEngine.cellH
               return (
                 <GroupContainer
                   name={groupName}
                   members={members}
-                  viewMode="single"
+                  viewMode={isExpanded ? 'expanded' : 'single'}
                   pageIndex={groupPageIndex[groupName] || 0}
-                  onSetViewMode={() => { /* expand-in-grid is gone */ }}
+                  onSetViewMode={(mode) => {
+                    setGroupViewModes(prev => {
+                      const next = { ...prev, [groupName]: mode === 'collapsed' ? 'collapsed' as const : mode === 'expanded' ? 'expanded' as const : 'single' as const }
+                      localStorage.setItem('pokegents-group-view-modes', JSON.stringify(next))
+                      return next
+                    })
+                  }}
                   onSetPageIndex={(idx) => setGroupPageIndex(prev => ({ ...prev, [groupName]: idx }))}
                   onMinimize={() => {
                     const coord = members.find(m => m.role?.toLowerCase().includes('coordinator'))
@@ -958,7 +961,7 @@ export default function App() {
                       setGroupViewModes(prev => ({ ...prev, [groupName]: 'collapsed' }))
                     }, { spriteCx, spriteCy })
                   }}
-                  cols={1}
+                  cols={isExpanded ? settings.cardsPerRow : 1}
                   cardMode={cardMode}
                   pixelW={pixelW}
                   pixelH={pixelH}

@@ -106,6 +106,7 @@ interface AgentCardProps {
   spriteOverride?: string
   isReading?: boolean
   hideSprite?: boolean
+  hideGroupTag?: boolean
   onCollapse?: () => void
   onDismiss?: () => void
   cardRef?: (el: HTMLDivElement | null) => void
@@ -138,7 +139,7 @@ function SpriteAnimWrapper({ state, compact, children }: { state: string; compac
   return <div className={`relative ${compact ? '' : animClass}`}>{children}</div>
 }
 
-export function AgentCard({ agent, onClick, mode, spriteOverride, isReading, hideSprite, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive, isConnecting, quickSendPrompt, quickInputDisabled, quickInputPlaceholder, quickInputBusy, quickInputSlashCommands, shortcutLabel, shortcutVisible }: AgentCardProps) {
+export function AgentCard({ agent, onClick, mode, spriteOverride, isReading, hideSprite, hideGroupTag, onCollapse, onDismiss, cardRef, projects, roles, existingGroups, glowActive, isConnecting, quickSendPrompt, quickInputDisabled, quickInputPlaceholder, quickInputBusy, quickInputSlashCommands, shortcutLabel, shortcutVisible }: AgentCardProps) {
   const compact = mode === 'compact' || mode === 'compact-minimal'
   const showPrompt = mode === 'standard'
   const showInput = mode !== 'compact-minimal'
@@ -214,7 +215,7 @@ export function AgentCard({ agent, onClick, mode, spriteOverride, isReading, hid
       </span>
     ) : null,
     agent.ephemeral ? <SubagentPill key="subagent" type={agent.subagent_type} /> : null,
-    agent.task_group ? <TaskGroupPill key="task-group" name={agent.task_group} /> : null,
+    agent.task_group && !hideGroupTag ? <TaskGroupPill key="task-group" name={agent.task_group} /> : null,
     agent.role ? <RolePill key="role" name={agent.role} /> : null,
     !agent.ephemeral ? <ProfilePill key="profile" name={agent.project || agent.profile_name} color={agent.project_color || agent.color} /> : null,
   ].filter(Boolean)

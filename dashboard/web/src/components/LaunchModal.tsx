@@ -36,14 +36,14 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
 
   return (
     <div ref={ref} className="relative">
-      <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">{label}</label>
+      <label className="text-s theme-font-display theme-text-muted pixel-shadow block mb-1">{label}</label>
       <button
         onClick={() => !disabled && setOpen(v => !v)}
         disabled={disabled}
-        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors disabled:opacity-50"
+        className="w-full flex items-center justify-between gba-dialog-dark px-2 py-1.5 text-s theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors disabled:opacity-50"
         style={{ background: 'var(--theme-dropdown-bg)', borderColor: 'var(--theme-dropdown-border)' }}
       >
-        <span className="flex items-center gap-2">
+        <span className="flex items-center gap-1.5">
           {selected?.sprite && (
             <div className="w-4 h-4 flex items-center justify-center overflow-visible"><PixelSprite sprite={selected.sprite} scale={0.5} alt="" /></div>
           )}
@@ -52,16 +52,16 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
           )}
           {selected ? selected.label : 'None'}
         </span>
-        <span className="theme-text-faint text-l">{open ? '▲' : '▼'}</span>
+        <span className="theme-text-faint text-s">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
         <div
-          className="absolute top-full left-0 right-0 mt-1 gba-dropdown-panel z-50 py-1 max-h-[220px] overflow-y-auto"
+          className="absolute top-full left-0 right-0 mt-0.5 gba-dropdown-panel z-50 py-0.5 max-h-[200px] overflow-y-auto"
         >
           {allowNone !== false && (
             <button
               onClick={() => { onChange(''); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-l theme-font-mono theme-bg-dropdown-hover transition-colors ${!value ? 'text-accent-yellow' : 'theme-text-muted'}`}
+              className={`w-full text-left px-2 py-1 text-s theme-font-mono theme-bg-dropdown-hover transition-colors ${!value ? 'text-accent-yellow' : 'theme-text-muted'}`}
             >
               None
             </button>
@@ -70,7 +70,7 @@ function GbaDropdown<T extends { key: string; label: string; color?: [number, nu
             <button
               key={o.key}
               onClick={() => { onChange(o.key); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-l theme-font-mono transition-colors flex items-center gap-2 ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
+              className={`w-full text-left px-2 py-1 text-s theme-font-mono transition-colors flex items-center gap-1.5 ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
             >
               {o.sprite && (
                 <div className="w-4 h-4 flex items-center justify-center overflow-visible"><PixelSprite sprite={o.sprite} scale={0.5} alt="" /></div>
@@ -268,13 +268,13 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
     <GameModal
       title="New Agent"
       onClose={onClose}
-      width="min(420px, 96vw)"
+      width="min(320px, 96vw)"
       height="auto"
       maxHeight="92vh"
       scanlines={false}
     >
       <div
-        className="p-4 flex flex-col gap-3"
+        className="p-3 flex flex-col gap-2"
         style={{
           borderRadius: '0 0 8px 8px',
           overflow: 'visible',
@@ -285,59 +285,28 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
           boxShadow: 'var(--theme-shadow-panel)',
         }}
       >
-        <GbaDropdown
-          label="Interface"
-          value={iface}
-          options={[
-            { key: 'chat', label: 'Pokegent Chat' },
-            { key: 'terminal', label: 'Terminal' },
-          ]}
-          onChange={key => setIface(key as 'terminal' | 'chat')}
-          allowNone={false}
-        />
-
-        <GbaDropdown
-          label="Agent backend"
-          value={backendKind}
-          options={[
-            { key: 'claude', label: 'Claude' },
-            { key: 'codex', label: 'Codex' },
-          ]}
-          onChange={key => { setBackendKind(key as 'claude' | 'codex'); setSelectedModel('') }}
-          allowNone={false}
-        />
-
-        <GbaDropdown
-          label="Model"
-          value={selectedModel}
-          options={modelOptions.length > 0 ? modelOptions : [{ key: '', label: selectedBackend?.name ? `${selectedBackend.name} default` : 'Provider default' }]}
-          onChange={setSelectedModel}
-          allowNone={false}
-          disabled={modelOptions.length === 0}
-        />
-
         {/* Name & Pokemon */}
         <div className="flex gap-2 items-end">
           <div className="flex-1 min-w-0">
-            <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">Name</label>
+            <label className="text-s theme-font-display theme-text-muted pixel-shadow block mb-1">Name</label>
             <input
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
               placeholder="Pokemon name"
-              className="w-full gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary theme-placeholder-input outline-none focus:border-accent-blue transition-colors"
+              className="w-full gba-dialog-dark px-2 py-1.5 text-s theme-font-mono theme-text-primary theme-placeholder-input outline-none focus:border-accent-blue transition-colors"
             />
           </div>
           <div>
-            <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">Pokemon</label>
+            <label className="text-s theme-font-display theme-text-muted pixel-shadow block mb-1">Sprite</label>
             <button
               onClick={() => setShowSpritePicker(true)}
-              className="gba-dialog-dark px-2.5 py-2 hover:brightness-110 focus:border-accent-blue transition-colors flex items-center gap-1.5"
+              className="gba-dialog-dark px-2 py-1 hover:brightness-110 focus:border-accent-blue transition-colors flex items-center gap-1"
             >
-              <div className="w-6 h-6 flex items-center justify-center overflow-visible">
-                <PixelSprite sprite={displaySprite} scale={0.75} alt="" />
+              <div className="w-5 h-5 flex items-center justify-center overflow-visible">
+                <PixelSprite sprite={displaySprite} scale={1} alt="" />
               </div>
-              <span className="theme-text-faint text-l">▼</span>
+              <span className="theme-text-faint text-s">▼</span>
             </button>
           </div>
         </div>
@@ -352,19 +321,56 @@ export function LaunchModal({ projects, roles, agents: _agents, onClose }: Launc
           </div>
         </div>
 
+        <div className="border-t theme-border-subtle my-0.5" />
 
-        <div className="flex gap-2 pt-1">
+        <GbaDropdown
+          label="Interface"
+          value={iface}
+          options={[
+            { key: 'chat', label: 'Pokegent Chat' },
+            { key: 'terminal', label: 'Terminal' },
+          ]}
+          onChange={key => setIface(key as 'terminal' | 'chat')}
+          allowNone={false}
+        />
+
+        <div className="flex gap-2">
+          <div className="flex-1 min-w-0">
+            <GbaDropdown
+              label="Backend"
+              value={backendKind}
+              options={[
+                { key: 'claude', label: 'Claude' },
+                { key: 'codex', label: 'Codex' },
+              ]}
+              onChange={key => { setBackendKind(key as 'claude' | 'codex'); setSelectedModel('') }}
+              allowNone={false}
+            />
+          </div>
+          <div className="flex-1 min-w-0">
+            <GbaDropdown
+              label="Model"
+              value={selectedModel}
+              options={modelOptions.length > 0 ? modelOptions : [{ key: '', label: selectedBackend?.name ? `${selectedBackend.name} default` : 'Default' }]}
+              onChange={setSelectedModel}
+              allowNone={false}
+              disabled={modelOptions.length === 0}
+            />
+          </div>
+        </div>
+
+        <div className="flex gap-2 pt-3">
           <button
             onClick={onClose}
             disabled={launching}
-            className="gba-button text-m theme-font-display px-3 py-2.5 transition-colors opacity-80"
+            className="gba-button text-s theme-font-display px-2.5 py-1.5 transition-colors opacity-80"
           >
             Cancel
           </button>
           <button
             onClick={handleLaunch}
             disabled={!canLaunch || launching}
-            className={`flex-1 gba-button text-m theme-font-display px-3 py-2.5 transition-colors ${
+            className={`flex-1 gba-button text-s theme-font-display px-2.5 py-1.5 transition-colors ${
               !canLaunch ? 'opacity-30 cursor-not-allowed' : ''
             }`}
           >

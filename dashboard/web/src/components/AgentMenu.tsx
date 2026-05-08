@@ -43,22 +43,22 @@ function SwitchDropdown({ label, value, options, onChange }: {
 
   return (
     <div ref={ref} className="relative">
-      <label className="text-m theme-font-display theme-text-muted pixel-shadow block mb-1.5">{label}</label>
+      <label className="text-s theme-font-display theme-text-muted pixel-shadow block mb-1">{label}</label>
       <button
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between gba-dialog-dark px-3 py-2.5 text-l theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors"
+        className="w-full flex items-center justify-between gba-dialog-dark px-2 py-1.5 text-s theme-font-mono theme-text-primary hover:brightness-110 focus:border-accent-blue transition-colors"
         style={{ background: 'var(--theme-dropdown-bg)', borderColor: 'var(--theme-dropdown-border)' }}
       >
         <span>{selected ? selected.label : 'None'}</span>
-        <span className="theme-text-faint text-l">{open ? '▲' : '▼'}</span>
+        <span className="theme-text-faint text-s">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 gba-dropdown-panel z-50 py-1 max-h-[220px] overflow-y-auto">
+        <div className="absolute top-full left-0 right-0 mt-0.5 gba-dropdown-panel z-50 py-0.5 max-h-[200px] overflow-y-auto">
           {options.map(o => (
             <button
               key={o.key}
               onClick={() => { onChange(o.key); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-l theme-font-mono transition-colors ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
+              className={`w-full text-left px-2 py-1 text-s theme-font-mono transition-colors ${value === o.key ? 'text-accent-yellow theme-bg-dropdown-active' : 'theme-text-primary theme-bg-dropdown-hover'}`}
             >
               {o.label}
             </button>
@@ -129,14 +129,14 @@ function SwitchRuntimeModal({ agent, onClose, onAssignStatus }: {
     <GameModal
       title="Switch Runtime"
       onClose={onClose}
-      width="min(380px, 96vw)"
+      width="min(320px, 96vw)"
       height="auto"
       maxHeight="92vh"
       scanlines={false}
       zIndex={10001}
     >
       <div
-        className="p-4 flex flex-col gap-3"
+        className="p-3 flex flex-col gap-2"
         style={{
           borderRadius: '0 0 8px 8px',
           overflow: 'visible',
@@ -158,39 +158,44 @@ function SwitchRuntimeModal({ agent, onClose, onAssignStatus }: {
         />
 
         {iface === 'chat' && (
-          <SwitchDropdown
-            label="Agent backend"
-            value={backendId}
-            options={backends.map(b => ({ key: b.id, label: b.name + (b.default ? ' (default)' : '') }))}
-            onChange={key => { setBackendId(key); setModelId('') }}
-          />
+          <div className="flex gap-2">
+            <div className="flex-1 min-w-0">
+              <SwitchDropdown
+                label="Backend"
+                value={backendId}
+                options={backends.map(b => ({ key: b.id, label: b.name + (b.default ? ' (default)' : '') }))}
+                onChange={key => { setBackendId(key); setModelId('') }}
+              />
+            </div>
+            <div className="flex-1 min-w-0">
+              {models.length > 0 && (
+                <SwitchDropdown
+                  label="Model"
+                  value={modelId || selectedBackend?.default_model || currentModelKey || ''}
+                  options={models.map(([key, m]) => ({ key, label: m.name || m.model }))}
+                  onChange={setModelId}
+                />
+              )}
+            </div>
+          </div>
         )}
 
-        {iface === 'chat' && models.length > 0 && (
-          <SwitchDropdown
-            label="Model"
-            value={modelId || selectedBackend?.default_model || currentModelKey || ''}
-            options={models.map(([key, m]) => ({ key, label: m.name || m.model }))}
-            onChange={setModelId}
-          />
-        )}
-
-        <div className="text-m theme-font-mono theme-text-warning leading-snug">
-          This will restart the agent. Conversation history is preserved.
+        <div className="text-s theme-font-mono theme-text-warning leading-snug">
+          Restarts the agent. History is preserved.
         </div>
 
-        <div className="flex gap-2 pt-1">
+        <div className="flex gap-2 pt-0.5">
           <button
             onClick={onClose}
             disabled={applying}
-            className="gba-button text-m theme-font-display px-3 py-2.5 transition-colors opacity-80"
+            className="gba-button text-s theme-font-display px-2.5 py-1.5 transition-colors opacity-80"
           >
             Cancel
           </button>
           <button
             onClick={apply}
             disabled={applying}
-            className={`flex-1 gba-button text-m theme-font-display px-3 py-2.5 transition-colors ${applying ? 'opacity-30 cursor-not-allowed' : ''}`}
+            className={`flex-1 gba-button text-s theme-font-display px-2.5 py-1.5 transition-colors ${applying ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
             {applying ? 'Applying...' : 'Apply'}
           </button>

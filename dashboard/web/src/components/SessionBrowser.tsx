@@ -507,14 +507,18 @@ function InfoBox({ label, text }: { label: string; text?: string }) {
       boxShadow: 'var(--theme-shadow-panel)',
     }}>
       <div style={{
-        padding: '6px 8px 4px',
+        padding: '3px 8px 2px',
         flexShrink: 0,
+        borderBottom: '1px solid var(--theme-panel-divider, rgba(255,255,255,0.08))',
+        marginBottom: 2,
       }}>
         <span style={{
-          fontFamily: 'var(--theme-font-mono)',
-          fontSize: 'var(--agent-card-output-font-size, 10px)',
-          color: 'var(--theme-text-muted)',
-          letterSpacing: 0,
+          fontFamily: 'var(--theme-font-display)',
+          fontSize: '9px',
+          fontWeight: 700,
+          color: 'var(--theme-text-secondary)',
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
         }}>
           {label}
         </span>

@@ -52,15 +52,17 @@ function UnifiedPanelTable<T>({ columns, rows, rowKey, empty, scrollRef, onRowCl
   }
 
   const template = columns.map(c => c.width || 'minmax(0, 1fr)').join(' ')
+  const fontSize = 'var(--agent-card-output-font-size, 10px)'
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto rounded-md theme-font-mono p-2" style={{ background: 'var(--theme-chat-bg)' }}>
+    <div ref={scrollRef} className="h-full overflow-y-auto rounded-md theme-font-mono" style={{ background: 'var(--theme-chat-bg)' }}>
       <div className="min-w-full">
         <div
-          className="sticky top-0 z-20 grid border-b theme-border-subtle text-m theme-font-mono theme-text-primary"
+          className="sticky top-0 z-20 grid border-b theme-border-subtle theme-font-mono theme-text-primary font-bold"
           style={{
             gridTemplateColumns: template,
-            background: 'var(--theme-chat-tool-bg)',
+            background: 'var(--theme-chat-header-bg, var(--theme-chat-tool-bg))',
             boxShadow: '0 1px 0 var(--theme-panel-divider)',
+            fontSize,
           }}
         >
           {columns.map((col, i) => (
@@ -72,8 +74,8 @@ function UnifiedPanelTable<T>({ columns, rows, rowKey, empty, scrollRef, onRowCl
         {rows.map((row, index) => (
           <div key={rowKey(row, index)} className="border-b theme-border-subtle last:border-b-0">
             <div
-              className={`grid text-l theme-font-mono theme-text-secondary ${onRowClick ? 'cursor-pointer theme-bg-panel-hover' : ''}`}
-              style={{ gridTemplateColumns: template, background: 'var(--theme-chat-tool-bg)' }}
+              className={`grid theme-font-mono theme-text-secondary ${onRowClick ? 'cursor-pointer theme-bg-panel-hover' : ''}`}
+              style={{ gridTemplateColumns: template, background: 'var(--theme-chat-tool-bg)', fontSize }}
               onClick={(event) => onRowClick?.(row, event)}
             >
               {columns.map(col => (
@@ -261,7 +263,7 @@ export function CommandsView({ entries, scrollRef }: { entries: Entry[]; showTim
             {
               key: 'status',
               header: 'Status',
-              width: '82px',
+              width: '64px',
               render: (cmd) => {
                 const color = cmd.status === 'error' ? 'theme-text-danger' : cmd.status === 'done' ? 'theme-text-success' : 'theme-text-faint'
                 return <span className={color}>{cmd.status || '—'}</span>
@@ -270,19 +272,13 @@ export function CommandsView({ entries, scrollRef }: { entries: Entry[]; showTim
             {
               key: 'command',
               header: 'Command',
-              width: 'minmax(180px, 1.5fr)',
+              width: 'minmax(180px, 1fr)',
               render: (cmd) => <span className="theme-text-secondary truncate block">{cmd.summary}</span>,
             },
             {
-              key: 'description',
-              header: 'Description',
-              width: 'minmax(140px, 1fr)',
-              render: (cmd) => <span className="theme-text-muted truncate block">{cmd.description || '—'}</span>,
-            },
-            {
               key: 'action',
-              header: 'Action',
-              width: '72px',
+              header: '',
+              width: '52px',
               render: (cmd) => {
                 const i = rowIndex.get(cmd) ?? 0
                 return <span className="theme-text-muted">{cmd.isLong ? (expanded[i] ? 'hide' : 'show') : 'copy'}</span>
