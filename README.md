@@ -2,7 +2,7 @@
 
 Pokegents is a local dashboard for running and coordinating multiple coding-agent sessions at once.
 
-![Pokegents Dashboard](docs/screenshot.png)
+![Pokegents dashboard with agent cards, town map, and chat panel](docs/images/dashboard.png)
 
 ## What Pokegents offers
 
@@ -51,6 +51,8 @@ The first-run onboarding flow will guide you through configuring your agent back
 2. **Complete onboarding** — set up at least one backend (Claude or Codex) with valid credentials.
 3. **Create a project** — point it at your codebase's working directory.
 4. **Launch an agent** — click "New Agent", pick a role + project + backend, and start chatting.
+
+![New agent modal with name, sprite, role, project, and backend selectors](docs/images/new-agent-modal.png)
 
 You can also launch from the CLI:
 
@@ -147,12 +149,28 @@ Right-click any agent card and choose **Switch runtime** to change the interface
 
 ## Dashboard features
 
-- **Agent cards** — each agent gets a card showing its name, role, project, status, model, context usage, and recent output. Click to open the full chat panel.
-- **Town view** — a top-level pixel-art map where agent sprites walk around, glow with status colors, and animate message deliveries between each other.
-- **Chat panel** — full streaming conversation view for chat-backed agents. Shows tool calls, diffs, thinking blocks, and inline permission prompts.
-- **PC Box** — session browser for all historical sessions. Search by name, role, project, or content. Resume any session.
-- **Task groups** — organize agents by workstream (e.g. "auth-migration", "proxy"). Groups are collapsible in the grid and can be released together.
-- **Agent-to-agent messaging** — agents coordinate via an MCP messaging server. Messages show as pokeball animations on the town map.
+### Agent cards and chat
+
+Each agent gets a card showing its name, role, project, status, model, context usage, and recent output. Click a card to open the full chat panel with streaming conversation, tool calls, diffs, and inline permission prompts.
+
+![Dashboard with agent cards alongside an iTerm2 terminal session](docs/images/dashboard-chat-panel.png)
+
+### Agent-to-agent messaging
+
+Agents coordinate via an MCP messaging server. One agent can send results to another, request a review, or ask for help — without you manually relaying messages.
+
+![Agent cards showing cross-agent message delivery](docs/images/messaging-cards.png)
+
+### PC Box
+
+Browse all historical sessions — active and inactive. Search by name, role, project, or content. Resume any previous session with full conversation history.
+
+![PC Box session browser showing previous agents with sprites and session details](docs/images/pc-box.png)
+
+### Other features
+
+- **Town view** — a pixel-art map where agent sprites walk around, glow with status colors, and animate message deliveries between each other.
+- **Task groups** — organize agents by workstream (e.g. "auth-migration", "proxy"). Groups are collapsible and can be released together.
 
 ## Architecture
 
