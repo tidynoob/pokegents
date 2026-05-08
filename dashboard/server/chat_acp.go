@@ -1891,7 +1891,17 @@ func patchRunningFileChat(dataDir, pokegentID, profile string, claudePID int, cl
 	path := filepath.Join(dataDir, "running", profile+"-"+pokegentID+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		// Profile in the filename may not match opts.Profile (e.g. after a role
+		// change). Fall back to glob by pokegent_id.
+		matches, _ := filepath.Glob(filepath.Join(dataDir, "running", "*-"+pokegentID+".json"))
+		if len(matches) == 0 {
+			return
+		}
+		path = matches[0]
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return
+		}
 	}
 	var rs map[string]any
 	if err := json.Unmarshal(data, &rs); err != nil {

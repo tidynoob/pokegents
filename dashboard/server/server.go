@@ -2142,7 +2142,10 @@ func (s *Server) handleCloneSession(w http.ResponseWriter, r *http.Request) {
 				backendType = bc.Type
 			}
 		}
-		model, effort := s.resolveModelEffortForBackend(agent.Model, agent.Effort, role, project, backendKey)
+		// agent.Model is the display string (e.g. "Codex: GPT 5.5") — strip
+		// the provider prefix to get the raw model ID for the backend.
+		rawModel := stripModelDisplayPrefix(agent.Model)
+		model, effort := s.resolveModelEffortForBackend(rawModel, agent.Effort, role, project, backendKey)
 		cwd := agent.CWD
 		if cwd == "" {
 			home, _ := os.UserHomeDir()

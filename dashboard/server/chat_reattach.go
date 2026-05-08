@@ -282,6 +282,27 @@ func displayModelForBackend(model, backendKey, backendType string) string {
 	return strings.TrimSpace(backendKey)
 }
 
+// stripModelDisplayPrefix removes "Claude: " or "Codex: " prefixes and
+// reverses friendlyModelName's "GPT 5.5" → "gpt-5.5" transformation,
+// recovering the raw model ID from a display string.
+func stripModelDisplayPrefix(display string) string {
+	m := strings.TrimSpace(display)
+	if m == "" {
+		return ""
+	}
+	if idx := strings.Index(m, ": "); idx >= 0 {
+		prefix := strings.ToLower(m[:idx])
+		if prefix == "claude" || prefix == "codex" {
+			m = strings.TrimSpace(m[idx+2:])
+		}
+	}
+	lower := strings.ToLower(m)
+	if strings.HasPrefix(lower, "gpt ") {
+		m = "gpt-" + strings.TrimSpace(m[4:])
+	}
+	return strings.ToLower(m)
+}
+
 func friendlyModelName(model string) string {
 	m := strings.TrimSpace(model)
 	if m == "" {
