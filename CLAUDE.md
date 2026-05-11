@@ -4,17 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is pokegents
 
-pokegents is a multi-session Claude Code launcher and session manager. It wraps the `claude` CLI with profile-based configuration, terminal theming (iTerm2 on macOS), session tracking, and Claude Code hook integration. Users run multiple concurrent Claude Code sessions across different projects (e.g. 3 client sessions + 1 personal session simultaneously).
+pokegents is a multi-session Claude Code launcher and session manager. It wraps the `claude` CLI with composable role + project configuration (with legacy profile fallback), terminal theming (iTerm2 on macOS), session tracking, and Claude Code hook integration. Users run multiple concurrent Claude Code sessions across different projects (e.g. 3 client sessions + 1 personal session simultaneously).
 
 ## Architecture
 
 **Entry point:** installed `pokegents`/`pokegent` shims set `POKEGENTS_ROOT`, source `pokegent.sh`, and dispatch to the `pokegent()` function. Users should not need to edit or source shell rc files.
 
 **Code lives in the repo, user data lives in `~/.pokegents/`:**
-- `~/.pokegents/profiles/*.json` — per-profile config (cwd, system_prompt, emoji, color, iterm2_profile, add_dirs)
-- `~/.pokegents/running/*.json` — active session registry (profile, session_id, pid, tty, display_name)
+- `~/.pokegents/roles/*.json` — persona-only configs (title, emoji, system_prompt, optional skip_permissions/model/effort). Project-agnostic.
+- `~/.pokegents/projects/*.json` — location-only configs (title, color, cwd, optional context_prompt, iterm2_profile, model). Role-agnostic.
+- `~/.pokegents/profiles/*.json` — **legacy** monolithic configs that bundle persona + project into one file (cwd, system_prompt, emoji, color, iterm2_profile, add_dirs). Kept as a compatibility fallback; new work should use roles + projects.
+- `~/.pokegents/running/*.json` — active session registry (profile_name, session_id, pid, tty, display_name). The `profile_name` field holds whichever identifier launched the session: a project name, `<role>@<project>` composite, or legacy profile name.
 - `~/.pokegents/status/*.json` — structured state from hooks (state, detail, cwd, timestamp, last_summary)
-- `~/.pokegents/history/*.json` — last 5 sessions per profile with timestamps and first-message summaries
+- `~/.pokegents/history/*.json` — last 5 sessions per identifier with timestamps and first-message summaries
+
+**Roles + projects composition.** `pokegent <role>@<project>` merges the two at launch:
+- Role contributes: emoji, system_prompt (appended after project's context_prompt), model/effort overrides
+- Project contributes: color, cwd, iterm2 profile, context_prompt (prepended to system_prompt), add_dirs
+- Display name becomes `"<Role title> — <Project title>"` and `profile_name` becomes `<role>@<project>`
+
+Resolution order in `pokegent <arg>`: project name → project alias → profile (compat fallback) → role (composed with config's `default_project`). `pokegent <role>@` (no project) also composes with the default project. The compatibility profile branch reads everything from one file, no composition.
 
 **Hooks (in `hooks/`):**
 - `status-update.sh` — registered on all Claude Code lifecycle events (PreToolUse, PostToolUse, Stop, SessionStart, SessionEnd, etc.). Writes structured JSON to `~/.pokegents/status/<session_id>.json` with state (running/idle/error/permission/waiting).
@@ -44,7 +53,7 @@ The owner wants pokegents to evolve into a full agent orchestration platform. Pr
 
 2. **Dashboard UI** — a viewer for all active agents and their progress. TBD whether terminal TUI or web. The data is already there in `running/` + `status/`. Existing ecosystem references: claude-code-monitor (TUI + mobile web), claude-cockpit (VS Code sidebar), claude-code-ui (web dashboard).
 
-3. **Advanced profile customization** — sub-project support within profiles, profile inheritance, composable config layers (e.g. "client profile + pinecone sub-project overrides").
+3. **Advanced role/project customization** — the role + project split already provides composable config layers. Open work: sub-project support (e.g. "pokegents project + dashboard sub-project overrides"), role inheritance, and shared role libraries for common team patterns.
 
 4. **Git worktree + cross-agent communication** — agents on different worktrees of the same repo sharing context and coordinating. The `-w` flag exists but just passes through to claude. Key patterns from the ecosystem:
    - Claude Code's experimental Agent Teams feature (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) uses file-based mailbox inboxes with append-and-poll messaging under `~/.claude/teams/`
