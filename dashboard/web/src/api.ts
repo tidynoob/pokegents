@@ -309,6 +309,8 @@ export interface ProjectInfo {
   name: string
   title: string
   color: [number, number, number]
+  cwd?: string
+  context_prompt?: string
   model?: string
   effort?: string
 }
@@ -325,6 +327,20 @@ export async function fetchProjectList(): Promise<ProjectInfo[]> {
   const res = await fetch(`${BASE}/projects`)
   if (!res.ok) return []
   return (await res.json()) ?? []
+}
+
+export async function saveProject(project: { name: string; title: string; cwd: string; color: [number, number, number]; context_prompt?: string }): Promise<void> {
+  const res = await fetch(`${BASE}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function deleteProject(name: string): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
 }
 
 export async function fetchRoleList(): Promise<RoleInfo[]> {
