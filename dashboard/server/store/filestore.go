@@ -753,6 +753,35 @@ func (s *FileProjectStore) List() ([]ProjectConfig, error) {
 	return result, nil
 }
 
+func (s *FileProjectStore) Save(name string, config ProjectConfig) error {
+	if name == "" {
+		return fmt.Errorf("project name is required")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("project name must not contain path separators")
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return err
+	}
+	config.Name = ""
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(s.dir, name+".json"), data, 0o644)
+}
+
+func (s *FileProjectStore) Delete(name string) error {
+	if name == "" {
+		return fmt.Errorf("project name is required")
+	}
+	path := filepath.Join(s.dir, name+".json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // ============================================================================
 // FileRoleStore
 // ============================================================================

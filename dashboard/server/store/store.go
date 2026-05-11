@@ -43,6 +43,10 @@ type ProjectStore interface {
 	Get(name string) (*ProjectConfig, error)
 	// List returns all projects.
 	List() ([]ProjectConfig, error)
+	// Save creates or updates a project config file.
+	Save(name string, config ProjectConfig) error
+	// Delete removes a project config file.
+	Delete(name string) error
 }
 
 // RoleStore manages role configuration files (~/.pokegents/roles/*.json).
