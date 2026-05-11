@@ -258,6 +258,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/image", s.handleUploadImage)
 	s.mux.HandleFunc("GET /api/profiles", s.handleGetProfiles)
 	s.mux.HandleFunc("GET /api/projects", s.handleGetProjects)
+	s.mux.HandleFunc("POST /api/projects", s.handleSaveProject)
+	s.mux.HandleFunc("DELETE /api/projects/{name}", s.handleDeleteProject)
 	s.mux.HandleFunc("GET /api/roles", s.handleGetRoles)
 	s.mux.HandleFunc("POST /api/profiles/{name}/launch", s.handleLaunchProfile)
 	s.mux.HandleFunc("POST /api/launch", s.handleLaunch)
@@ -815,6 +817,52 @@ func (s *Server) handleGetProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, projects)
+}
+
+func (s *Server) handleSaveProject(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name          string `json:"name"`
+		Title         string `json:"title"`
+		CWD           string `json:"cwd"`
+		Color         [3]int `json:"color"`
+		ContextPrompt string `json:"context_prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.CWD) == "" {
+		http.Error(w, "cwd is required", http.StatusBadRequest)
+		return
+	}
+	config := store.ProjectConfig{
+		Title:         strings.TrimSpace(body.Title),
+		Color:         body.Color,
+		CWD:           body.CWD,
+		ContextPrompt: body.ContextPrompt,
+	}
+	if err := s.fileStore.Projects.Save(strings.TrimSpace(body.Name), config); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.fileStore.Projects.Delete(name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) handleGetRoles(w http.ResponseWriter, r *http.Request) {
