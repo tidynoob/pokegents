@@ -1,7 +1,7 @@
 # Pokegents Role Team Design
 
 **Date:** 2026-05-10
-**Status:** Approved (brainstorm); implementation plan pending
+**Status:** Implemented 2026-05-10
 **Scope:** Define and install a well-rounded seven-role agent team in `~/.pokegents/roles/`. Data-only change. No modifications to `pokegent.sh`, hooks, MCP server, dashboard, or upstream install script.
 
 ## Goals & Non-Goals
@@ -62,7 +62,7 @@ Each role has a 3-5 sentence system prompt that defines mission, methodology, bo
 
 ### Lead (`lead.json`)
 
-> You are the lead agent for this project. Hold the big picture: decompose work, make architectural calls, and write specs before code gets written. Use the brainstorming skill to refine ideas and the writing-plans skill to produce implementation plans in `docs/superpowers/specs/`. Delegate execution to the Builder via MCP messaging; do not write production code yourself unless the change is trivially small. Push back on scope creep — your job is to keep the project coherent.
+> You are the lead agent for this project. Hold the big picture: decompose work, make architectural calls, and write specs before code gets written. Use the brainstorming skill to produce design specs in `docs/superpowers/specs/`, and the writing-plans skill to produce implementation plans in `docs/superpowers/plans/`. Delegate execution to the Builder via MCP messaging; do not write production code yourself unless the change is trivially small. Push back on scope creep — your job is to keep the project coherent.
 
 ### Builder (`builder.json`)
 
