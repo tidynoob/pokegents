@@ -1,6 +1,6 @@
-import { ReactNode, useMemo, useState } from 'react'
+import { ReactNode, useEffect, useMemo, useState } from 'react'
 import { DashboardSettings } from '../../hooks/useSettings'
-import { installLaunchAgent, openSetupConfig, repairClaudeHooks, repairMcpMessaging, setSetupPreferences, SetupStatus } from '../../api'
+import { fetchProjectList, saveProject, deleteProject, ProjectInfo, installLaunchAgent, openSetupConfig, repairClaudeHooks, repairMcpMessaging, setSetupPreferences, SetupStatus } from '../../api'
 import { GameModal } from '../GameModal'
 
 interface SettingsPanelProps {
@@ -151,8 +151,109 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
+const PROJECT_COLORS: [number, number, number][] = [
+  [74, 144, 217],
+  [80, 185, 120],
+  [217, 130, 74],
+  [185, 80, 180],
+  [217, 74, 74],
+  [74, 195, 195],
+  [195, 175, 74],
+  [130, 100, 200],
+]
+
+function pickColor(existing: ProjectInfo[]): [number, number, number] {
+  const used = new Set(existing.map(p => p.color.join(',')))
+  for (const c of PROJECT_COLORS) {
+    if (!used.has(c.join(','))) return c
+  }
+  return PROJECT_COLORS[existing.length % PROJECT_COLORS.length]
+}
+
+function deriveNameFromPath(cwd: string): string {
+  const seg = cwd.replace(/\/+$/, '').split('/').pop() || ''
+  return seg.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+function deriveTitleFromPath(cwd: string): string {
+  const seg = cwd.replace(/\/+$/, '').split('/').pop() || ''
+  return seg.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
 export function SettingsPanel({ settings, defaults, setupStatus, onChange, onReset, onClose, onTestMessaging, onGridDragging, onOpenOnboarding, onOpenTownEditor }: SettingsPanelProps) {
   const [tab, setTab] = useState<TabId>('layout')
+  const [projects, setProjects] = useState<ProjectInfo[]>([])
+  const [editingProject, setEditingProject] = useState<string | null>(null)
+  const [formCwd, setFormCwd] = useState('')
+  const [formTitle, setFormTitle] = useState('')
+  const [formContextPrompt, setFormContextPrompt] = useState('')
+  const [formDerivedName, setFormDerivedName] = useState('')
+
+  useEffect(() => {
+    fetchProjectList().then(setProjects).catch(() => {})
+  }, [])
+
+  function startCreate() {
+    setEditingProject('__new__')
+    setFormCwd('')
+    setFormTitle('')
+    setFormContextPrompt('')
+    setFormDerivedName('')
+  }
+
+  function startEdit(p: ProjectInfo) {
+    setEditingProject(p.name)
+    setFormCwd(p.cwd || '')
+    setFormTitle(p.title)
+    setFormContextPrompt(p.context_prompt || '')
+    setFormDerivedName(p.name)
+  }
+
+  function cancelEdit() {
+    setEditingProject(null)
+  }
+
+  function handleCwdBlur() {
+    if (formCwd && !formDerivedName) {
+      setFormDerivedName(deriveNameFromPath(formCwd))
+    }
+    if (formCwd && !formTitle) {
+      setFormTitle(deriveTitleFromPath(formCwd))
+    }
+  }
+
+  async function handleSave() {
+    const name = editingProject === '__new__' ? (formDerivedName || deriveNameFromPath(formCwd)) : editingProject!
+    const color = editingProject === '__new__'
+      ? pickColor(projects)
+      : (projects.find(p => p.name === editingProject)?.color ?? pickColor(projects))
+    try {
+      await saveProject({
+        name,
+        title: formTitle || deriveTitleFromPath(formCwd),
+        cwd: formCwd,
+        color,
+        context_prompt: formContextPrompt || undefined,
+      })
+      const updated = await fetchProjectList()
+      setProjects(updated)
+      setEditingProject(null)
+    } catch (e) {
+      alert(String(e))
+    }
+  }
+
+  async function handleDelete(name: string) {
+    if (!confirm(`Delete project "${name}"? This removes the config file.`)) return
+    try {
+      await deleteProject(name)
+      const updated = await fetchProjectList()
+      setProjects(updated)
+    } catch (e) {
+      alert(String(e))
+    }
+  }
+
   const tabs = useMemo<{ id: TabId; label: string }[]>(() => [
     { id: 'layout', label: 'Layout' },
     { id: 'appearance', label: 'Theme' },
@@ -299,6 +400,80 @@ export function SettingsPanel({ settings, defaults, setupStatus, onChange, onRes
 
           {tab === 'agents' && (
             <>
+              <Section title="Projects">
+                <div className="space-y-2">
+                  {projects.map(p => (
+                    <div key={p.name} className="flex items-center gap-3 rounded theme-bg-panel-subtle border theme-border-subtle p-2">
+                      <span
+                        className="w-3 h-3 rounded-full shrink-0"
+                        style={{ backgroundColor: `rgb(${p.color[0]},${p.color[1]},${p.color[2]})` }}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="text-l theme-font-mono theme-text-primary">{p.title}</span>
+                        {p.cwd && <span className="ml-2 text-s theme-font-mono theme-text-faint truncate">{p.cwd}</span>}
+                      </div>
+                      <button onClick={() => startEdit(p)} className="text-s theme-font-display uppercase pixel-shadow px-2 py-1 rounded theme-bg-panel-muted theme-text-muted theme-bg-panel-hover">EDIT</button>
+                      <button onClick={() => handleDelete(p.name)} className="text-s theme-font-display uppercase pixel-shadow px-2 py-1 rounded theme-bg-panel-muted text-accent-red/70 hover:bg-accent-red/10">DELETE</button>
+                    </div>
+                  ))}
+                </div>
+                {editingProject ? (
+                  <div className="rounded border theme-border-subtle theme-bg-panel-muted p-3 space-y-3">
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4 items-start">
+                      <div className="min-w-0">
+                        <label className="block text-l theme-font-mono theme-text-secondary leading-snug">Directory</label>
+                        <p className="mt-1 text-m leading-relaxed theme-font-mono theme-text-faint">Absolute path to your project</p>
+                      </div>
+                      <div className="min-w-0 flex items-center justify-start">
+                        <input
+                          type="text"
+                          value={formCwd}
+                          placeholder="/path/to/project"
+                          onBlur={handleCwdBlur}
+                          onChange={e => setFormCwd(e.target.value)}
+                          className="w-full max-w-[390px] rounded border theme-border-subtle theme-bg-panel-muted theme-text-primary theme-font-mono text-l px-3 py-2 outline-none focus:border-accent-blue"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4 items-start">
+                      <div className="min-w-0">
+                        <label className="block text-l theme-font-mono theme-text-secondary leading-snug">Title</label>
+                        <p className="mt-1 text-m leading-relaxed theme-font-mono theme-text-faint">Display name in dashboard</p>
+                      </div>
+                      <div className="min-w-0 flex items-center justify-start">
+                        <input
+                          type="text"
+                          value={formTitle}
+                          placeholder="My Project"
+                          onChange={e => setFormTitle(e.target.value)}
+                          className="w-full max-w-[390px] rounded border theme-border-subtle theme-bg-panel-muted theme-text-primary theme-font-mono text-l px-3 py-2 outline-none focus:border-accent-blue"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4 items-start">
+                      <div className="min-w-0">
+                        <label className="block text-l theme-font-mono theme-text-secondary leading-snug">Context prompt</label>
+                        <p className="mt-1 text-m leading-relaxed theme-font-mono theme-text-faint">Instructions injected into agent system prompt</p>
+                      </div>
+                      <div className="min-w-0 flex items-center justify-start">
+                        <textarea
+                          value={formContextPrompt}
+                          placeholder="e.g. This project uses React + TypeScript..."
+                          onChange={e => setFormContextPrompt(e.target.value)}
+                          rows={3}
+                          className="w-full max-w-[390px] rounded border theme-border-subtle theme-bg-panel-muted theme-text-primary theme-font-mono text-l px-3 py-2 outline-none focus:border-accent-blue resize-y"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={handleSave} disabled={!formCwd.trim()} className="inline-flex gba-button text-s theme-font-display uppercase pixel-shadow px-3 py-2 transition-colors disabled:opacity-40">SAVE</button>
+                      <button onClick={cancelEdit} className="text-s theme-font-display uppercase pixel-shadow px-3 py-2 rounded theme-bg-panel-subtle theme-text-muted theme-bg-panel-hover">CANCEL</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={startCreate} className="inline-flex gba-button text-s theme-font-display uppercase pixel-shadow px-3 py-2 transition-colors">ADD PROJECT</button>
+                )}
+              </Section>
               <Section title="Open defaults">
                 <TextSetting
                   label="Open files command"
