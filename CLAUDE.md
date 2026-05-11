@@ -65,7 +65,7 @@ The owner wants pokegents to evolve into a full agent orchestration platform. Pr
 
 ## Key Conventions
 
-- `--dangerously-skip-permissions` is configurable per-profile (`skip_permissions` field) and globally in `~/.pokegents/config.json`
+- `--dangerously-skip-permissions` is configurable per-role and per-profile (`skip_permissions` field) and globally in `~/.pokegents/config.json`. In composed mode (`role@project`), the role's `skip_permissions` overrides the global default.
 - `POKEGENTS_PROFILE_NAME` env var is set on launch so hooks/statusline can read the active profile
 - `POKEGENTS_ROOT` and `POKEGENTS_DATA` env vars are passed through to claude so hooks can reference both repo code and user data
 - iTerm2 restore profile is configurable in `~/.pokegents/config.json` (`iterm2_restore_profile`)
